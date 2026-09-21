@@ -32,12 +32,15 @@ async function main() {
   const { ethers } = await network.getOrCreate();
   const [deployer] = await ethers.getSigners();
 
-  const oracleUpdaterAddress = process.env.ORACLE_UPDATER_ADDRESS ?? deployer.address;
-  const stalenessBound = BigInt(process.env.ORACLE_STALENESS_SECONDS ?? 900);
-  const mandateToken = process.env.MANDATE_TOKEN_ADDRESS ?? DEFAULT_MANDATE_TOKEN;
-  const maxNotionalPerTrade = ethers.parseUnits(process.env.MANDATE_MAX_NOTIONAL ?? "50", 18);
-  const maxTradesPerDay = BigInt(process.env.MANDATE_MAX_TRADES_PER_DAY ?? 10);
-  const mandateDurationDays = Number(process.env.MANDATE_DURATION_DAYS ?? 30);
+  // `||`, not `??`, throughout: an empty-but-present .env line sets these to
+  // "", not undefined, which `??` would let straight through unfixed - see
+  // hardhat.config.ts's BSC_RPC_URL comment for where this was first caught.
+  const oracleUpdaterAddress = process.env.ORACLE_UPDATER_ADDRESS || deployer.address;
+  const stalenessBound = BigInt(process.env.ORACLE_STALENESS_SECONDS || 900);
+  const mandateToken = process.env.MANDATE_TOKEN_ADDRESS || DEFAULT_MANDATE_TOKEN;
+  const maxNotionalPerTrade = ethers.parseUnits(process.env.MANDATE_MAX_NOTIONAL || "50", 18);
+  const maxTradesPerDay = BigInt(process.env.MANDATE_MAX_TRADES_PER_DAY || 10);
+  const mandateDurationDays = Number(process.env.MANDATE_DURATION_DAYS || 30);
 
   console.log(`Deploying Covenant as ${deployer.address}...`);
   console.log(`  quoteToken (USDT):        ${USDT}`);

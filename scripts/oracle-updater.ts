@@ -29,8 +29,10 @@ async function main() {
   if (!covenantAddress) {
     throw new Error("Set COVENANT_ADDRESS to the deployed Covenant contract's address.");
   }
-  const tokenAddress = process.env.ORACLE_TOKEN_ADDRESS ?? DEFAULT_TOKEN_ADDRESS;
-  const binanceChainId = Number(process.env.ORACLE_BINANCE_CHAIN_ID ?? DEFAULT_BINANCE_CHAIN_ID);
+  // `||`, not `??`: a .env line left blank (as .env.example ships these)
+  // sets the var to "", not undefined, which `??` would not catch.
+  const tokenAddress = process.env.ORACLE_TOKEN_ADDRESS || DEFAULT_TOKEN_ADDRESS;
+  const binanceChainId = Number(process.env.ORACLE_BINANCE_CHAIN_ID || DEFAULT_BINANCE_CHAIN_ID);
 
   const { ethers } = await network.getOrCreate();
   const [signer] = await ethers.getSigners();
