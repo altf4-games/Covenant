@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Covenant — status</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  :root {
+    --bg: #0b0d10;
+    --panel: #14171c;
+    --border: #262b33;
+    --text: #e6e9ee;
+    --muted: #8b93a1;
+    --allow: #3ecf8e;
+    --deny: #e5484d;
+    --accent: #6ea8fe;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    padding: 24px 16px 64px;
+  }
+  main { max-width: 920px; margin: 0 auto; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 24px; font-size: 12px; }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    margin-bottom: 16px;
+  }
+  .panel h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 12px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+  input {
+    background: #0e1013;
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 6px;
+    padding: 8px 10px;
+    font: inherit;
+    flex: 1;
+    min-width: 220px;
+  }
+  button {
+    background: var(--accent);
+    color: #0b0d10;
+    border: none;
+    border-radius: 6px;
+    padding: 8px 16px;
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button:disabled { opacity: .5; cursor: default; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }
+  .stat .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+  .stat .value { font-size: 18px; margin-top: 2px; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 500; }
+  .badge { padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+  .badge.allow { background: rgba(62,207,142,.15); color: var(--allow); }
+  .badge.deny { background: rgba(229,72,77,.15); color: var(--deny); }
+  .addr { color: var(--accent); }
+  .err { color: var(--deny); font-size: 12px; margin-top: 8px; }
+  .empty { color: var(--muted); font-style: italic; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Covenant — mandate status</h1>
+  <p class="sub">Read-only view, straight off chain. No backend - every value here is an eth_call or an event log read live from the RPC endpoint below.</p>
+
+  <div class="panel">
+    <h2>Connection</h2>
+    <div class="row">
+      <input id="rpc" placeholder="RPC URL (e.g. http://127.0.0.1:8545 or https://bsc-dataseed.binance.org)" />
+      <input id="contract" placeholder="Covenant contract address (0x...)" />
+    </div>
+    <div class="row">
+      <input id="fromBlock" placeholder="fromBlock (optional - e.g. Covenant's deployment block; default is the last 2000 blocks)" />
+      <button id="connect">Load</button>
+    </div>
+    <div id="error" class="err"></div>
+  </div>
+
+  <div class="panel">
+    <h2>Mandate</h2>
+    <div id="mandate" class="grid empty">Not loaded yet.</div>
+  </div>
+
+  <div class="panel">
+    <h2>Attestations (most recent first)</h2>
+    <div id="attestations" class="empty">Not loaded yet.</div>
+  </div>
+</main>
+
+<script type="module">
+import { ethers } from "https://cdn.jsdelivr.net/npm/ethers@6/+esm";
+
+const ABI = [
+  "function mandate() view returns (bool active, uint256 maxNotionalPerTrade, uint256 maxTradesPerDay, uint256 expiry)",
+  "function tradesUsedToday() view returns (uint256)",
+  "function stalenessBound() view returns (uint256)",
+  "event Attestation(address indexed caller, address indexed tokenOut, uint256 amountIn, uint256 amountOut, bool allowed, uint8 reason)",
+];
+
+const DENIAL_REASONS = [
+  "None", "MandateInactive", "MandateExpired", "TokenNotAllowed",
+  "NotionalExceeded", "DailyLimitExceeded", "OracleStale", "OracleHalted",
+];
+
+const MAX_ATTESTATIONS = 50;
+
+const $ = (id) => document.getElementById(id);
+
+function readUrlParams() {
+  const params = new URLSearchParams(location.search);
+  return {
+    rpc: params.get("rpc") ?? "",
+    contract: params.get("contract") ?? "",
+    fromBlock: params.get("fromBlock") ?? "",
+  };
+}
+
+function setError(message) {
+  $("error").textContent = message ?? "";
+}
+
+function fmtAddr(addr) {
+  return addr.slice(0, 6) + "…" + addr.slice(-4);
+}
+
+function fmtAmount(wei) {
+  // Display-only, assumes 18 decimals (true for USDT and every tokenized
+  // stock this project touches - see docs/research/verified-facts.md).
+  return Number(ethers.formatUnits(wei, 18)).toLocaleString(undefined, { maximumFractionDigits: 6 });
+}
+
+function fmtTime(unixSeconds) {
+  if (unixSeconds === 0n) return "never";
+  return new Date(Number(unixSeconds) * 1000).toISOString().replace("T", " ").slice(0, 19) + " UTC";
+}
+
+async function load() {
+  const rpcUrl = $("rpc").value.trim();
+  const contractAddress = $("contract").value.trim();
+  setError("");
+
+  if (!rpcUrl || !contractAddress) {
+    setError("Both RPC URL and contract address are required.");
+    return;
+  }
+
+  $("connect").disabled = true;
+  try {
+    const provider = new ethers.JsonRpcProvider(rpcUrl);
+    const covenant = new ethers.Contract(contractAddress, ABI, provider);
+
+    const [mandate, tradesUsedToday, stalenessBound, latestBlock] = await Promise.all([
+      covenant.mandate(),
+      covenant.tradesUsedToday(),
+      covenant.stalenessBound(),
+      provider.getBlockNumber(),
+    ]);
+
+    renderMandate(mandate, tradesUsedToday, stalenessBound);
+
+    // Tested live: against a *forked* BSC RPC (e.g. `hardhat node --fork`),
+    // eth_getLogs can hang indefinitely with no error at all, even for a
+    // 10-block range - traced to Hardhat's EDR fork provider not
+    // propagating the upstream RPC's own rate-limit response back to the
+    // caller, it just never returns. See friction-log.md B16 for the root
+    // cause (confirmed with a bare curl, bypassing this page and ethers
+    // entirely). Against a real, non-forked RPC this same rate limit still
+    // applies but comes back as a fast, clean error the catch block below
+    // handles normally - the indefinite hang is a forking-and-testing-only
+    // problem. The small default window here is still worth keeping as a
+    // sane default either way; pass an explicit `fromBlock` (e.g.
+    // Covenant's real deployment block) to see full history.
+    const explicitFromBlock = $("fromBlock").value.trim();
+    const DEFAULT_LOOKBACK_BLOCKS = 500;
+    const fromBlock = explicitFromBlock ? Number(explicitFromBlock) : Math.max(0, latestBlock - DEFAULT_LOOKBACK_BLOCKS);
+    const events = await covenant.queryFilter(covenant.filters.Attestation(), fromBlock, "latest");
+    renderAttestations(events.slice(-MAX_ATTESTATIONS).reverse());
+  } catch (err) {
+    console.error(err);
+    setError(err?.message ?? String(err));
+  } finally {
+    $("connect").disabled = false;
+  }
+}
+
+function renderMandate(mandate, tradesUsedToday, stalenessBound) {
+  const el = $("mandate");
+  el.classList.remove("empty");
+  const [active, maxNotionalPerTrade, maxTradesPerDay, expiry] = mandate;
+  el.innerHTML = `
+    <div class="stat"><div class="label">Active</div><div class="value">${active ? "yes" : "no"}</div></div>
+    <div class="stat"><div class="label">Max notional / trade</div><div class="value">${fmtAmount(maxNotionalPerTrade)}</div></div>
+    <div class="stat"><div class="label">Trades today</div><div class="value">${tradesUsedToday} / ${maxTradesPerDay}</div></div>
+    <div class="stat"><div class="label">Expires</div><div class="value">${fmtTime(expiry)}</div></div>
+    <div class="stat"><div class="label">Oracle staleness bound</div><div class="value">${stalenessBound}s</div></div>
+  `;
+}
+
+function renderAttestations(events) {
+  const el = $("attestations");
+  if (events.length === 0) {
+    el.classList.add("empty");
+    el.textContent = "No Attestation events found in the scanned block range.";
+    return;
+  }
+  el.classList.remove("empty");
+
+  const rows = events.map((e) => {
+    const { caller, tokenOut, amountIn, amountOut, allowed, reason } = e.args;
+    const reasonLabel = DENIAL_REASONS[Number(reason)] ?? `unknown(${reason})`;
+    return `
+      <tr>
+        <td>${e.blockNumber}</td>
+        <td class="addr" title="${caller}">${fmtAddr(caller)}</td>
+        <td class="addr" title="${tokenOut}">${fmtAddr(tokenOut)}</td>
+        <td>${fmtAmount(amountIn)}</td>
+        <td>${allowed ? fmtAmount(amountOut) : "-"}</td>
+        <td><span class="badge ${allowed ? "allow" : "deny"}">${allowed ? "ALLOW" : "DENY"}</span></td>
+        <td>${reasonLabel}</td>
+        <td><a href="#" onclick="return false;" title="${e.transactionHash}">${fmtAddr(e.transactionHash)}</a></td>
+      </tr>`;
+  }).join("");
+
+  el.innerHTML = `
+    <table>
+      <thead>
+        <tr><th>Block</th><th>Caller</th><th>Token</th><th>Amount in</th><th>Amount out</th><th>Result</th><th>Reason</th><th>Tx</th></tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
+$("connect").addEventListener("click", load);
+
+const params = readUrlParams();
+if (params.rpc) $("rpc").value = params.rpc;
+if (params.contract) $("contract").value = params.contract;
+if (params.fromBlock) $("fromBlock").value = params.fromBlock;
+if (params.rpc && params.contract) load();
+</script>
+</body>
+</html>

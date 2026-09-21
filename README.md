@@ -12,7 +12,12 @@ A few things worth knowing before reading the code:
 
 - **Denials don't revert.** A reverted transaction discards every state change, including events, so a denial that reverted would leave no on-chain trace. Instead, `guardedSwap` checks the mandate and oracle first; if the trade is denied, it emits `Attestation(..., allowed: false, reason: ...)` and returns without touching any balance. The transaction still mines and costs gas only.
 - **Non-custodial.** Covenant never holds trading funds between calls. The caller approves the quote token beforehand; a call that passes the guard pulls exactly `amountIn`, swaps it, and has PancakeSwap deliver the output straight to the caller.
-- **Provider pinning, not ticker resolution.** The allowlist is exact addresses, set by the owner. There's no on-chain ticker-to-address lookup, because that's exactly where the two real problems in this space show up: a ticker existing under multiple providers (real NVDAB vs. Ondo's NVDAon), and outright impersonator contracts.
+- **Provider pinning, not ticker resolution.** The allowlist is exact addresses, set by the owner. There's no on-chain ticker-to-address lookup, because that's exactly where the two real problems in this space show up: a ticker existing under multiple providers (real NVDAB vs. Ondo's NVDAon), and outright impersonator contracts. Ticker resolution happens off chain, in the skill (below) - and refuses to guess rather than silently picking one.
+
+Two more pieces sit around the contract:
+
+- [`skills/covenant-mandate/`](skills/covenant-mandate/) - a Binance Wallet Skill (zero-dep `scripts/cli.mjs`, Node ≥22, matching Binance's own shipped-skill convention) that resolves tickers to exact addresses, reads Covenant's real on-chain decision for a proposed trade before spending a transaction on it, and drives `baw contract-call preview/execute` against Covenant once a trade is confirmed allowed. See its `SKILL.md` for why the guard's non-reverting denial design makes this skill's own `check` command necessary, not decorative.
+- [`status-page/index.html`](status-page/index.html) - a single static file, no backend, no build step. Reads mandate state and `Attestation` events straight from any RPC + contract address.
 
 ## Running the tests
 
@@ -21,12 +26,22 @@ npm install
 npx hardhat test
 ```
 
-Two suites:
+Four suites, 35 tests total:
 
 - `test/Covenant.unit.ts` - fast, runs against an in-memory chain with a minimal mock ERC20 and mock router, so Covenant's own bookkeeping (daily counters, notional checks, the reentrancy guard) can be tested without a network call.
 - `test/Covenant.fork.ts` - runs against a real fork of BSC mainnet: real USDT, real NVDAB, the real PancakeSwap V3 SwapRouter, funded by impersonating a real USDT holder. This is what actually proves the mock harness's assumptions hold against the real integration.
+- `test/oracle-updater.live.ts` - calls Binance's real public RWA status endpoint over the network (not mocked), writes the real result on chain, and reads it back.
+- `test/skill-cli.live.ts` - spawns a real `hardhat node --fork`, deploys a real Covenant to it, and drives the Wallet Skill's own CLI commands against that real JSON-RPC server, the same way it's actually invoked in production.
 
-The fork tests are slower than a typical Hardhat suite, and that's expected rather than a flake - see "Tests, and what they caught" below.
+The fork and live suites are slower than a typical Hardhat suite, and that's expected rather than a flake - see "Tests, and what they caught" below.
+
+## Running the status page
+
+```bash
+python3 -m http.server 4173 --directory status-page
+```
+
+Open `http://localhost:4173`, and point it at any RPC URL and a deployed Covenant address (or pass them as `?rpc=...&contract=...&fromBlock=...` query params). `scripts/seed-status-page-demo.ts` deploys a Covenant to a local `hardhat node --fork` and generates a few real allow/deny events, if you want something to look at immediately.
 
 ## Tests, and what they caught
 
@@ -45,3 +60,13 @@ This is exactly the kind of bug a live integration test exists to catch and a mo
 Not a Covenant bug, but real enough to affect how the test suite is written, so it's documented here rather than only in the friction log. Hardhat 3's fork provider fetches remote state via `eth_getProof`, and BSC's state trie returns meaningfully larger proofs per call than Ethereum's. Against a free-tier public RPC, a naive one-fork-per-test structure (via `loadFixture`) pushed total run time past three minutes and past Mocha's default 40-second-per-test timeout.
 
 Fixed by forking and funding once per suite instead of once per test, and by reading transaction results off the receipt (`tx.wait()`) instead of a separate `queryFilter` call - the latter issues its own `eth_getLogs` request, which is an easy way to burn through a free-tier rate limit for data you already have in hand. Full details, including the exact RPC responses, are in [`docs/partner-feedback/friction-log.md`](docs/partner-feedback/friction-log.md) (B12-B14).
+
+### The ticker resolver silently picked the wrong chain, one axis deeper than the bug it was written to prevent
+
+`skills/covenant-mandate/scripts/cli.mjs`'s `resolve` command exists specifically to stop a bare ticker like `NVDA` from silently resolving to the wrong token - the documented trap being a ticker existing under multiple *providers* (real `DRAMon` vs. `DRAMB`). The first version guarded exactly that: given a ticker with no explicit provider, it refused if more than one provider matched.
+
+Testing it live against Binance's real token list found a second, real axis of the same problem that the design had missed entirely: a single provider can list the same ticker on multiple *chains* at once. Real `NVDAon` (Ondo) exists on Ethereum, BSC, and Solana simultaneously. Given `{ ticker: "NVDA", provider: "ondo" }` - provider fully specified, seemingly unambiguous - the first version returned `matches[0]`: the Ethereum-mainnet address, not BSC's, with no error and no indication anything was wrong. For a project scoped to BSC only, that's a silent wrong-chain resolution, not a crash - the worse kind of bug.
+
+Fix: `resolve` now requires both the provider axis and the chain axis to collapse to exactly one match before returning anything. The only implicit default left in is a BSC (`56`) default when that alone already narrows the result to one match - since this project only ever targets BSC, applying that default is safe; picking an arbitrary chain when multiple remain is not. Covered by a regression test in `test/skill-cli.live.ts` that asserts the specific case that broke (`provider: "ondo"`, no `chainId`, must return BSC's address).
+
+This is the same category of finding as the PancakeSwap `deadline` bug above: caught only because the test called the real endpoint with real data instead of asserting against values the test itself had assumed.
