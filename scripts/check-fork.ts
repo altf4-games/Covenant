@@ -8,7 +8,7 @@ const ERC20_ABI = [
 ];
 
 async function main() {
-  const { ethers } = await network.connect("bscFork");
+  const { ethers } = await network.getOrCreate("bscFork");
   const nvdab = new ethers.Contract(NVDAB_ADDRESS, ERC20_ABI, ethers.provider);
 
   const [name, symbol, decimals, blockNumber] = await Promise.all([
