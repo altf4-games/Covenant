@@ -26,12 +26,13 @@ npm install
 npx hardhat test
 ```
 
-Four suites, 35 tests total:
+Five suites, 38 tests total:
 
 - `test/Covenant.unit.ts` - fast, runs against an in-memory chain with a minimal mock ERC20 and mock router, so Covenant's own bookkeeping (daily counters, notional checks, the reentrancy guard) can be tested without a network call.
 - `test/Covenant.fork.ts` - runs against a real fork of BSC mainnet: real USDT, real NVDAB, the real PancakeSwap V3 SwapRouter, funded by impersonating a real USDT holder. This is what actually proves the mock harness's assumptions hold against the real integration.
 - `test/oracle-updater.live.ts` - calls Binance's real public RWA status endpoint over the network (not mocked), writes the real result on chain, and reads it back.
 - `test/skill-cli.live.ts` - spawns a real `hardhat node --fork`, deploys a real Covenant to it, and drives the Wallet Skill's own CLI commands against that real JSON-RPC server, the same way it's actually invoked in production.
+- `test/status-page.live.ts` - spawns another real `hardhat node --fork`, deploys a real Covenant, generates two real denied trades, and proves the status page's event-reading logic both returns real data fast on a safe block range and fails fast (not hangs) on one that crosses the fork boundary - see "Tests, and what they caught" for why this suite's test order specifically matters.
 
 The fork and live suites are slower than a typical Hardhat suite, and that's expected rather than a flake - see "Tests, and what they caught" below.
 
@@ -80,3 +81,14 @@ First: `hardhat.config.ts`'s `BSC_RPC_URL` and `oracle-updater.ts`'s `ORACLE_TOK
 Second, underneath the first one: none of this could even reproduce until `.env` was actually being loaded, because nothing loaded it - `hardhat.config.ts` never called anything like `dotenv/config`. Fixed with Node 22's built-in `process.loadEnvFile()`, no new dependency needed.
 
 Third, once `.env` was loading and the URL bug was fixed, `oracle-updater.ts` still failed - `could not decode result data (value="0x")` reading back `oracleStatus`. The real cause: `--network bscFork` is an `edr-simulated` network, which means every single `npx hardhat run ... --network bscFork` invocation spins up its own fresh, throwaway in-process chain and discards it when the script exits. `deploy.ts` and `oracle-updater.ts`, run as two separate commands, were each deploying to / reading from a *different, unrelated* ephemeral chain - the contract `deploy.ts` had just verified moments earlier was simply gone by the time `oracle-updater.ts` started. (The transaction to update it still "succeeded," because sending calldata to an address with no contract code doesn't revert - it's silently a no-op, which is what made this confusing rather than a clean failure.) Fixed by adding a `localhost` network in `hardhat.config.ts` - a real `http` network pointed at a persistent, separately-run `hardhat node --fork` process - so state actually persists between separate script invocations the way a real deployment needs to. `bscFork`'s per-run isolation is exactly right for the test suite; it's just the wrong tool for "deploy once, then run other scripts against that same deployment later."
+
+### The status page's real killer bug was only found by actually running it in a browser - so it got a real test, not just a writeup
+
+Every bug above was caught by an automated test. This one wasn't - it took manually driving `status-page/index.html` against a real fork in a real browser to discover that a query range crossing the fork's boundary makes Hardhat's `eth_getLogs` hang forever (`docs/partner-feedback/friction-log.md` B16). Documenting that in the friction log was necessary but not sufficient: the page itself still had no actual defense against it, and "found once by hand" isn't the same as "verified to stay fixed."
+
+Fixed properly, in two parts. First, the actual fix: `status-page/lib.mjs`'s `fetchAttestations` races the real `eth_getLogs` call against a client-side timeout, so a boundary-crossing query now fails in a few seconds with a message that names the real cause and points at the friction log entry, instead of a UI that spins forever with zero feedback. Second, `test/status-page.live.ts` - a live suite, spawning a real `hardhat node --fork`, deploying a real Covenant, generating two real denied trades - that exercises exactly this: a safe, locally-mined block range returns the real events in under 2 seconds, and a range crossing the fork boundary is asserted to reject within the timeout window rather than hang.
+
+Writing that test caught two more real things in the process, not staged, found live running it:
+
+- The "safe" boundary isn't `forkStartBlock` itself - a query starting *at* the fork's own pinned block still needs the same remote lookup as anything before it and hangs identically. Only blocks mined locally *after* the fork point are actually safe. The first version of the test used `fromBlock: forkStartBlock` and failed with the exact timeout error it was supposed to prove doesn't happen; fixed to `forkStartBlock + 1`.
+- The node-wide degradation from a single hung `eth_getLogs` call - suspected from the manual browser session, where even unrelated calls started failing after one boundary-crossing query - reproduced automatically too: with the boundary-crossing test running before the safe-range one, the safe-range test started failing on a call that had worked moments earlier against a fresh node. Fixed by reordering the suite so the boundary-crossing (node-degrading) test runs last, and documented directly in the suite's own comments so the ordering requirement doesn't look accidental to the next person reading it.

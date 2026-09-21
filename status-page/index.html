@@ -102,18 +102,7 @@
 
 <script type="module">
 import { ethers } from "https://cdn.jsdelivr.net/npm/ethers@6/+esm";
-
-const ABI = [
-  "function mandate() view returns (bool active, uint256 maxNotionalPerTrade, uint256 maxTradesPerDay, uint256 expiry)",
-  "function tradesUsedToday() view returns (uint256)",
-  "function stalenessBound() view returns (uint256)",
-  "event Attestation(address indexed caller, address indexed tokenOut, uint256 amountIn, uint256 amountOut, bool allowed, uint8 reason)",
-];
-
-const DENIAL_REASONS = [
-  "None", "MandateInactive", "MandateExpired", "TokenNotAllowed",
-  "NotionalExceeded", "DailyLimitExceeded", "OracleStale", "OracleHalted",
-];
+import { ABI, DENIAL_REASONS, fetchAttestations, resolveFromBlock } from "./lib.mjs";
 
 const MAX_ATTESTATIONS = 50;
 
@@ -171,22 +160,16 @@ async function load() {
 
     renderMandate(mandate, tradesUsedToday, stalenessBound);
 
-    // Tested live: against a *forked* BSC RPC (e.g. `hardhat node --fork`),
-    // eth_getLogs can hang indefinitely with no error at all, even for a
-    // 10-block range - traced to Hardhat's EDR fork provider not
-    // propagating the upstream RPC's own rate-limit response back to the
-    // caller, it just never returns. See friction-log.md B16 for the root
-    // cause (confirmed with a bare curl, bypassing this page and ethers
-    // entirely). Against a real, non-forked RPC this same rate limit still
-    // applies but comes back as a fast, clean error the catch block below
-    // handles normally - the indefinite hang is a forking-and-testing-only
-    // problem. The small default window here is still worth keeping as a
-    // sane default either way; pass an explicit `fromBlock` (e.g.
-    // Covenant's real deployment block) to see full history.
+    // fetchAttestations (status-page/lib.mjs) wraps this in a real timeout -
+    // see its own doc comment for why that's not optional. Against a forked
+    // RPC, a fromBlock before the fork's own starting block hangs
+    // Hardhat's eth_getLogs forever with no error at all (confirmed live,
+    // exact boundary pinned down - docs/partner-feedback/friction-log.md
+    // B16); this is what turns that into a bounded, explained failure
+    // instead of a UI that spins forever with zero feedback.
     const explicitFromBlock = $("fromBlock").value.trim();
-    const DEFAULT_LOOKBACK_BLOCKS = 500;
-    const fromBlock = explicitFromBlock ? Number(explicitFromBlock) : Math.max(0, latestBlock - DEFAULT_LOOKBACK_BLOCKS);
-    const events = await covenant.queryFilter(covenant.filters.Attestation(), fromBlock, "latest");
+    const fromBlock = resolveFromBlock(explicitFromBlock, latestBlock);
+    const events = await fetchAttestations(covenant, { fromBlock });
     renderAttestations(events.slice(-MAX_ATTESTATIONS).reverse());
   } catch (err) {
     console.error(err);
