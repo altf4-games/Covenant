@@ -1,0 +1,14 @@
+*.md
+!README.md
+
+# Node
+/node_modules
+
+# Hardhat
+/artifacts
+/cache
+/dist
+/coverage
+.env
+.env.*
+!.env.example
