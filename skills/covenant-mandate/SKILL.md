@@ -40,7 +40,7 @@ Covenant's `guardedSwap` **never reverts on a denial** - see the NatSpec in `Cov
 
 ## Flow
 
-1. **Resolve the ticker.** Run `resolve` with the ticker the user gave you (e.g. `NVDA`). If it refuses with an ambiguity error, **do not guess** - show the user every candidate it listed (provider and chain) and ask them to pick one, or ask which provider Covenant's mandate was actually set up for. See [references/resolve.md](references/resolve.md).
+1. **Resolve the ticker.** Run `resolve` with the ticker the user gave you (e.g. `NVDA`). If it refuses with an ambiguity error, **do not guess** - show the user every candidate it listed (provider and chain) and ask them to pick one, or ask which provider Covenant's mandate was actually set up for. See [references/resolve.md](references/resolve.md). If the user asks which provider is actually worth trading (not just which ones exist), run `survey` instead - see [references/survey.md](references/survey.md).
 2. **Check the mandate's real decision.** Run `check` with the resolved address and the proposed `amountIn`. Read `decision.allowed` and `decision.reason` directly - this is Covenant's actual answer, not an inference. See [references/check.md](references/check.md).
 3. **If denied: stop.** Tell the user the exact reason (`TokenNotAllowed`, `NotionalExceeded`, `DailyLimitExceeded`, `OracleStale`, `OracleHalted`, `MandateExpired`, `MandateInactive`). **Never suggest `market-order swap` or any other unguarded path as a workaround.** A denial is the mandate working as intended, not an error to route around.
 4. **If allowed: build the calldata.** Run `build-swap-calldata` with the same token, a PancakeSwap V3 fee tier (2500 = 0.25%, the tier Covenant's fork tests use for NVDAB/USDT - confirm the actual pool fee for other tokens), `amountIn`, and an `amountOutMinimum` you've sized against a real quote (e.g. `baw market-order quote` or PancakeSwap's QuoterV2) with a slippage buffer.
@@ -51,12 +51,13 @@ Full syntax for steps 5-6 is in `binance-agentic-wallet`'s own [references/exter
 
 ## Commands
 
-All three live in [scripts/cli.mjs](scripts/cli.mjs) - self-contained, zero dependencies, Node ≥ 22, same convention as Binance's own shipped skill scripts (see `query-token-info/scripts/cli.mjs` in `binance-skills-hub` for the pattern this follows).
+All four live in [scripts/cli.mjs](scripts/cli.mjs) - self-contained, zero dependencies, Node ≥ 22, same convention as Binance's own shipped skill scripts (see `query-token-info/scripts/cli.mjs` in `binance-skills-hub` for the pattern this follows).
 
 ```bash
 node scripts/cli.mjs resolve '{"ticker":"NVDA","provider":"bstock"}'
+node scripts/cli.mjs survey '{"ticker":"TSLA"}'
 node scripts/cli.mjs check '{"rpcUrl":"https://bsc-dataseed.binance.org","covenantAddress":"0x...","tokenAddress":"0x...","amountIn":"1000000000000000000"}'
 node scripts/cli.mjs build-swap-calldata '{"tokenOut":"0x...","fee":2500,"amountIn":"1000000000000000000","amountOutMinimum":"1"}'
 ```
 
-See [references/resolve.md](references/resolve.md) and [references/check.md](references/check.md) for full parameter and response detail.
+See [references/resolve.md](references/resolve.md), [references/survey.md](references/survey.md), and [references/check.md](references/check.md) for full parameter and response detail.

@@ -221,6 +221,23 @@ Every range that stays entirely within locally-mined, post-fork blocks resolves 
 
 **Practical workaround for anyone hitting this**: query only `fromBlock >= (the block the fork was taken at)`. For this project's own status page and scripts, that means passing the real deployment block as `fromBlock` rather than any "last N blocks" heuristic - the page's own placeholder text already recommends this, and this finding is why.
 
+### B17. `[STOCK][PITFALL]` `tokenInfo.volume24h` from the RWA Dynamic V2 endpoint is not trustworthy - confirmed by independent on-chain verification, not just a hunch
+Building the `survey` command (compares all three providers for one ticker), the same "Binance's own reported number doesn't match reality" pattern from B6 showed up again, worse and easier to prove this time.
+
+For real TSLAx (xStock, `0x8ad3c73f833d3f9a523ab01476625f269aeb7cf0`), the live endpoint reported `tokenInfo.volume24h: "13756649423.5843249"`. An independent check - real `eth_getLogs` against real BSC state, counting actual `Transfer` events on that exact contract over the prior ~2500 blocks (~2 hours) - found **zero**. Not low. Zero.
+
+```
+$ curl '.../rwa/dynamic/ai?chainId=56&contractAddress=0x8ad3c73f833d3f9a523ab01476625f269aeb7cf0'
+tokenInfo.volume24h: "13756649423.5843249"
+
+$ real eth_getLogs, same contract, ~2500 blocks back
+Transfer events found: 0
+```
+
+Two things make this more than "one weird number." First, the exact same `volume24h` value (`13756649423.5843249`) was also returned for **TSLAon**, a completely different contract on a completely different provider - real, live, currently-trading, 31 real transfers found on chain in the same window. Two unrelated tokens do not organically share a 17-significant-digit number; something in Binance's pipeline is reusing or defaulting this field rather than computing it per-token. Second, this isn't a one-off - the same live session separately found `NVDAB` and `NVDAx` (different tickers, different providers) also sharing an identical `volume24h` value (`"20312925390"`) despite `NVDAB` showing 2177 real on-chain transfers in the same window against `NVDAx`'s 3.
+
+**Verdict:** `tokenInfo.volume24h` cannot be used on its own to judge whether a tokenized-stock listing is actually liquid - it doesn't move with real on-chain activity. `survey` (this project's own multi-provider comparison tool) reports it anyway, labeled `binanceReported`, next to an independently-verified `onChainVerified` transfer count, and makes tradability decisions off the latter only. **Redesign suggestion:** either fix `volume24h` to reflect real per-token activity, or document plainly that it's not a live per-token figure - right now it looks like real-time per-token data and isn't.
+
 ---
 
 ## C. Agentic Wallet / Wallet Skills

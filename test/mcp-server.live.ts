@@ -87,10 +87,20 @@ describe("Covenant MCP server (live, real subprocess speaking real MCP protocol)
     nodeProcess?.kill();
   });
 
-  it("lists exactly the four tools this server is supposed to expose", async function () {
+  it("lists exactly the five tools this server is supposed to expose", async function () {
     const { tools } = await mcpClient.listTools();
     const names = tools.map((t) => t.name).sort();
-    expect(names).to.deep.equal(["check_halt", "get_mandate_status", "preview_trade", "resolve_ticker"]);
+    expect(names).to.deep.equal(["check_halt", "get_mandate_status", "preview_trade", "resolve_ticker", "survey_providers"]);
+  });
+
+  describe("survey_providers", function () {
+    it("reports a real dead xStock as dead, cross-checked against real on-chain Transfer events", async function () {
+      const result = await mcpClient.callTool({ name: "survey_providers", arguments: { ticker: "TSLA" } });
+      const payload = firstTextResult(result);
+      const xstock = payload.providers.find((p: any) => p.provider === "xstock");
+      expect(xstock.status).to.equal("dead");
+      expect(xstock.onChainVerified.transferCount).to.equal(0);
+    });
   });
 
   describe("resolve_ticker", function () {

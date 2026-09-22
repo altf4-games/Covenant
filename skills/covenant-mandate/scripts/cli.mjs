@@ -4,6 +4,8 @@
 //
 // Commands:
 //   resolve              ticker -> exact contract address, refuses to guess across providers
+//   survey                ticker -> BSC listing + real tradability for all three providers at once,
+//                         including any provider that isn't listed on BSC or is listed but dead
 //   check                read Covenant's on-chain mandate/oracle/allowlist state for a token,
 //                         and get the guard's actual decision via previewDecision - all read-only
 //   build-swap-calldata  ABI-encode a guardedSwap call, ready for `baw contract-call preview --inputData`
@@ -88,6 +90,63 @@ async function ethCall(rpcUrl, to, calldata) {
   return json.result;
 }
 
+// ---- survey: real tradability, cross-checked against on-chain state ----
+// Free-tier BSC RPCs individually rate-limit or restrict eth_getLogs (see
+// docs/partner-feedback/friction-log.md B10) - tried in sequence, first one
+// to answer wins.
+const TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+const DEFAULT_LIQUIDITY_RPCS = ["https://bsc.publicnode.com", "https://bsc-dataseed1.defibit.io", "https://bsc-dataseed.binance.org"];
+
+async function jsonRpc(rpcUrl, method, params) {
+  const res = await fetch(rpcUrl, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", method, params, id: 1 }),
+  });
+  const json = await res.json();
+  if (json.error) throw new Error(json.error.message);
+  return json.result;
+}
+
+/**
+ * Counts real Transfer events for a token over a recent block window, tried
+ * across several RPCs until one answers. This exists because Binance's own
+ * `tokenInfo.volume24h` figure was found, live, to be flatly wrong for at
+ * least one xStock (TSLAx reported volume24h="12433648121" while zero real
+ * Transfer events occurred in the prior ~6.7 hours of real chain data) -
+ * see friction-log.md. `survey` reports both numbers, labeled, rather than
+ * trusting Binance's reported figure alone for a tradability call.
+ */
+async function countRecentTransfers(tokenAddress, { blocksBack = 3000, rpcUrls = DEFAULT_LIQUIDITY_RPCS } = {}) {
+  for (const rpcUrl of rpcUrls) {
+    try {
+      const tip = BigInt(await jsonRpc(rpcUrl, "eth_blockNumber", []));
+      const window = BigInt(blocksBack);
+      // Math.max(0, someBigInt) throws - Math.max coerces every argument
+      // with ToNumber, which rejects BigInt outright. Caught live: every
+      // attempt was failing silently inside this function's own try/catch,
+      // making every RPC look "rate-limited" when the real cause was here.
+      const fromBigInt = tip > window ? tip - window : 0n;
+      const fromBlock = "0x" + fromBigInt.toString(16);
+      const logs = await jsonRpc(rpcUrl, "eth_getLogs", [{ fromBlock, toBlock: "latest", address: tokenAddress, topics: [TRANSFER_TOPIC] }]);
+      return { transferCount: logs.length, blocksBack, rpcUrl };
+    } catch {
+      // try the next RPC
+    }
+  }
+  return { transferCount: null, blocksBack, rpcUrl: null, note: "all liquidity-check RPCs failed or rate-limited" };
+}
+
+async function fetchDynamic(chainId, contractAddress) {
+  const url = "https://www.binance.com/bapi/defi/v2/public/wallet-direct/buw/wallet/market/token/rwa/dynamic/ai";
+  try {
+    const resp = await call({ url: `${url}?chainId=${chainId}&contractAddress=${contractAddress}` });
+    return resp.data ?? null;
+  } catch {
+    return null;
+  }
+}
+
 // ---- commands ----
 const COMMANDS = {
   /**
@@ -170,6 +229,79 @@ const COMMANDS = {
     return { resolved: matches[0] };
   },
 
+  /**
+   * { ticker } -> BSC status for all three providers (ondo, xstock, bstock)
+   * at once, each explicitly labeled "live", "dead", or "not-listed-on-bsc".
+   *
+   * `resolve` deliberately refuses to guess when a ticker is ambiguous -
+   * this command is the other half: instead of picking one, report on
+   * every provider so the caller (a human or an agent) can see the full
+   * picture and make an informed choice, including providers that exist
+   * but aren't actually tradeable. xStocks in particular is real, deployed,
+   * and essentially dead on BSC (verified-facts.md §3); this command proves
+   * that on demand rather than citing a stale research snapshot, and
+   * cross-checks Binance's own reported volume against real on-chain
+   * Transfer events rather than trusting either source alone - see
+   * countRecentTransfers's doc comment for why that check exists at all.
+   */
+  async survey({ ticker }) {
+    if (!ticker) throw Object.assign(new Error("survey requires { ticker }"), { exitCode: 1 });
+
+    const listUrl = "https://www.binance.com/bapi/defi/v1/public/wallet-direct/buw/wallet/market/token/rwa/stock/detail/list/ai";
+    const listResp = await call({ url: listUrl });
+    const tokens = listResp.data ?? [];
+    const wantedTicker = String(ticker).toUpperCase();
+    const matches = tokens.filter((t) => String(t.ticker).toUpperCase() === wantedTicker);
+
+    const listings = Object.entries(PROVIDER_NAME).map(([type, providerName]) => ({
+      providerName,
+      listing: matches.find((t) => t.type === Number(type) && t.chainId === "56"),
+    }));
+
+    // fetchDynamic (a plain GET to Binance's own API) is fine to run
+    // concurrently, but the on-chain eth_getLogs checks are run one at a
+    // time, deliberately, not via Promise.all. Firing three concurrent
+    // eth_getLogs calls at the same free-tier RPC - one per provider - was
+    // caught live tripping that RPC's per-IP burst limit even though a
+    // single isolated call a moment earlier worked fine and returned real
+    // data. Sequential is slower but actually reliable; see friction-log.md.
+    const dynamics = await Promise.all(listings.map(({ listing }) => (listing ? fetchDynamic(56, listing.contractAddress) : Promise.resolve(null))));
+
+    const providers = [];
+    for (let i = 0; i < listings.length; i++) {
+      const { providerName, listing } = listings[i];
+      if (!listing) {
+        providers.push({ provider: providerName, status: "not-listed-on-bsc" });
+        continue;
+      }
+
+      const dynamic = dynamics[i];
+      const transferCheck = await countRecentTransfers(listing.contractAddress);
+      const onChainActivity = transferCheck.transferCount;
+      // "dead" requires the independent on-chain check to actually have
+      // run and come back zero - if every RPC failed, that's "unknown",
+      // not "dead". Otherwise trust the on-chain count over Binance's own
+      // reported figure, per the real discrepancy this command exists to
+      // catch (see countRecentTransfers).
+      let status;
+      if (onChainActivity === null) status = "unknown - on-chain check failed";
+      else if (onChainActivity === 0) status = "dead";
+      else status = "live";
+
+      providers.push({
+        provider: providerName,
+        status,
+        chainId: "56",
+        contractAddress: listing.contractAddress,
+        symbol: listing.symbol,
+        binanceReported: { price: dynamic?.tokenInfo?.price ?? null, volume24h: dynamic?.tokenInfo?.volume24h ?? null },
+        onChainVerified: transferCheck,
+      });
+    }
+
+    return { ticker: wantedTicker, providers };
+  },
+
   /** { rpcUrl, covenantAddress, tokenAddress, amountIn } -> full on-chain guard state + decision, read-only. */
   async check({ rpcUrl, covenantAddress, tokenAddress, amountIn }) {
     if (!rpcUrl || !covenantAddress || !tokenAddress || amountIn === undefined) {
@@ -215,16 +347,17 @@ const COMMANDS = {
 };
 
 // ---- exports (for unit testing; direct execution still works - see dispatch below) ----
-export { COMMANDS, call, ethCall, SELECTORS, DENIAL_REASONS, hex32, addr32 };
+export { COMMANDS, call, ethCall, SELECTORS, DENIAL_REASONS, hex32, addr32, countRecentTransfers, fetchDynamic };
 
 // ---- CLI dispatch (only runs when executed directly, not when imported) ----
 if (import.meta.url === `file://${process.argv[1]}`) {
   const [cmd, paramsStr] = process.argv.slice(2);
-  const commandKey = { resolve: "resolve", check: "check", "build-swap-calldata": "buildSwapCalldata" }[cmd];
+  const commandKey = { resolve: "resolve", survey: "survey", check: "check", "build-swap-calldata": "buildSwapCalldata" }[cmd];
 
   if (!cmd || cmd === "--help" || cmd === "-h") {
     console.log("Usage: node cli.mjs <command> '<json_params>'\n\nCommands:");
     console.log("  resolve              { ticker, provider? }");
+    console.log("  survey               { ticker }");
     console.log("  check                { rpcUrl, covenantAddress, tokenAddress, amountIn }");
     console.log("  build-swap-calldata  { tokenOut, fee, amountIn, amountOutMinimum }");
     process.exit(0);

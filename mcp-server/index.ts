@@ -53,6 +53,22 @@ server.registerTool(
 );
 
 server.registerTool(
+  "survey_providers",
+  {
+    title: "Compare a ticker's real tradability across all three providers at once",
+    description:
+      "Reports BSC status for a ticker under all three providers (ondo, xstock, bstock) at once: not-listed-on-bsc, dead (listed but no real on-chain Transfer activity found in a recent window), or live. Cross-checks Binance's own reported volume24h against an independent real eth_getLogs read rather than trusting it alone - see docs/partner-feedback/friction-log.md B17 for a confirmed case where Binance's reported figure was completely wrong (a token with a large reported volume24h and zero real on-chain transfers).",
+    inputSchema: {
+      ticker: z.string().describe("Stock ticker, e.g. \"TSLA\""),
+    },
+  },
+  async ({ ticker }) => {
+    const result = await COMMANDS.survey({ ticker });
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  },
+);
+
+server.registerTool(
   "get_mandate_status",
   {
     title: "Read a Covenant contract's current mandate",

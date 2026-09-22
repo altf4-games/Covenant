@@ -18,7 +18,9 @@ Two more pieces sit around the contract:
 
 - [`skills/covenant-mandate/`](skills/covenant-mandate/) - a Binance Wallet Skill (zero-dep `scripts/cli.mjs`, Node ≥22, matching Binance's own shipped-skill convention) that resolves tickers to exact addresses, reads Covenant's real on-chain decision for a proposed trade before spending a transaction on it, and drives `baw contract-call preview/execute` against Covenant once a trade is confirmed allowed. See its `SKILL.md` for why the guard's non-reverting denial design makes this skill's own `check` command necessary, not decorative.
 - [`status-page/index.html`](status-page/index.html) - a single static file, no backend, no build step. Reads mandate state and `Attestation` events straight from any RPC + contract address.
-- [`mcp-server/index.ts`](mcp-server/index.ts) - an MCP server exposing the skill's own reads (`resolve_ticker`, `get_mandate_status`, `check_halt`, `preview_trade`) as MCP tools, so any MCP-capable agent (not just one driving `baw` directly) can query the mandate and the guard's real decision. Thin wrapper, no new logic - see the file's own header comment.
+- [`mcp-server/index.ts`](mcp-server/index.ts) - an MCP server exposing the skill's own reads (`resolve_ticker`, `survey_providers`, `get_mandate_status`, `check_halt`, `preview_trade`) as MCP tools, so any MCP-capable agent (not just one driving `baw` directly) can query the mandate and the guard's real decision. Thin wrapper, no new logic - see the file's own header comment.
+
+The skill's `resolve` refuses to guess when a ticker is ambiguous; its sibling command, `survey`, is the other half - report on all three providers (ondo, xstock, bstock) for a ticker at once, each labeled `not-listed-on-bsc`, `dead`, or `live`. "Dead" isn't taken from Binance's own reported `volume24h` - that figure was found, live, to be unreliable (see "Tests, and what they caught" below) - it's independently verified against real `eth_getLogs` Transfer-event activity on chain.
 
 ## Running the MCP server
 
@@ -47,7 +49,7 @@ npm install
 npx hardhat test
 ```
 
-Six suites, 45 tests total:
+Six suites, 49 tests total:
 
 - `test/Covenant.unit.ts` - fast, runs against an in-memory chain with a minimal mock ERC20 and mock router, so Covenant's own bookkeeping (daily counters, notional checks, the reentrancy guard) can be tested without a network call.
 - `test/Covenant.fork.ts` - runs against a real fork of BSC mainnet: real USDT, real NVDAB, the real PancakeSwap V3 SwapRouter, funded by impersonating a real USDT holder. This is what actually proves the mock harness's assumptions hold against the real integration.
@@ -114,3 +116,11 @@ Writing that test caught two more real things in the process, not staged, found 
 
 - The "safe" boundary isn't `forkStartBlock` itself - a query starting *at* the fork's own pinned block still needs the same remote lookup as anything before it and hangs identically. Only blocks mined locally *after* the fork point are actually safe. The first version of the test used `fromBlock: forkStartBlock` and failed with the exact timeout error it was supposed to prove doesn't happen; fixed to `forkStartBlock + 1`.
 - The node-wide degradation from a single hung `eth_getLogs` call - suspected from the manual browser session, where even unrelated calls started failing after one boundary-crossing query - reproduced automatically too: with the boundary-crossing test running before the safe-range one, the safe-range test started failing on a call that had worked moments earlier against a fresh node. Fixed by reordering the suite so the boundary-crossing (node-degrading) test runs last, and documented directly in the suite's own comments so the ordering requirement doesn't look accidental to the next person reading it.
+
+### `Math.max(0, someBigInt)` throws, silently, inside a try/catch that made every RPC look broken
+
+Building `survey` (compares a ticker's real BSC tradability across all three providers - see `docs/partner-feedback/friction-log.md` B17 for what it found on Binance's side), the independent on-chain check kept reporting `"all liquidity-check RPCs failed or rate-limited"` for every single provider, on every ticker, including tokens already proven extremely liquid moments earlier by an isolated manual `curl`.
+
+The real cause had nothing to do with the RPCs. `countRecentTransfers`'s window-size math was `Math.max(0, BigInt(tip) - BigInt(blocksBack))` - and `Math.max` calls `ToNumber` on every argument, which throws `TypeError: Cannot convert a BigInt value to a number` for any BigInt input. That threw on the very first line of every attempt, was caught by the function's own `try { ... } catch { /* try the next RPC */ }` (there to handle real, expected RPC failures), and surfaced as a generic "all RPCs failed" message that pointed everywhere except the actual bug. `Math.max(0, 5n)` failing outright in the Node REPL is what actually found it, not the survey output itself.
+
+Fixed by comparing the two `BigInt`s directly (`tip > window ? tip - window : 0n`) instead of routing them through `Math.max`. Once fixed, the same three providers that had all reported "unknown" a moment before returned real, sharply different numbers on the same call - `NVDAB` (bStock): 2177 real Transfer events in the same ~3000-block window `NVDAx` (xStock) had only 3 in. That contrast is real data `survey` is built to surface; the bug had been silently hiding all of it behind one bad line of arithmetic.

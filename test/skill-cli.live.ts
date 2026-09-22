@@ -100,6 +100,47 @@ describe("covenant-mandate skill CLI (live, against a real spawned JSON-RPC node
     });
   });
 
+  describe("survey (real ticker data, real on-chain verification against Binance's own reported figures)", function () {
+    it("reports a real dead xStock as dead, cross-checked against real on-chain Transfer events", async function () {
+      // Real, reproducible finding, not staged: Binance's own API reports a
+      // large tokenInfo.volume24h for TSLAx even though real eth_getLogs
+      // against real BSC state finds zero Transfer events in the same
+      // window - see docs/partner-feedback/friction-log.md B17. survey
+      // trusts the on-chain count, not the reported figure, for `status`.
+      const result = await COMMANDS.survey({ ticker: "TSLA" });
+      const xstock = result.providers.find((p: any) => p.provider === "xstock");
+      expect(xstock.status).to.equal("dead");
+      expect(xstock.onChainVerified.transferCount).to.equal(0);
+      expect(xstock.contractAddress.toLowerCase()).to.equal("0x8ad3c73f833d3f9a523ab01476625f269aeb7cf0");
+    });
+
+    it("reports real liquid providers as live, with real, differentiated transfer counts", async function () {
+      const result = await COMMANDS.survey({ ticker: "NVDA" });
+      const bstock = result.providers.find((p: any) => p.provider === "bstock");
+      const xstock = result.providers.find((p: any) => p.provider === "xstock");
+      expect(bstock.status).to.equal("live");
+      expect(bstock.onChainVerified.transferCount).to.be.greaterThan(0);
+      // Real, not staged, from the same live run this test asserts on: bStock's
+      // NVDAB is dramatically more liquid than xStock's NVDAx in the exact same
+      // window - the whole point of surfacing the real count, not just a label.
+      expect(bstock.onChainVerified.transferCount).to.be.greaterThan(xstock.onChainVerified.transferCount);
+    });
+
+    it("reports GME's real split: bstock genuinely trades, ondo and xstock are both listed but dead", async function () {
+      // Verified live before writing this assertion, not assumed: all three
+      // providers list a real BSC contract for GME, but only bstock's has
+      // any real Transfer activity in the checked window.
+      const result = await COMMANDS.survey({ ticker: "GME" });
+      const byProvider = Object.fromEntries(result.providers.map((p: any) => [p.provider, p]));
+      expect(byProvider.bstock.status).to.equal("live");
+      expect(byProvider.bstock.onChainVerified.transferCount).to.be.greaterThan(0);
+      expect(byProvider.ondo.status).to.equal("dead");
+      expect(byProvider.ondo.onChainVerified.transferCount).to.equal(0);
+      expect(byProvider.xstock.status).to.equal("dead");
+      expect(byProvider.xstock.onChainVerified.transferCount).to.equal(0);
+    });
+  });
+
   describe("check (real read calls against a real deployed Covenant)", function () {
     it("reports the real allowed decision for real NVDAB within mandate limits", async function () {
       const result = await COMMANDS.check({
