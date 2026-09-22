@@ -41,6 +41,16 @@ On macOS, `cron` needs Full Disk Access (System Settings → Privacy & Security)
 
 **Gaps in the data are expected and real, not a bug.** Confirmed live: the very first scheduled fire (11:01) succeeded, but the next one (11:15) was silently skipped because the Mac itself was asleep at that moment (`pmset -g log` showed a wake event at 11:20:41 - cron can't fire while the whole machine is suspended). On a laptop, any stretch where the lid was closed or it idle-slept shows up as a missing entry rather than a steady 15-minute cadence. Left as-is deliberately rather than forcing `caffeinate`/`pmset disablesleep` - the gaps are themselves honest data about running unattended infrastructure on a laptop, not something to paper over.
 
+## Judge-runnable verification
+
+A judge doesn't have this project's Agentic Wallet, developer mode, or bStock jurisdiction clearance - they can't reproduce a live trade themselves. `scripts/judge.ts` doesn't ask them to: point it at a deployed Covenant and a list of tx hashes, and it independently re-fetches each transaction's real receipt from chain, finds its `Attestation` event, and decodes it - allow/deny and the exact typed reason - without trusting anything this project says about it.
+
+```bash
+COVENANT_ADDRESS=0x... npm run judge
+```
+
+Reads the tx hash list from `JUDGE_TX_HASHES` (comma-separated) or [`data/judge-tx-hashes.json`](data/judge-tx-hashes.json). That file is empty until Phase 3's real BSC mainnet transactions exist - pointing this at mainnet then is a config change (RPC URL, contract address, that file), not new development. Built and live-tested now, against this project's own fork transactions, so the mechanism is proven before it has anything real to point at.
+
 ## Running the MCP server
 
 ```bash
@@ -68,7 +78,7 @@ npm install
 npx hardhat test
 ```
 
-Seven suites, 51 tests total:
+Eight suites, 55 tests total:
 
 - `test/Covenant.unit.ts` - fast, runs against an in-memory chain with a minimal mock ERC20 and mock router, so Covenant's own bookkeeping (daily counters, notional checks, the reentrancy guard) can be tested without a network call.
 - `test/Covenant.fork.ts` - runs against a real fork of BSC mainnet: real USDT, real NVDAB, the real PancakeSwap V3 SwapRouter, funded by impersonating a real USDT holder. This is what actually proves the mock harness's assumptions hold against the real integration.
@@ -77,6 +87,7 @@ Seven suites, 51 tests total:
 - `test/status-page.live.ts` - spawns another real `hardhat node --fork`, deploys a real Covenant, generates two real denied trades, and proves the status page's event-reading logic both returns real data fast on a safe block range and fails fast (not hangs) on one that crosses the fork boundary - see "Tests, and what they caught" for why this suite's test order specifically matters.
 - `test/mcp-server.live.ts` - spawns the MCP server itself as a real subprocess and drives it with the real `@modelcontextprotocol/sdk` client over the real MCP protocol (stdio), against a real forked node and a real deployed Covenant. Nothing about the MCP layer is mocked.
 - `test/off-hours-logger.live.ts` - polls Binance's real live endpoints and writes real JSON lines to a real (temp) log file, confirming the logger that actually runs on cron works the way it's actually invoked.
+- `test/judge.live.ts` - generates real deny and allow transactions against a real fork, then proves `judge.ts` independently re-derives the correct verdict from each real receipt - including a real tx hash that was never mined, to prove it reports a real failure rather than a false pass.
 
 The fork and live suites are slower than a typical Hardhat suite, and that's expected rather than a flake - see "Tests, and what they caught" below.
 
@@ -144,3 +155,7 @@ Building `survey` (compares a ticker's real BSC tradability across all three pro
 The real cause had nothing to do with the RPCs. `countRecentTransfers`'s window-size math was `Math.max(0, BigInt(tip) - BigInt(blocksBack))` - and `Math.max` calls `ToNumber` on every argument, which throws `TypeError: Cannot convert a BigInt value to a number` for any BigInt input. That threw on the very first line of every attempt, was caught by the function's own `try { ... } catch { /* try the next RPC */ }` (there to handle real, expected RPC failures), and surfaced as a generic "all RPCs failed" message that pointed everywhere except the actual bug. `Math.max(0, 5n)` failing outright in the Node REPL is what actually found it, not the survey output itself.
 
 Fixed by comparing the two `BigInt`s directly (`tip > window ? tip - window : 0n`) instead of routing them through `Math.max`. Once fixed, the same three providers that had all reported "unknown" a moment before returned real, sharply different numbers on the same call - `NVDAB` (bStock): 2177 real Transfer events in the same ~3000-block window `NVDAx` (xStock) had only 3 in. That contrast is real data `survey` is built to surface; the bug had been silently hiding all of it behind one bad line of arithmetic.
+
+### `judge.ts` assumed helper functions were exported that never were
+
+Writing `scripts/judge.ts`, importing `asBool`/`asUint` from `skills/covenant-mandate/scripts/cli.mjs` (used elsewhere in that file to decode `eth_call` results) failed immediately with `SyntaxError: The requested module does not provide an export named 'asBool'`. They're real functions in that file - just never added to its `export { ... }` line, because nothing outside the file had needed them directly before. Fixed by duplicating the two one-liners locally in `judge.ts` rather than widening `cli.mjs`'s public export surface for something this small - a static import error, not a runtime one, so it was caught immediately on the first run rather than silently.

@@ -9,7 +9,8 @@
   },
   "scripts": {
     "test": "hardhat test",
-    "mcp-server": "tsx mcp-server/index.ts"
+    "mcp-server": "tsx mcp-server/index.ts",
+    "judge": "tsx scripts/judge.ts"
   },
   "keywords": [],
   "author": "",
