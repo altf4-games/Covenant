@@ -126,18 +126,28 @@ describe("covenant-mandate skill CLI (live, against a real spawned JSON-RPC node
       expect(bstock.onChainVerified.transferCount).to.be.greaterThan(xstock.onChainVerified.transferCount);
     });
 
-    it("reports GME's real split: bstock genuinely trades, ondo and xstock are both listed but dead", async function () {
-      // Verified live before writing this assertion, not assumed: all three
-      // providers list a real BSC contract for GME, but only bstock's has
-      // any real Transfer activity in the checked window.
+    it("reports GME's real split: bstock is the dominant venue, xstock stays dead", async function () {
+      // Originally written with ondo also asserted dead - re-verified live
+      // on 2026-09-22 and found ondo's GMEon had picked up real Transfer
+      // activity (3 events / 3000 blocks) that didn't exist when this test
+      // was first written. That's a genuine on-chain state change, not a
+      // flaky test: liveness is a moving target, not something safe to
+      // pin to one point-in-time snapshot. Keep the assertion on what's
+      // actually stable - bstock dominates, xstock stays dead - and check
+      // ondo's own reported fields are internally consistent instead of
+      // hardcoding a liveness label that can flip under us.
       const result = await COMMANDS.survey({ ticker: "GME" });
       const byProvider = Object.fromEntries(result.providers.map((p: any) => [p.provider, p]));
       expect(byProvider.bstock.status).to.equal("live");
       expect(byProvider.bstock.onChainVerified.transferCount).to.be.greaterThan(0);
-      expect(byProvider.ondo.status).to.equal("dead");
-      expect(byProvider.ondo.onChainVerified.transferCount).to.equal(0);
       expect(byProvider.xstock.status).to.equal("dead");
       expect(byProvider.xstock.onChainVerified.transferCount).to.equal(0);
+      expect(byProvider.ondo.status).to.equal(
+        byProvider.ondo.onChainVerified.transferCount > 0 ? "live" : "dead",
+      );
+      expect(byProvider.bstock.onChainVerified.transferCount).to.be.greaterThan(
+        byProvider.ondo.onChainVerified.transferCount,
+      );
     });
   });
 
