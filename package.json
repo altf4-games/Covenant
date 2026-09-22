@@ -8,7 +8,8 @@
     "doc": "docs"
   },
   "scripts": {
-    "test": "hardhat test"
+    "test": "hardhat test",
+    "mcp-server": "tsx mcp-server/index.ts"
   },
   "keywords": [],
   "author": "",
@@ -25,5 +26,9 @@
     "hardhat": "^3.17.0",
     "mocha": "^11.0.0",
     "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "zod": "^3.25.76"
   }
 }
