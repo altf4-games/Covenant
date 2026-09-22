@@ -22,6 +22,23 @@ Two more pieces sit around the contract:
 
 The skill's `resolve` refuses to guess when a ticker is ambiguous; its sibling command, `survey`, is the other half - report on all three providers (ondo, xstock, bstock) for a ticker at once, each labeled `not-listed-on-bsc`, `dead`, or `live`. "Dead" isn't taken from Binance's own reported `volume24h` - that figure was found, live, to be unreliable (see "Tests, and what they caught" below) - it's independently verified against real `eth_getLogs` Transfer-event activity on chain.
 
+## Off-hours logging
+
+`scripts/off-hours-logger.ts` polls real NVDA across all three providers (halt/market status, on-chain price, and reference price where one exists) and appends one real JSON line to [`data/off-hours-log.jsonl`](data/off-hours-log.jsonl). Run it once:
+
+```bash
+npx tsx scripts/off-hours-logger.ts
+```
+
+Or continuously, via cron (self-disabling - see `scripts/off-hours-cron.sh`'s own comments; it removes its own crontab entry once past the submission deadline, no manual cleanup needed):
+
+```bash
+crontab -e
+# */15 * * * * /path/to/covenant/scripts/off-hours-cron.sh >> /path/to/covenant/data/off-hours-cron.log 2>&1
+```
+
+On macOS, `cron` needs Full Disk Access (System Settings → Privacy & Security) to reliably access files outside a few default locations - if the log file isn't growing, check that first before assuming the script is broken.
+
 ## Running the MCP server
 
 ```bash
@@ -49,7 +66,7 @@ npm install
 npx hardhat test
 ```
 
-Six suites, 49 tests total:
+Seven suites, 51 tests total:
 
 - `test/Covenant.unit.ts` - fast, runs against an in-memory chain with a minimal mock ERC20 and mock router, so Covenant's own bookkeeping (daily counters, notional checks, the reentrancy guard) can be tested without a network call.
 - `test/Covenant.fork.ts` - runs against a real fork of BSC mainnet: real USDT, real NVDAB, the real PancakeSwap V3 SwapRouter, funded by impersonating a real USDT holder. This is what actually proves the mock harness's assumptions hold against the real integration.
@@ -57,6 +74,7 @@ Six suites, 49 tests total:
 - `test/skill-cli.live.ts` - spawns a real `hardhat node --fork`, deploys a real Covenant to it, and drives the Wallet Skill's own CLI commands against that real JSON-RPC server, the same way it's actually invoked in production.
 - `test/status-page.live.ts` - spawns another real `hardhat node --fork`, deploys a real Covenant, generates two real denied trades, and proves the status page's event-reading logic both returns real data fast on a safe block range and fails fast (not hangs) on one that crosses the fork boundary - see "Tests, and what they caught" for why this suite's test order specifically matters.
 - `test/mcp-server.live.ts` - spawns the MCP server itself as a real subprocess and drives it with the real `@modelcontextprotocol/sdk` client over the real MCP protocol (stdio), against a real forked node and a real deployed Covenant. Nothing about the MCP layer is mocked.
+- `test/off-hours-logger.live.ts` - polls Binance's real live endpoints and writes real JSON lines to a real (temp) log file, confirming the logger that actually runs on cron works the way it's actually invoked.
 
 The fork and live suites are slower than a typical Hardhat suite, and that's expected rather than a flake - see "Tests, and what they caught" below.
 

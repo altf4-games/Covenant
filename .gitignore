@@ -18,3 +18,9 @@
 
 # Claude Code session-local state, not project config
 /.claude/scheduled_tasks.lock
+
+# Off-hours logger: keep the real accumulated data/off-hours-log.jsonl
+# tracked (it's the actual evidence), but not the cron wrapper's own noisy
+# stdout log or a test run's throwaway file.
+/data/off-hours-cron.log
+/data/off-hours-log.test.jsonl
