@@ -124,4 +124,23 @@ describe("judge.ts (live, real transactions, independent re-derivation from real
     expect(results).to.have.length(2);
     expect(allVerified).to.equal(true);
   });
+
+  it("falls back past a real dead RPC in the list instead of failing the whole run", async function () {
+    // A judge running this unattended has no reason to trust the first RPC
+    // they (or we) picked is up - see friction-log.md B12-B14 for the real
+    // flakiness that motivated this. A genuinely unreachable URL (port 1
+    // is never a real RPC) listed before the real, working one must not
+    // sink the call - it should just be skipped.
+    const deadRpc = "http://127.0.0.1:1";
+    const rpcTargets = [deadRpc, RPC_URL];
+
+    const result = await verifyAttestationTx(rpcTargets, covenantAddress, denyTxHash);
+    expect(result.ok).to.equal(true);
+    expect(result.allowed).to.equal(false);
+    expect(result.reason).to.equal("TokenNotAllowed");
+
+    const { mandate, allVerified } = await runJudge(rpcTargets, covenantAddress, [allowTxHash]);
+    expect(mandate.active).to.equal(true);
+    expect(allVerified).to.equal(true);
+  });
 });

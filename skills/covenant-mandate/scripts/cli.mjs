@@ -90,12 +90,33 @@ async function ethCall(rpcUrl, to, calldata) {
   return json.result;
 }
 
+/** Same as ethCall, but tries each URL in rpcUrls in sequence until one answers. */
+async function ethCallWithFailover(to, calldata, { rpcUrls } = {}) {
+  const urls = rpcUrls ?? DEFAULT_BSC_RPCS;
+  let lastError;
+  for (const rpcUrl of urls) {
+    try {
+      return { result: await ethCall(rpcUrl, to, calldata), rpcUrl };
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  throw Object.assign(
+    new Error(`all RPCs failed for eth_call: ${lastError?.message ?? "unknown error"}`),
+    { exitCode: 1 },
+  );
+}
+
 // ---- survey: real tradability, cross-checked against on-chain state ----
 // Free-tier BSC RPCs individually rate-limit or restrict eth_getLogs (see
 // docs/partner-feedback/friction-log.md B10) - tried in sequence, first one
 // to answer wins.
 const TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
-const DEFAULT_LIQUIDITY_RPCS = ["https://bsc.publicnode.com", "https://bsc-dataseed1.defibit.io", "https://bsc-dataseed.binance.org"];
+// Shared default RPC list for anything that needs to work unattended (a
+// judge's environment, a cron job) without depending on one free-tier
+// endpoint staying up - see friction-log.md B12-B14 for the flakiness this
+// is guarding against, found live while forking against a single endpoint.
+const DEFAULT_BSC_RPCS = ["https://bsc.publicnode.com", "https://bsc-dataseed1.defibit.io", "https://bsc-dataseed.binance.org"];
 
 async function jsonRpc(rpcUrl, method, params) {
   const res = await fetch(rpcUrl, {
@@ -109,6 +130,26 @@ async function jsonRpc(rpcUrl, method, params) {
 }
 
 /**
+ * Same as jsonRpc, but tries each URL in rpcUrls in sequence until one
+ * answers, instead of depending on a single endpoint. Returns which RPC
+ * actually answered alongside the result, so a caller can report it.
+ */
+async function jsonRpcWithFailover(method, params, { rpcUrls = DEFAULT_BSC_RPCS } = {}) {
+  let lastError;
+  for (const rpcUrl of rpcUrls) {
+    try {
+      return { result: await jsonRpc(rpcUrl, method, params), rpcUrl };
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  throw Object.assign(
+    new Error(`all RPCs failed for ${method}: ${lastError?.message ?? "unknown error"}`),
+    { exitCode: 1 },
+  );
+}
+
+/**
  * Counts real Transfer events for a token over a recent block window, tried
  * across several RPCs until one answers. This exists because Binance's own
  * `tokenInfo.volume24h` figure was found, live, to be flatly wrong for at
@@ -117,7 +158,7 @@ async function jsonRpc(rpcUrl, method, params) {
  * see friction-log.md. `survey` reports both numbers, labeled, rather than
  * trusting Binance's reported figure alone for a tradability call.
  */
-async function countRecentTransfers(tokenAddress, { blocksBack = 3000, rpcUrls = DEFAULT_LIQUIDITY_RPCS } = {}) {
+async function countRecentTransfers(tokenAddress, { blocksBack = 3000, rpcUrls = DEFAULT_BSC_RPCS } = {}) {
   for (const rpcUrl of rpcUrls) {
     try {
       const tip = BigInt(await jsonRpc(rpcUrl, "eth_blockNumber", []));
@@ -347,7 +388,20 @@ const COMMANDS = {
 };
 
 // ---- exports (for unit testing; direct execution still works - see dispatch below) ----
-export { COMMANDS, call, ethCall, SELECTORS, DENIAL_REASONS, hex32, addr32, countRecentTransfers, fetchDynamic };
+export {
+  COMMANDS,
+  call,
+  ethCall,
+  ethCallWithFailover,
+  SELECTORS,
+  DENIAL_REASONS,
+  hex32,
+  addr32,
+  countRecentTransfers,
+  fetchDynamic,
+  jsonRpcWithFailover,
+  DEFAULT_BSC_RPCS,
+};
 
 // ---- CLI dispatch (only runs when executed directly, not when imported) ----
 if (import.meta.url === `file://${process.argv[1]}`) {

@@ -91,5 +91,19 @@ export default defineConfig({
       url: "http://127.0.0.1:8545",
       chainId: 56,
     },
+    // The real thing - Phase 3. Not used until then; scaffolded now so
+    // deploy day is a config fill-in (BSC_RPC_URL + DEPLOYER_PRIVATE_KEY in
+    // .env, both gitignored) rather than editing this file under time
+    // pressure with real funds already in the wallet. `accounts` is deliberately
+    // an empty array by default - Hardhat refuses to sign for this network
+    // until a real key is supplied, rather than silently falling back to
+    // something unsafe.
+    bsc: {
+      type: "http",
+      chainType: "l1",
+      url: BSC_RPC_URL,
+      chainId: 56,
+      accounts: process.env.DEPLOYER_PRIVATE_KEY ? [process.env.DEPLOYER_PRIVATE_KEY] : [],
+    },
   },
 });

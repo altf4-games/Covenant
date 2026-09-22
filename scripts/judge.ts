@@ -21,9 +21,16 @@
  * Usage:
  *   COVENANT_ADDRESS=0x... npx tsx scripts/judge.ts
  *   (optionally BSC_RPC_URL=..., and data/judge-tx-hashes.json populated)
+ *
+ * RPC failover: a judge running this has no reason to trust that one
+ * free-tier RPC is up the moment they try it - the project's own friction
+ * log (B12-B14) documents real flakiness on exactly this class of endpoint.
+ * BSC_RPC_URL, if set, is tried first; otherwise this falls back through
+ * cli.mjs's own DEFAULT_BSC_RPCS list (the same one `survey` already
+ * depends on) rather than hardcoding a single endpoint.
  */
 import { readFile } from "node:fs/promises";
-import { ethCall, SELECTORS, DENIAL_REASONS } from "../skills/covenant-mandate/scripts/cli.mjs";
+import { SELECTORS, DENIAL_REASONS, jsonRpcWithFailover, ethCallWithFailover, DEFAULT_BSC_RPCS } from "../skills/covenant-mandate/scripts/cli.mjs";
 
 // cli.mjs keeps its own asBool/asUint private - small enough to duplicate
 // here rather than widen that file's export surface for two one-liners.
@@ -53,24 +60,22 @@ interface VerifiedAttestation {
   reason?: string;
 }
 
-async function jsonRpc(rpcUrl: string, method: string, params: unknown[]) {
-  const res = await fetch(rpcUrl, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ jsonrpc: "2.0", method, params, id: 1 }),
-  });
-  const json = await res.json();
-  if (json.error) throw new Error(json.error.message);
-  return json.result;
-}
+// Accepts a single RPC (tests pin this to one local forked node - no
+// failover needed or wanted there) or a list (the real judge-facing path,
+// where depending on exactly one free-tier endpoint being up is the risk
+// this exists to avoid - see the module doc comment). Reuses cli.mjs's own
+// failover helpers - the same ones `survey` depends on - rather than a
+// second, separate implementation of the same try-each-RPC loop.
+type RpcTarget = string | string[];
+const asRpcList = (target: RpcTarget): string[] => (Array.isArray(target) ? target : [target]);
 
 /**
  * Re-fetches a transaction's real receipt and independently decodes its
  * Attestation log. Does not trust anything about the transaction except
  * what's actually in the receipt returned by the RPC.
  */
-export async function verifyAttestationTx(rpcUrl: string, covenantAddress: string, txHash: string): Promise<VerifiedAttestation> {
-  const receipt = await jsonRpc(rpcUrl, "eth_getTransactionReceipt", [txHash]);
+export async function verifyAttestationTx(rpcTarget: RpcTarget, covenantAddress: string, txHash: string): Promise<VerifiedAttestation> {
+  const { result: receipt } = await jsonRpcWithFailover("eth_getTransactionReceipt", [txHash], { rpcUrls: asRpcList(rpcTarget) });
   if (!receipt) {
     return { txHash, ok: false, detail: "no receipt found - transaction does not exist on this chain" };
   }
@@ -120,8 +125,9 @@ export async function readTxHashList(): Promise<string[]> {
   }
 }
 
-export async function runJudge(rpcUrl: string, covenantAddress: string, txHashes: string[]) {
-  const mandateRaw = await ethCall(rpcUrl, covenantAddress, SELECTORS.mandate);
+export async function runJudge(rpcTarget: RpcTarget, covenantAddress: string, txHashes: string[]) {
+  const rpcUrls = asRpcList(rpcTarget);
+  const { result: mandateRaw } = await ethCallWithFailover(covenantAddress, SELECTORS.mandate, { rpcUrls });
   const mandate = {
     active: asBool(mandateRaw, 0),
     maxNotionalPerTrade: asUint(mandateRaw, 1).toString(),
@@ -129,14 +135,17 @@ export async function runJudge(rpcUrl: string, covenantAddress: string, txHashes
     expiry: asUint(mandateRaw, 3).toString(),
   };
 
-  const results = await Promise.all(txHashes.map((h) => verifyAttestationTx(rpcUrl, covenantAddress, h)));
+  const results = await Promise.all(txHashes.map((h) => verifyAttestationTx(rpcUrls, covenantAddress, h)));
 
   return { mandate, results, allVerified: results.length > 0 && results.every((r) => r.ok) };
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   (async () => {
-    const rpcUrl = process.env.BSC_RPC_URL || "https://bsc-mainnet.public.blastapi.io";
+    // BSC_RPC_URL, if set, is tried first; DEFAULT_BSC_RPCS (publicnode,
+    // defibit, binance dataseed - the same list `survey` already relies on)
+    // backs it up, so a judge isn't betting the whole run on one endpoint.
+    const rpcUrls = [process.env.BSC_RPC_URL, ...DEFAULT_BSC_RPCS].filter((u): u is string => Boolean(u));
     const covenantAddress = process.env.COVENANT_ADDRESS;
     if (!covenantAddress) {
       console.error("Set COVENANT_ADDRESS to the deployed Covenant contract to judge.");
@@ -146,14 +155,14 @@ if (import.meta.url === `file://${process.argv[1]}`) {
 
     console.log(`Covenant judge report`);
     console.log(`  contract: ${covenantAddress}`);
-    console.log(`  rpc:      ${rpcUrl}\n`);
+    console.log(`  rpc candidates: ${rpcUrls.join(", ")}\n`);
 
     const txHashes = await readTxHashList();
     if (txHashes.length === 0) {
       console.log("No transactions listed in data/judge-tx-hashes.json or JUDGE_TX_HASHES - showing mandate state only.\n");
     }
 
-    const { mandate, results, allVerified } = await runJudge(rpcUrl, covenantAddress, txHashes);
+    const { mandate, results, allVerified } = await runJudge(rpcUrls, covenantAddress, txHashes);
 
     console.log("Mandate (read live from chain):");
     console.log(`  active:              ${mandate.active}`);
