@@ -2,7 +2,9 @@
 
 An on-chain execution mandate for tokenized-stock trades on BSC. A human sets a mandate (which tokens, how much per trade, how many trades a day, until when). An agent proposes swaps against it. A small contract decides, on chain, whether the trade happens, and writes an attestation either way, so the decision is independently verifiable by anyone with an RPC endpoint.
 
-Built for the BNB Hack: Tokenized Stocks Edition.
+Built for the BNB Hack: Tokenized Stocks Edition. Everything on this page is backed by a real transaction against real deployed bytecode - no card, panel, or claim here comes from a mock.
+
+The closest verified prior art in this category (Harness, ETHOnline 2026, Ledger's "AI Agents x Ledger" 1st place) enforces a single daily spend budget with no reasoned per-decision record. Covenant's guard evaluates a richer mandate - spend limits, halt status, provider-pinned allowlisting - and attests every decision, allow or deny, verifiable by anyone reading chain state. And unlike an advisory critique-agent pattern that rates a decision after the fact, Covenant's guard is the actual precondition for execution: the trade cannot happen unless the guard says yes.
 
 ## Architecture
 
@@ -11,6 +13,7 @@ Everything lives in one contract, [`contracts/Covenant.sol`](contracts/Covenant.
 A few things worth knowing before reading the code:
 
 - **Denials don't revert.** A reverted transaction discards every state change, including events, so a denial that reverted would leave no on-chain trace. Instead, `guardedSwap` checks the mandate and oracle first; if the trade is denied, it emits `Attestation(..., allowed: false, reason: ...)` and returns without touching any balance. The transaction still mines and costs gas only.
+- **Preview and execute share one code path, not two.** `previewDecision` (the read-only call the skill's `check` command uses) and `guardedSwap` both call the same internal `_evaluate` - there's no separate simulation logic that could quietly drift from what actually executes. Directly tested in `test/Covenant.unit.ts`'s "preview/execute agreement" suite: call `previewDecision`, then call `guardedSwap` on the identical input, and assert the real `Attestation` reports exactly what was previewed.
 - **Non-custodial.** Covenant never holds trading funds between calls. The caller approves the quote token beforehand; a call that passes the guard pulls exactly `amountIn`, swaps it, and has PancakeSwap deliver the output straight to the caller.
 - **Provider pinning, not ticker resolution.** The allowlist is exact addresses, set by the owner. There's no on-chain ticker-to-address lookup, because that's exactly where the two real problems in this space show up: a ticker existing under multiple providers (real NVDAB vs. Ondo's NVDAon), and outright impersonator contracts. Ticker resolution happens off chain, in the skill (below) - and refuses to guess rather than silently picking one.
 
@@ -51,6 +54,25 @@ COVENANT_ADDRESS=0x... npm run judge
 
 Reads the tx hash list from `JUDGE_TX_HASHES` (comma-separated) or [`data/judge-tx-hashes.json`](data/judge-tx-hashes.json). That file is empty until Phase 3's real BSC mainnet transactions exist - pointing this at mainnet then is a config change (RPC URL, contract address, that file), not new development. Built and live-tested now, against this project's own fork transactions, so the mechanism is proven before it has anything real to point at.
 
+## Chaos-fork demo
+
+`scripts/chaos-fork.ts` (`npm run chaos-fork`) is a one-command, standalone script that forks BSC mainnet, deploys a real Covenant, and then deliberately tries to break its own mandate - a scam impersonator token, a notional over the cap, a trade while the oracle reports a halt - plus one legitimate trade for contrast. Covenant's guard never reverts (see "Denials don't revert" above), so what a reverting design would show as a rejected transaction, this shows as a real `Attestation` event, independently re-decoded by `judge.ts`'s own `verifyAttestationTx` rather than printed from the script's own memory of what it just did.
+
+```bash
+npm run chaos-fork
+```
+
+A real run, reproducible from this exact script (fork state, so these hashes exist on that local fork, not BscScan - the real, independently-verifiable mainnet equivalent is what Phase 3's deployment adds to `judge.ts`'s tx list above):
+
+| Attempt | tx hash | block | Result |
+|---|---|---|---|
+| Scam impersonator token | `0x3e9a1a87ccc7ecfed6c5bee9ed6e71422cd4422fe578857a185759ef38ece52d` | 123380137 | denied, `TokenNotAllowed` |
+| Notional above the 10 USDT cap | `0x8d5b9ca4d7c2f4e9368967092311110a390fa4b6805e7fb33e8bf21ab075ba05` | 123380138 | denied, `NotionalExceeded` |
+| Trade while oracle reports a halt | `0x6803b736a51898747bcee245f701d46392d40c4fa848fe4173cb82d04c2e26ed` | 123380140 | denied, `OracleHalted` |
+| Same mandate, within cap, oracle healthy | `0xf613b4f37274d22fd2d8fde26314c95fad79fb3c1f2174de421758094a287dc1` | 123380142 | allowed, real swap executed |
+
+`test/chaos-fork.live.ts` runs this exact command as a real subprocess and asserts on its real stdout - not a reimplementation of the script's logic, the actual thing a judge would type.
+
 ## Running the MCP server
 
 ```bash
@@ -78,16 +100,17 @@ npm install
 npx hardhat test
 ```
 
-Eight suites, 55 tests total:
+Nine suites, 59 tests total:
 
-- `test/Covenant.unit.ts` - fast, runs against an in-memory chain with a minimal mock ERC20 and mock router, so Covenant's own bookkeeping (daily counters, notional checks, the reentrancy guard) can be tested without a network call.
+- `test/Covenant.unit.ts` - fast, runs against an in-memory chain with a minimal mock ERC20 and mock router, so Covenant's own bookkeeping (daily counters, notional checks, the reentrancy guard) can be tested without a network call. Includes a dedicated "preview/execute agreement" pair proving `previewDecision` and `guardedSwap` never disagree on identical input.
 - `test/Covenant.fork.ts` - runs against a real fork of BSC mainnet: real USDT, real NVDAB, the real PancakeSwap V3 SwapRouter, funded by impersonating a real USDT holder. This is what actually proves the mock harness's assumptions hold against the real integration.
 - `test/oracle-updater.live.ts` - calls Binance's real public RWA status endpoint over the network (not mocked), writes the real result on chain, and reads it back.
 - `test/skill-cli.live.ts` - spawns a real `hardhat node --fork`, deploys a real Covenant to it, and drives the Wallet Skill's own CLI commands against that real JSON-RPC server, the same way it's actually invoked in production.
 - `test/status-page.live.ts` - spawns another real `hardhat node --fork`, deploys a real Covenant, generates two real denied trades, and proves the status page's event-reading logic both returns real data fast on a safe block range and fails fast (not hangs) on one that crosses the fork boundary - see "Tests, and what they caught" for why this suite's test order specifically matters.
 - `test/mcp-server.live.ts` - spawns the MCP server itself as a real subprocess and drives it with the real `@modelcontextprotocol/sdk` client over the real MCP protocol (stdio), against a real forked node and a real deployed Covenant. Nothing about the MCP layer is mocked.
 - `test/off-hours-logger.live.ts` - polls Binance's real live endpoints and writes real JSON lines to a real (temp) log file, confirming the logger that actually runs on cron works the way it's actually invoked.
-- `test/judge.live.ts` - generates real deny and allow transactions against a real fork, then proves `judge.ts` independently re-derives the correct verdict from each real receipt - including a real tx hash that was never mined, to prove it reports a real failure rather than a false pass.
+- `test/judge.live.ts` - generates real deny and allow transactions against a real fork, then proves `judge.ts` independently re-derives the correct verdict from each real receipt - including a real tx hash that was never mined, to prove it reports a real failure rather than a false pass, and a genuinely dead RPC listed ahead of a working one, to prove the failover actually engages.
+- `test/chaos-fork.live.ts` - spawns `npm run chaos-fork` itself as a real subprocess, the exact command a judge runs, and asserts on its real stdout rather than reimplementing the script's logic.
 
 The fork and live suites are slower than a typical Hardhat suite, and that's expected rather than a flake - see "Tests, and what they caught" below.
 
@@ -175,3 +198,11 @@ The actual bug was in the test's design, not the code under test: it pinned a sp
 The problem only became visible auditing the script against its own stated purpose: its module doc comment says a judge can verify everything "without needing your exact account setup" - but if the one RPC it depends on is down or rate-limited the moment a judge runs `npm run judge`, the whole verification fails for a reason that has nothing to do with whether Covenant actually works. A script whose entire job is independence from this project's setup shouldn't itself be a single point of failure.
 
 Fixed by generalizing the failover pattern instead of writing a second copy of it: `cli.mjs` gained `jsonRpcWithFailover` and `ethCallWithFailover` (both call sites `survey` already needed, made reusable), and `judge.ts`'s `verifyAttestationTx`/`runJudge` now accept either one RPC (what the live tests still use, deliberately - no failover needed against a controlled local fork) or a list. The real CLI entrypoint now builds that list from `BSC_RPC_URL` plus `cli.mjs`'s own `DEFAULT_BSC_RPCS`. Proven with a live test, not just a type change: `test/judge.live.ts` now lists a genuinely dead RPC (`http://127.0.0.1:1`, nothing listens there) ahead of the real working one and asserts the call still succeeds - failover that was never exercised against a real failure isn't verified, just hoped for.
+
+### `chaos-fork.ts`'s first real run hit a genuine nonce race, not a mock failure
+
+Building `scripts/chaos-fork.ts` - a standalone demo that fires several real sequential transactions from one signer against a real fork - the first actual run failed partway through with `NONCE_EXPIRED: nonce has already been used`, on a transaction sent after several earlier ones had already succeeded and been awaited to a receipt. Every send in the script was already correctly `await`-chained to the previous one's `.wait()`, so this wasn't a missing-await bug - the script was doing exactly what looked correct and still hit a real nonce desync.
+
+The cause: the script used a raw `ethers.Wallet`, which by default re-queries `getNonce("pending")` fresh on every single transaction rather than tracking it locally. Under enough back-to-back sends on one local node, that re-query pattern can race with the node's own mempool bookkeeping and hand back a nonce that's already been consumed - a real, documented class of issue with unmanaged nonce handling, not something specific to this script's logic. `test/judge.live.ts`'s own fixture sends fewer transactions from the same kind of raw `Wallet` and had simply never sent enough in a row to hit it.
+
+Fixed by switching to `ethers.NonceManager`, which tracks the next nonce locally after each send instead of re-querying the node every time - the documented fix for exactly this class of race. Confirmed by rerunning the script for real afterward: same fork state, same four real transactions, same tx hashes, no error. `test/chaos-fork.live.ts` now runs the exact real command (`npm run chaos-fork`) as a subprocess on every test run, specifically so a regression here shows up as a failing test instead of only surfacing the next time someone happens to run the script by hand.

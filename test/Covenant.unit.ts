@@ -304,6 +304,45 @@ describe("Covenant (unit, mocked token/router)", function () {
     });
   });
 
+  describe("preview/execute agreement - same code path, no drift possible by construction", function () {
+    // cross-hackathon-lessons.md #4 / noyeet's design principle: simulate
+    // and execute should share one code path so they can't silently drift
+    // apart. Covenant already does this structurally - previewDecision and
+    // guardedSwap both call the same internal _evaluate (see Covenant.sol) -
+    // but that was never directly exercised in one test: call previewDecision
+    // immediately before guardedSwap on the identical inputs and assert the
+    // real Attestation reports exactly what was previewed, for both a deny
+    // and an allow. If someone ever splits the two checks apart, this is the
+    // test that would catch it.
+    it("previewDecision's answer matches the real Attestation reason for a denial", async function () {
+      const { covenant, tokenOut, trader } = await networkHelpers.loadFixture(deployCovenantFixture);
+      const tokenOutAddress = await tokenOut.getAddress();
+      // Deliberately untradeable: no mandate, no allowlist, no oracle update.
+      const previewed = await covenant.previewDecision(tokenOutAddress, 1n);
+      expect(previewed).to.equal(Reason.MandateInactive);
+
+      await expect(covenant.connect(trader).guardedSwap(tokenOutAddress, 2500, 1n, 0n))
+        .to.emit(covenant, "Attestation")
+        .withArgs(trader.address, tokenOutAddress, 1n, 0n, false, previewed);
+    });
+
+    it("previewDecision's answer matches the real Attestation reason for an allow", async function () {
+      const { covenant, oracleUpdater, tokenOut, quoteToken, trader } = await networkHelpers.loadFixture(
+        deployCovenantFixture,
+      );
+      const tokenOutAddress = await tokenOut.getAddress();
+      await makeTradeable(covenant, oracleUpdater, tokenOutAddress);
+      await fundAndApprove(quoteToken, covenant, trader, 1n);
+
+      const previewed = await covenant.previewDecision(tokenOutAddress, 1n);
+      expect(previewed).to.equal(Reason.None);
+
+      await expect(covenant.connect(trader).guardedSwap(tokenOutAddress, 2500, 1n, 0n))
+        .to.emit(covenant, "Attestation")
+        .withArgs(trader.address, tokenOutAddress, 1n, 1n, true, previewed);
+    });
+  });
+
   describe("guardedSwap - allow path", function () {
     it("pulls exactly amountIn, delivers amountOut to the caller, and records the trade", async function () {
       const { covenant, oracleUpdater, tokenOut, quoteToken, trader } = await networkHelpers.loadFixture(
