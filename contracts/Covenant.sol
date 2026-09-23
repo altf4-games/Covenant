@@ -69,6 +69,15 @@ interface IPancakeV3SwapRouter {
 ///    oversight - it is what "max trades per day" means to a human setting a
 ///    mandate, and it is cheap to reason about and test. Documented here so
 ///    nobody mistakes it for a bug later.
+///
+/// 4. The guard above verifies oracle data is *fresh*, not *accurate* - a
+///    malicious or buggy oracle updater could post a status that passes
+///    every check and is simply wrong. The bond/challenge/slash mechanism
+///    further down (`postBond`, `challengeUpdate`, `resolveChallenge`) makes
+///    that specific trust assumption economically enforced instead of
+///    merely trusted. See that section's own comment for the two disclosed
+///    simplifications (role-tied bond, manual resolution) and
+///    docs/research/slashable-guard-spec.md for the full design rationale.
 contract Covenant {
     // ---------------------------------------------------------------------
     // Types
@@ -129,6 +138,66 @@ contract Covenant {
     uint256 private _locked = 1;
 
     // ---------------------------------------------------------------------
+    // Slashable oracle-accuracy guard (Phase 2.5)
+    // ---------------------------------------------------------------------
+    //
+    // The mandate/oracle/attestation guard above can verify oracle data is
+    // *fresh* (the staleness bound) but not *accurate* - a malicious or
+    // buggy updater could post a status that passes every check above and
+    // is simply wrong. This section makes that specific trust assumption
+    // economically enforced instead of merely trusted: the updater posts a
+    // bond, anyone can challenge a specific update with off-chain evidence
+    // it was wrong, and an upheld challenge slashes part of the bond to the
+    // challenger. See docs/research/slashable-guard-spec.md for the full
+    // design rationale.
+    //
+    // Disclosed simplifications, deliberate for a hackathon demo, not a
+    // production security model:
+    // - The bond is tied to the *role* (whichever address currently holds
+    //   `oracleUpdater`), not to a specific historical address. If the role
+    //   changes hands, the incoming updater inherits accountability for
+    //   whatever bond is already posted; the outgoing updater should
+    //   withdraw first if that's not the intent. A production version would
+    //   key bonds per-address and record which address posted each
+    //   individual update.
+    // - Resolution is manual (`onlyOwner`), not an on-chain dispute system.
+    //   `challengeUpdate`'s `updateTimestamp` is challenger-supplied and
+    //   only enforced for the challenge-window check - this contract only
+    //   retains each token's *latest* oracle status, so it cannot itself
+    //   verify a challenge's claimed timestamp against history. That
+    //   verification, and the actual "was this update wrong" judgment, is
+    //   the resolver's job, checked off chain against the real event log
+    //   and the real RWA status endpoint - the same honest scope
+    //   disclosure the design spec itself calls for.
+
+    uint256 public constant CHALLENGE_WINDOW = 1 hours;
+    uint256 public constant BOND_COOLDOWN = 1 hours;
+    uint256 public constant SLASH_BPS = 2000; // 20%, matches Verity's precedent
+    uint256 private constant BPS_DENOMINATOR = 10000;
+
+    uint256 public updaterBond;
+    uint256 public bondPostedAt;
+    uint256 public openChallengeCount;
+    uint256 public nextChallengeId = 1; // 0 is reserved to mean "no active challenge"
+
+    struct Challenge {
+        address token;
+        uint256 updateTimestamp; // challenger-claimed timestamp of the specific update being challenged
+        address challenger;
+        uint256 submittedAt;
+        bool resolved;
+        bool upheld;
+    }
+
+    mapping(uint256 => Challenge) public challenges;
+    /// @notice (token, updateTimestamp) -> the currently-active challengeId
+    /// against that specific update, or 0 if none. Prevents a second
+    /// challenge on the same update while one is still unresolved; cleared
+    /// on resolution so the same update can be re-challenged afterward if
+    /// the first challenge was dismissed and new evidence surfaces.
+    mapping(bytes32 => uint256) public activeChallengeForUpdate;
+
+    // ---------------------------------------------------------------------
     // Events
     // ---------------------------------------------------------------------
 
@@ -137,6 +206,21 @@ contract Covenant {
     event TokenAllowlisted(address indexed token, bool allowed);
     event OracleUpdaterChanged(address indexed updater);
     event OracleUpdated(address indexed token, bool halted, uint256 updatedAt);
+
+    event BondPosted(address indexed updater, uint256 amount, uint256 newBalance);
+    event BondWithdrawn(address indexed updater, uint256 amount);
+
+    /// @notice A challenge against a specific oracle update, identified by
+    /// (token, updateTimestamp). `evidenceHash` is a keccak256 of whatever
+    /// off-chain evidence the challenger is pointing at (e.g. the real RWA
+    /// status API response fetched near that timestamp) - the hash is cheap
+    /// to store and lets a resolver or judge confirm the evidence they're
+    /// looking at is the exact evidence referenced, without paying to store
+    /// the evidence itself on chain.
+    event ChallengeSubmitted(
+        uint256 indexed challengeId, address indexed challenger, address indexed token, uint256 updateTimestamp, bytes32 evidenceHash
+    );
+    event ChallengeResolved(uint256 indexed challengeId, bool upheld, uint256 slashedAmount);
 
     /// @notice Emitted on every guarded swap attempt, allowed or denied. This
     /// is the attestation: the thing a judge (or anyone) reads back from
@@ -159,6 +243,13 @@ contract Covenant {
     error ExpiryInPast();
     error ZeroAddress();
     error Reentrant();
+    error BondCooldownActive();
+    error OpenChallengesExist();
+    error ChallengeWindowClosed();
+    error UpdateAlreadyChallenged();
+    error ChallengeDoesNotExist();
+    error ChallengeAlreadyResolved();
+    error TransferFailed();
 
     // ---------------------------------------------------------------------
     // Modifiers
@@ -311,6 +402,98 @@ contract Covenant {
         );
 
         emit Attestation(msg.sender, tokenOut, amountIn, amountOut, true, DenialReason.None);
+    }
+
+    // ---------------------------------------------------------------------
+    // Slashable oracle-accuracy guard
+    // ---------------------------------------------------------------------
+
+    /// @notice The oracle updater posts a bond, slashable if a challenge
+    /// against one of their updates is upheld. Native BNB, not the quote
+    /// token - keeps this independent of USDT allowance/approval plumbing.
+    /// Restarts the cooldown on every deposit, including a top-up: capital
+    /// added right before an anticipated challenge can't be withdrawn early.
+    function postBond() external payable onlyOracleUpdater {
+        updaterBond += msg.value;
+        bondPostedAt = block.timestamp;
+        emit BondPosted(msg.sender, msg.value, updaterBond);
+    }
+
+    /// @notice Withdraw the entire bond. Only the current oracle updater,
+    /// only after the cooldown since the last deposit, and only with no
+    /// unresolved challenges outstanding.
+    function withdrawBond() external onlyOracleUpdater nonReentrant {
+        if (openChallengeCount > 0) revert OpenChallengesExist();
+        if (block.timestamp < bondPostedAt + BOND_COOLDOWN) revert BondCooldownActive();
+        uint256 amount = updaterBond;
+        updaterBond = 0;
+        (bool ok,) = msg.sender.call{value: amount}("");
+        if (!ok) revert TransferFailed();
+        emit BondWithdrawn(msg.sender, amount);
+    }
+
+    /// @notice Challenge a specific past oracle update for `token`, claimed
+    /// to have happened at `updateTimestamp`. Anyone can challenge - no
+    /// stake required to submit one, since the resolver (not this function)
+    /// is what actually protects against frivolous challenges. Reverts if
+    /// the challenge window since `updateTimestamp` has already closed, or
+    /// if that exact update already has an unresolved challenge against it.
+    /// @param evidenceHash keccak256 of the off-chain evidence being
+    /// referenced (e.g. a fetched RWA status API response near that time) -
+    /// stored so a resolver or judge can confirm the evidence they're shown
+    /// later is the exact evidence originally pointed at.
+    function challengeUpdate(address token, uint256 updateTimestamp, bytes32 evidenceHash)
+        external
+        returns (uint256 challengeId)
+    {
+        if (block.timestamp > updateTimestamp + CHALLENGE_WINDOW) revert ChallengeWindowClosed();
+        bytes32 key = keccak256(abi.encodePacked(token, updateTimestamp));
+        if (activeChallengeForUpdate[key] != 0) revert UpdateAlreadyChallenged();
+
+        challengeId = nextChallengeId++;
+        activeChallengeForUpdate[key] = challengeId;
+        challenges[challengeId] = Challenge({
+            token: token,
+            updateTimestamp: updateTimestamp,
+            challenger: msg.sender,
+            submittedAt: block.timestamp,
+            resolved: false,
+            upheld: false
+        });
+
+        openChallengeCount += 1;
+        emit ChallengeSubmitted(challengeId, msg.sender, token, updateTimestamp, evidenceHash);
+    }
+
+    /// @notice Resolve a challenge. Deliberately manual/operator-adjudicated
+    /// (owner-only), not an on-chain dispute system - see the storage-section
+    /// comment above for why that's a disclosed simplification, not faked
+    /// decentralization. If upheld, slashes `SLASH_BPS` of whatever the bond
+    /// *currently* holds (never a fixed amount), so a second slash after an
+    /// earlier one can never underflow - it just slashes a smaller absolute
+    /// amount, gracefully, including down to zero.
+    function resolveChallenge(uint256 challengeId, bool upheld) external onlyOwner nonReentrant {
+        if (challengeId == 0 || challengeId >= nextChallengeId) revert ChallengeDoesNotExist();
+        Challenge storage c = challenges[challengeId];
+        if (c.resolved) revert ChallengeAlreadyResolved();
+
+        c.resolved = true;
+        c.upheld = upheld;
+        openChallengeCount -= 1;
+        bytes32 key = keccak256(abi.encodePacked(c.token, c.updateTimestamp));
+        activeChallengeForUpdate[key] = 0;
+
+        uint256 slashed = 0;
+        if (upheld) {
+            slashed = (updaterBond * SLASH_BPS) / BPS_DENOMINATOR;
+            updaterBond -= slashed;
+            if (slashed > 0) {
+                (bool ok,) = c.challenger.call{value: slashed}("");
+                if (!ok) revert TransferFailed();
+            }
+        }
+
+        emit ChallengeResolved(challengeId, upheld, slashed);
     }
 
     // ---------------------------------------------------------------------

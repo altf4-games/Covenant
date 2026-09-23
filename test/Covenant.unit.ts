@@ -424,4 +424,249 @@ describe("Covenant (unit, mocked token/router)", function () {
       expect(await quoteToken.balanceOf(other.address)).to.equal(50n);
     });
   });
+
+  describe("slashable guard (Phase 2.5, bond/challenge/slash)", function () {
+    const CHALLENGE_WINDOW_SECONDS = 60 * 60;
+    const BOND_COOLDOWN_SECONDS = 60 * 60;
+    const EVIDENCE_HASH = ethers.keccak256(ethers.toUtf8Bytes("real RWA status response, fetched at challenge time"));
+
+    async function postBond(covenant: any, oracleUpdater: any, amount = ethers.parseEther("0.01")) {
+      await covenant.connect(oracleUpdater).postBond({ value: amount });
+    }
+
+    describe("postBond / withdrawBond", function () {
+      it("is oracle-updater-only, accumulates, and emits real balances", async function () {
+        const { covenant, oracleUpdater, other } = await networkHelpers.loadFixture(deployCovenantFixture);
+        const amount1 = ethers.parseEther("0.01");
+        const amount2 = ethers.parseEther("0.02");
+
+        await expect(covenant.connect(other).postBond({ value: amount1 })).to.be.revertedWithCustomError(
+          covenant,
+          "NotOracleUpdater",
+        );
+
+        await expect(covenant.connect(oracleUpdater).postBond({ value: amount1 }))
+          .to.emit(covenant, "BondPosted")
+          .withArgs(oracleUpdater.address, amount1, amount1);
+        expect(await covenant.updaterBond()).to.equal(amount1);
+
+        await expect(covenant.connect(oracleUpdater).postBond({ value: amount2 }))
+          .to.emit(covenant, "BondPosted")
+          .withArgs(oracleUpdater.address, amount2, amount1 + amount2);
+        expect(await covenant.updaterBond()).to.equal(amount1 + amount2);
+      });
+
+      it("blocks withdrawal during the cooldown, then allows it and moves a real balance", async function () {
+        const { covenant, oracleUpdater } = await networkHelpers.loadFixture(deployCovenantFixture);
+        const amount = ethers.parseEther("0.01");
+        await postBond(covenant, oracleUpdater, amount);
+
+        await expect(covenant.connect(oracleUpdater).withdrawBond()).to.be.revertedWithCustomError(
+          covenant,
+          "BondCooldownActive",
+        );
+
+        await networkHelpers.time.increase(BOND_COOLDOWN_SECONDS + 1);
+
+        const before = await ethers.provider.getBalance(oracleUpdater.address);
+        const tx = await covenant.connect(oracleUpdater).withdrawBond();
+        const receipt = await tx.wait();
+        const gasCost = receipt!.gasUsed * receipt!.gasPrice;
+        const after = await ethers.provider.getBalance(oracleUpdater.address);
+
+        expect(after - before + gasCost).to.equal(amount);
+        expect(await covenant.updaterBond()).to.equal(0n);
+      });
+
+      it("edge case: blocks withdrawal while an unresolved challenge is open", async function () {
+        const { covenant, oracleUpdater, tokenOut, other } = await networkHelpers.loadFixture(deployCovenantFixture);
+        const tokenOutAddress = await tokenOut.getAddress();
+        await postBond(covenant, oracleUpdater);
+        await networkHelpers.time.increase(BOND_COOLDOWN_SECONDS + 1);
+
+        const updateTimestamp = await networkHelpers.time.latest();
+        await covenant.connect(other).challengeUpdate(tokenOutAddress, updateTimestamp, EVIDENCE_HASH);
+
+        await expect(covenant.connect(oracleUpdater).withdrawBond()).to.be.revertedWithCustomError(
+          covenant,
+          "OpenChallengesExist",
+        );
+      });
+
+      it("posting more bond restarts the cooldown - a top-up can't be withdrawn early", async function () {
+        const { covenant, oracleUpdater } = await networkHelpers.loadFixture(deployCovenantFixture);
+        await postBond(covenant, oracleUpdater);
+        await networkHelpers.time.increase(BOND_COOLDOWN_SECONDS + 1);
+
+        // Would be withdrawable now, but a fresh deposit resets the clock.
+        await postBond(covenant, oracleUpdater, ethers.parseEther("0.005"));
+        await expect(covenant.connect(oracleUpdater).withdrawBond()).to.be.revertedWithCustomError(
+          covenant,
+          "BondCooldownActive",
+        );
+      });
+    });
+
+    describe("challengeUpdate", function () {
+      it("anyone can challenge, and emits the real evidence hash referenced", async function () {
+        const { covenant, tokenOut, other } = await networkHelpers.loadFixture(deployCovenantFixture);
+        const tokenOutAddress = await tokenOut.getAddress();
+        const updateTimestamp = await networkHelpers.time.latest();
+
+        await expect(covenant.connect(other).challengeUpdate(tokenOutAddress, updateTimestamp, EVIDENCE_HASH))
+          .to.emit(covenant, "ChallengeSubmitted")
+          .withArgs(1n, other.address, tokenOutAddress, updateTimestamp, EVIDENCE_HASH);
+        expect(await covenant.openChallengeCount()).to.equal(1n);
+      });
+
+      it("edge case: rejects a challenge submitted after the window has closed", async function () {
+        const { covenant, tokenOut, other } = await networkHelpers.loadFixture(deployCovenantFixture);
+        const tokenOutAddress = await tokenOut.getAddress();
+        const updateTimestamp = await networkHelpers.time.latest();
+
+        await networkHelpers.time.increase(CHALLENGE_WINDOW_SECONDS + 1);
+
+        await expect(
+          covenant.connect(other).challengeUpdate(tokenOutAddress, updateTimestamp, EVIDENCE_HASH),
+        ).to.be.revertedWithCustomError(covenant, "ChallengeWindowClosed");
+      });
+
+      it("edge case: a second challenge on the same (token, timestamp) is rejected while the first is unresolved", async function () {
+        const { covenant, tokenOut, other, trader } = await networkHelpers.loadFixture(deployCovenantFixture);
+        const tokenOutAddress = await tokenOut.getAddress();
+        const updateTimestamp = await networkHelpers.time.latest();
+
+        await covenant.connect(other).challengeUpdate(tokenOutAddress, updateTimestamp, EVIDENCE_HASH);
+        await expect(
+          covenant.connect(trader).challengeUpdate(tokenOutAddress, updateTimestamp, EVIDENCE_HASH),
+        ).to.be.revertedWithCustomError(covenant, "UpdateAlreadyChallenged");
+      });
+
+      it("edge case: the same update CAN be re-challenged once the first challenge resolves", async function () {
+        const { covenant, oracleUpdater, tokenOut, other, trader } = await networkHelpers.loadFixture(
+          deployCovenantFixture,
+        );
+        const tokenOutAddress = await tokenOut.getAddress();
+        const updateTimestamp = await networkHelpers.time.latest();
+
+        await covenant.connect(other).challengeUpdate(tokenOutAddress, updateTimestamp, EVIDENCE_HASH);
+        await covenant.resolveChallenge(1n, false); // dismissed, not upheld
+
+        await expect(covenant.connect(trader).challengeUpdate(tokenOutAddress, updateTimestamp, EVIDENCE_HASH))
+          .to.emit(covenant, "ChallengeSubmitted")
+          .withArgs(2n, trader.address, tokenOutAddress, updateTimestamp, EVIDENCE_HASH);
+      });
+    });
+
+    describe("resolveChallenge", function () {
+      it("is owner-only", async function () {
+        const { covenant, tokenOut, other, trader } = await networkHelpers.loadFixture(deployCovenantFixture);
+        const tokenOutAddress = await tokenOut.getAddress();
+        const updateTimestamp = await networkHelpers.time.latest();
+        await covenant.connect(other).challengeUpdate(tokenOutAddress, updateTimestamp, EVIDENCE_HASH);
+
+        await expect(covenant.connect(trader).resolveChallenge(1n, true)).to.be.revertedWithCustomError(
+          covenant,
+          "NotOwner",
+        );
+      });
+
+      it("rejects an unknown challenge id and a double-resolve", async function () {
+        const { covenant, tokenOut, other } = await networkHelpers.loadFixture(deployCovenantFixture);
+        const tokenOutAddress = await tokenOut.getAddress();
+        const updateTimestamp = await networkHelpers.time.latest();
+
+        await expect(covenant.resolveChallenge(1n, true)).to.be.revertedWithCustomError(
+          covenant,
+          "ChallengeDoesNotExist",
+        );
+        await expect(covenant.resolveChallenge(0n, true)).to.be.revertedWithCustomError(
+          covenant,
+          "ChallengeDoesNotExist",
+        );
+
+        await covenant.connect(other).challengeUpdate(tokenOutAddress, updateTimestamp, EVIDENCE_HASH);
+        await covenant.resolveChallenge(1n, false);
+        await expect(covenant.resolveChallenge(1n, true)).to.be.revertedWithCustomError(
+          covenant,
+          "ChallengeAlreadyResolved",
+        );
+      });
+
+      it("dismissed: no funds move, but the challenge slot frees up (openChallengeCount drops)", async function () {
+        const { covenant, tokenOut, other } = await networkHelpers.loadFixture(deployCovenantFixture);
+        const tokenOutAddress = await tokenOut.getAddress();
+        const updateTimestamp = await networkHelpers.time.latest();
+        await covenant.connect(other).challengeUpdate(tokenOutAddress, updateTimestamp, EVIDENCE_HASH);
+
+        const bondBefore = await covenant.updaterBond();
+        await expect(covenant.resolveChallenge(1n, false)).to.emit(covenant, "ChallengeResolved").withArgs(1n, false, 0n);
+        expect(await covenant.updaterBond()).to.equal(bondBefore);
+        expect(await covenant.openChallengeCount()).to.equal(0n);
+      });
+
+      it("upheld: slashes exactly SLASH_BPS of the current bond to the real challenger", async function () {
+        const { covenant, oracleUpdater, tokenOut, other } = await networkHelpers.loadFixture(deployCovenantFixture);
+        const tokenOutAddress = await tokenOut.getAddress();
+        const bondAmount = ethers.parseEther("0.1");
+        await postBond(covenant, oracleUpdater, bondAmount);
+
+        const updateTimestamp = await networkHelpers.time.latest();
+        await covenant.connect(other).challengeUpdate(tokenOutAddress, updateTimestamp, EVIDENCE_HASH);
+
+        const expectedSlash = (bondAmount * 2000n) / 10000n; // SLASH_BPS = 20%
+        const before = await ethers.provider.getBalance(other.address);
+        await expect(covenant.resolveChallenge(1n, true))
+          .to.emit(covenant, "ChallengeResolved")
+          .withArgs(1n, true, expectedSlash);
+        const after = await ethers.provider.getBalance(other.address);
+
+        expect(after - before).to.equal(expectedSlash);
+        expect(await covenant.updaterBond()).to.equal(bondAmount - expectedSlash);
+      });
+
+      it("edge case: a second upheld challenge after an earlier slash never underflows, and gracefully slashes zero once the bond is fully gone", async function () {
+        const { covenant, oracleUpdater, tokenOut, other, trader } = await networkHelpers.loadFixture(
+          deployCovenantFixture,
+        );
+        const tokenOutAddress = await tokenOut.getAddress();
+        // A tiny bond: 20% of 4 wei rounds down to 0 after enough rounds,
+        // which is exactly the "bond insufficient to cover the slash
+        // percentage" case the spec calls out - it must degrade gracefully
+        // to a real zero-value transfer, not revert or underflow.
+        await postBond(covenant, oracleUpdater, 4n);
+
+        const t1 = await networkHelpers.time.latest();
+        await covenant.connect(other).challengeUpdate(tokenOutAddress, t1, EVIDENCE_HASH);
+        await covenant.resolveChallenge(1n, true); // slashes 0 (4*2000/10000 = 0)
+
+        expect(await covenant.updaterBond()).to.equal(4n);
+
+        const t2 = t1 + 1;
+        await covenant.connect(trader).challengeUpdate(tokenOutAddress, t2, EVIDENCE_HASH);
+        await covenant.resolveChallenge(2n, true); // would throw if it reverted or underflowed
+        expect(await covenant.updaterBond()).to.equal(4n); // still 4 - never underflowed, never reverted
+      });
+
+      it("edge case: resolution uses the challenge's original claimed timestamp, not the resolution-time clock", async function () {
+        // Submit near the edge of a real window, then let a lot of real
+        // time pass before resolving. If resolveChallenge accidentally
+        // re-checked the window against block.timestamp at resolution time
+        // instead of trusting what was recorded at submission, this would
+        // wrongly fail or behave differently long after the fact.
+        const { covenant, tokenOut, other } = await networkHelpers.loadFixture(deployCovenantFixture);
+        const tokenOutAddress = await tokenOut.getAddress();
+        const updateTimestamp = await networkHelpers.time.latest();
+
+        await networkHelpers.time.increase(CHALLENGE_WINDOW_SECONDS - 5);
+        await covenant.connect(other).challengeUpdate(tokenOutAddress, updateTimestamp, EVIDENCE_HASH);
+
+        await networkHelpers.time.increase(30 * 24 * 60 * 60); // a month later
+        const stored = await covenant.challenges(1n);
+        expect(stored.updateTimestamp).to.equal(updateTimestamp);
+
+        await covenant.resolveChallenge(1n, false); // would throw if this wrongly re-checked the window at resolve time
+      });
+    });
+  });
 });

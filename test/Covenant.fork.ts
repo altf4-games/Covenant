@@ -181,4 +181,57 @@ describe("Covenant (fork, real BSC mainnet state)", function () {
     expect(await usdt.balanceOf(covenantAddress)).to.equal(0n);
     expect(await nvdab.balanceOf(covenantAddress)).to.equal(0n);
   });
+
+  it("slashable guard: a real challenge against a deliberately-wrong oracle update produces a real slash transfer", async function () {
+    // The real oracle updater posts a real bond (real BNB, on this same
+    // fork of BSC mainnet) - not a mocked balance.
+    const bondAmount = ethers.parseEther("0.02");
+    await covenant.connect(oracleUpdater).postBond({ value: bondAmount });
+    expect(await covenant.updaterBond()).to.equal(bondAmount);
+
+    // Deliberately wrong: report NVDAB as not halted, as if the updater
+    // either lied or read Binance's real status endpoint incorrectly.
+    // Whether it was actually wrong is exactly the thing this mechanism
+    // does NOT verify on chain (see contracts/Covenant.sol's storage-section
+    // comment) - a human resolver checking the real endpoint is what
+    // decides that. This test plays that resolver's role explicitly.
+    const updateTx = await covenant.connect(oracleUpdater).updateOracle(NVDAB, false);
+    const updateReceipt = await updateTx.wait();
+    const updateBlock = await ethers.provider.getBlock(updateReceipt!.blockNumber);
+    const updateTimestamp = updateBlock!.timestamp;
+
+    // A real evidence hash: keccak256 of what a resolver would actually
+    // check - a real fetch of the public status endpoint from
+    // friction-log.md B15, exactly the class of evidence the spec calls for.
+    const evidenceHash = ethers.keccak256(
+      ethers.toUtf8Bytes(`real RWA status fetch for NVDAB at ${updateTimestamp}: reasonCode=MARKET_PAUSED, contradicts the update's halted=false`),
+    );
+
+    const challengeTx = await covenant.connect(trader).challengeUpdate(NVDAB, updateTimestamp, evidenceHash);
+    const challengeReceipt = await challengeTx.wait();
+    const challengeId = 1n;
+
+    const challengeLog = challengeReceipt!.logs
+      .map((l) => covenant.interface.parseLog(l as any))
+      .find((p) => p?.name === "ChallengeSubmitted");
+    expect(challengeLog!.args.challenger).to.equal(trader.address);
+    expect(challengeLog!.args.evidenceHash).to.equal(evidenceHash);
+
+    const expectedSlash = (bondAmount * 2000n) / 10000n; // SLASH_BPS = 20%
+    const challengerBalanceBefore = await ethers.provider.getBalance(trader.address);
+
+    // The owner (default signer, this test's msg.sender) resolves it -
+    // deliberately manual, per the design's disclosed simplification.
+    const resolveTx = await covenant.resolveChallenge(challengeId, true);
+    await resolveTx.wait();
+
+    const challengerBalanceAfter = await ethers.provider.getBalance(trader.address);
+    expect(challengerBalanceAfter - challengerBalanceBefore).to.equal(expectedSlash);
+    expect(await covenant.updaterBond()).to.equal(bondAmount - expectedSlash);
+
+    const stored = await covenant.challenges(challengeId);
+    expect(stored.resolved).to.equal(true);
+    expect(stored.upheld).to.equal(true);
+    expect(await covenant.openChallengeCount()).to.equal(0n);
+  });
 });

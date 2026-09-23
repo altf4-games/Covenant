@@ -45,7 +45,14 @@ const asUint = (data: string, i: number) => BigInt(slot(data, i));
 // comment for why this isn't computed at runtime).
 const ATTESTATION_TOPIC = "0xacd51d375387877499961a137980c39a84aa7985463fa41e068cb224c98838fe";
 
+// keccak256("ChallengeResolved(uint256,bool,uint256)") - Phase 2.5's
+// slashable guard. Computed once with ethers, same verification discipline
+// as ATTESTATION_TOPIC above; cross-checked against a real ChallengeResolved
+// log from test/Covenant.fork.ts's slashable-guard fork test.
+const CHALLENGE_RESOLVED_TOPIC = "0x37b4c820a08cf4a6b36e86c12f351c8de017e389247b2c8c5151cde2f37f85ee";
+
 const TX_HASHES_FILE = new URL("../data/judge-tx-hashes.json", import.meta.url).pathname;
+const CHALLENGE_TX_HASHES_FILE = new URL("../data/judge-challenge-tx-hashes.json", import.meta.url).pathname;
 
 interface VerifiedAttestation {
   txHash: string;
@@ -112,6 +119,58 @@ export async function verifyAttestationTx(rpcTarget: RpcTarget, covenantAddress:
   };
 }
 
+interface VerifiedChallengeResolution {
+  txHash: string;
+  ok: boolean;
+  detail: string;
+  blockNumber?: string;
+  challengeId?: string;
+  upheld?: boolean;
+  slashedAmount?: string;
+}
+
+/**
+ * Re-fetches a challenge-resolution transaction's real receipt and
+ * independently decodes its ChallengeResolved log - same discipline as
+ * verifyAttestationTx: nothing here is trusted except what's actually in
+ * the receipt the RPC returns.
+ */
+export async function verifyChallengeResolutionTx(
+  rpcTarget: RpcTarget,
+  covenantAddress: string,
+  txHash: string,
+): Promise<VerifiedChallengeResolution> {
+  const { result: receipt } = await jsonRpcWithFailover("eth_getTransactionReceipt", [txHash], { rpcUrls: asRpcList(rpcTarget) });
+  if (!receipt) {
+    return { txHash, ok: false, detail: "no receipt found - transaction does not exist on this chain" };
+  }
+  if (receipt.status !== "0x1") {
+    return { txHash, ok: false, detail: `transaction reverted (status=${receipt.status})` };
+  }
+
+  const log = (receipt.logs as Array<{ address: string; topics: string[]; data: string }>).find(
+    (l) => l.address.toLowerCase() === covenantAddress.toLowerCase() && l.topics[0]?.toLowerCase() === CHALLENGE_RESOLVED_TOPIC,
+  );
+  if (!log) {
+    return { txHash, ok: false, detail: "no ChallengeResolved event found from this contract in this transaction's receipt", blockNumber: receipt.blockNumber };
+  }
+
+  const challengeId = BigInt(log.topics[1]);
+  const data = log.data.replace(/^0x/, "");
+  const upheld = BigInt("0x" + data.slice(0, 64)) !== 0n;
+  const slashedAmount = BigInt("0x" + data.slice(64, 128));
+
+  return {
+    txHash,
+    ok: true,
+    detail: "verified",
+    blockNumber: receipt.blockNumber,
+    challengeId: challengeId.toString(),
+    upheld,
+    slashedAmount: slashedAmount.toString(),
+  };
+}
+
 export async function readTxHashList(): Promise<string[]> {
   if (process.env.JUDGE_TX_HASHES) {
     return process.env.JUDGE_TX_HASHES.split(",").map((h) => h.trim()).filter(Boolean);
@@ -125,7 +184,25 @@ export async function readTxHashList(): Promise<string[]> {
   }
 }
 
-export async function runJudge(rpcTarget: RpcTarget, covenantAddress: string, txHashes: string[]) {
+export async function readChallengeTxHashList(): Promise<string[]> {
+  if (process.env.JUDGE_CHALLENGE_TX_HASHES) {
+    return process.env.JUDGE_CHALLENGE_TX_HASHES.split(",").map((h) => h.trim()).filter(Boolean);
+  }
+  try {
+    const raw = await readFile(CHALLENGE_TX_HASHES_FILE, "utf8");
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+export async function runJudge(
+  rpcTarget: RpcTarget,
+  covenantAddress: string,
+  txHashes: string[],
+  challengeTxHashes: string[] = [],
+) {
   const rpcUrls = asRpcList(rpcTarget);
   const { result: mandateRaw } = await ethCallWithFailover(covenantAddress, SELECTORS.mandate, { rpcUrls });
   const mandate = {
@@ -136,8 +213,19 @@ export async function runJudge(rpcTarget: RpcTarget, covenantAddress: string, tx
   };
 
   const results = await Promise.all(txHashes.map((h) => verifyAttestationTx(rpcUrls, covenantAddress, h)));
+  const challengeResults = await Promise.all(
+    challengeTxHashes.map((h) => verifyChallengeResolutionTx(rpcUrls, covenantAddress, h)),
+  );
 
-  return { mandate, results, allVerified: results.length > 0 && results.every((r) => r.ok) };
+  return {
+    mandate,
+    results,
+    challengeResults,
+    allVerified:
+      results.length + challengeResults.length > 0 &&
+      results.every((r) => r.ok) &&
+      challengeResults.every((r) => r.ok),
+  };
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
@@ -158,11 +246,17 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     console.log(`  rpc candidates: ${rpcUrls.join(", ")}\n`);
 
     const txHashes = await readTxHashList();
-    if (txHashes.length === 0) {
-      console.log("No transactions listed in data/judge-tx-hashes.json or JUDGE_TX_HASHES - showing mandate state only.\n");
+    const challengeTxHashes = await readChallengeTxHashList();
+    if (txHashes.length === 0 && challengeTxHashes.length === 0) {
+      console.log("No transactions listed in data/judge-tx-hashes.json, data/judge-challenge-tx-hashes.json, JUDGE_TX_HASHES, or JUDGE_CHALLENGE_TX_HASHES - showing mandate state only.\n");
     }
 
-    const { mandate, results, allVerified } = await runJudge(rpcUrls, covenantAddress, txHashes);
+    const { mandate, results, challengeResults, allVerified } = await runJudge(
+      rpcUrls,
+      covenantAddress,
+      txHashes,
+      challengeTxHashes,
+    );
 
     console.log("Mandate (read live from chain):");
     console.log(`  active:              ${mandate.active}`);
@@ -181,10 +275,25 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     }
 
     if (results.length > 0) {
-      console.log(`\n${results.filter((r) => r.ok).length}/${results.length} transactions independently verified.`);
+      console.log(`\n${results.filter((r) => r.ok).length}/${results.length} attestation transactions independently verified.`);
     }
 
-    process.exitCode = allVerified || txHashes.length === 0 ? 0 : 1;
+    if (challengeResults.length > 0) {
+      console.log("\nSlashable-guard challenge resolutions:");
+      for (const r of challengeResults) {
+        const status = r.ok ? "PASS" : "FAIL";
+        console.log(`[${status}] ${r.txHash}`);
+        if (r.ok) {
+          console.log(`    block=${r.blockNumber} challengeId=${r.challengeId} upheld=${r.upheld} slashedAmount=${r.slashedAmount}`);
+        } else {
+          console.log(`    ${r.detail}`);
+        }
+      }
+      console.log(`\n${challengeResults.filter((r) => r.ok).length}/${challengeResults.length} challenge resolutions independently verified.`);
+    }
+
+    const nothingToVerify = txHashes.length === 0 && challengeTxHashes.length === 0;
+    process.exitCode = allVerified || nothingToVerify ? 0 : 1;
   })().catch((error) => {
     console.error(error);
     process.exitCode = 1;

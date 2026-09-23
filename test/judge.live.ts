@@ -2,7 +2,7 @@ import { expect } from "chai";
 import { spawn, ChildProcess } from "node:child_process";
 import { ethers } from "ethers";
 import covenantArtifact from "../artifacts/contracts/Covenant.sol/Covenant.json" with { type: "json" };
-import { verifyAttestationTx, runJudge } from "../scripts/judge.js";
+import { verifyAttestationTx, verifyChallengeResolutionTx, runJudge } from "../scripts/judge.js";
 
 // Real forked node, real deployed Covenant, real transactions (one deny,
 // one allow, funded by impersonating a real USDT holder) - judge.ts's job
@@ -40,13 +40,21 @@ async function waitForRpc(url: string, timeoutMs: number): Promise<void> {
 }
 
 describe("judge.ts (live, real transactions, independent re-derivation from real receipts)", function () {
-  this.timeout(120_000);
+  // 180s, not the usual 120s: this fixture's before() now sends 12+
+  // sequential real transactions (deploy, mandate setup, two real trades,
+  // bond/challenge/resolve x2) against a real forked RPC - found live to
+  // genuinely exceed 120s under real network latency, not hung. See
+  // README's "Tests, and what they caught" for the NONCE_EXPIRED fix this
+  // same growth in transaction count required first.
+  this.timeout(180_000);
 
   let nodeProcess: ChildProcess;
   let covenantAddress: string;
   let denyTxHash: string;
   let allowTxHash: string;
   let fakeTxHash: string;
+  let upheldResolutionTxHash: string;
+  let dismissedResolutionTxHash: string;
 
   before(async function () {
     nodeProcess = spawn(
@@ -57,9 +65,15 @@ describe("judge.ts (live, real transactions, independent re-derivation from real
     await waitForRpc(RPC_URL, 60_000);
 
     const provider = new ethers.JsonRpcProvider(RPC_URL);
-    const signer = new ethers.Wallet(FUNDED_PRIVATE_KEY, provider);
+    // NonceManager, not a raw Wallet: this fixture now sends 12+ sequential
+    // real transactions from one signer (deploy, mandate setup, two real
+    // trades, bond/challenge/resolve x2) - the exact class of NONCE_EXPIRED
+    // race found live building scripts/chaos-fork.ts (see README's "Tests,
+    // and what they caught"), reproduced here once enough sends were added.
+    const signer = new ethers.NonceManager(new ethers.Wallet(FUNDED_PRIVATE_KEY, provider));
+    const signerAddress = await signer.getAddress();
     const factory = new ethers.ContractFactory(covenantArtifact.abi, covenantArtifact.bytecode, signer);
-    const covenant = await factory.deploy(USDT, PANCAKE_V3_SWAP_ROUTER, signer.address, 900);
+    const covenant = await factory.deploy(USDT, PANCAKE_V3_SWAP_ROUTER, signerAddress, 900);
     await covenant.waitForDeployment();
     covenantAddress = await covenant.getAddress();
 
@@ -79,7 +93,7 @@ describe("judge.ts (live, real transactions, independent re-derivation from real
     const usdtAbi = ["function transfer(address,uint256) returns (bool)", "function approve(address,uint256) returns (bool)"];
     const usdtAsWhale = new ethers.Contract(USDT, usdtAbi, whale);
     const amountIn = ethers.parseUnits("5", 18);
-    await (await usdtAsWhale.transfer(signer.address, amountIn)).wait();
+    await (await usdtAsWhale.transfer(signerAddress, amountIn)).wait();
     await provider.send("hardhat_stopImpersonatingAccount", [USDT_WHALE]);
 
     const usdtAsSigner = new ethers.Contract(USDT, usdtAbi, signer);
@@ -88,6 +102,26 @@ describe("judge.ts (live, real transactions, independent re-derivation from real
     allowTxHash = (await allowTx.wait()).hash;
 
     fakeTxHash = "0x" + "ab".repeat(32); // a real-looking hash that was never mined
+
+    // Real bond, real challenge, two real resolutions - one dismissed (no
+    // funds move), one upheld (a real slash transfer) - so judge.ts has
+    // real receipts of both kinds to independently re-derive.
+    await (await (covenant as any).postBond({ value: ethers.parseEther("0.02") })).wait();
+    const updateTx = await (covenant as any).updateOracle(NVDAB, false);
+    const updateReceipt = await updateTx.wait();
+    const updateBlock = await provider.getBlock(updateReceipt!.blockNumber);
+    const updateTimestamp = updateBlock!.timestamp;
+    const evidenceHash = ethers.keccak256(ethers.toUtf8Bytes("judge.live.ts test evidence"));
+
+    const challenge1 = await (covenant as any).challengeUpdate(NVDAB, updateTimestamp, evidenceHash);
+    await challenge1.wait();
+    const dismissedResolutionTx = await (covenant as any).resolveChallenge(1n, false);
+    dismissedResolutionTxHash = (await dismissedResolutionTx.wait()).hash;
+
+    const challenge2 = await (covenant as any).challengeUpdate(NVDAB, updateTimestamp, evidenceHash);
+    await challenge2.wait();
+    const upheldResolutionTx = await (covenant as any).resolveChallenge(2n, true);
+    upheldResolutionTxHash = (await upheldResolutionTx.wait()).hash;
   });
 
   after(function () {
@@ -122,6 +156,34 @@ describe("judge.ts (live, real transactions, independent re-derivation from real
     expect(mandate.active).to.equal(true);
     expect(mandate.maxNotionalPerTrade).to.equal(ethers.parseUnits("50", 18).toString());
     expect(results).to.have.length(2);
+    expect(allVerified).to.equal(true);
+  });
+
+  it("independently verifies a real dismissed challenge resolution - no slash, upheld=false", async function () {
+    const result = await verifyChallengeResolutionTx(RPC_URL, covenantAddress, dismissedResolutionTxHash);
+    expect(result.ok).to.equal(true);
+    expect(result.upheld).to.equal(false);
+    expect(result.slashedAmount).to.equal("0");
+    expect(result.challengeId).to.equal("1");
+  });
+
+  it("independently verifies a real upheld challenge resolution - matches the real slash amount, 20% of the bond", async function () {
+    const result = await verifyChallengeResolutionTx(RPC_URL, covenantAddress, upheldResolutionTxHash);
+    expect(result.ok).to.equal(true);
+    expect(result.upheld).to.equal(true);
+    expect(result.challengeId).to.equal("2");
+    expect(result.slashedAmount).to.equal(((ethers.parseEther("0.02") * 2000n) / 10000n).toString());
+  });
+
+  it("runJudge verifies both attestations and challenge resolutions together in one pass", async function () {
+    const { challengeResults, allVerified } = await runJudge(
+      RPC_URL,
+      covenantAddress,
+      [denyTxHash, allowTxHash],
+      [dismissedResolutionTxHash, upheldResolutionTxHash],
+    );
+    expect(challengeResults).to.have.length(2);
+    expect(challengeResults.every((r) => r.ok)).to.equal(true);
     expect(allVerified).to.equal(true);
   });
 
