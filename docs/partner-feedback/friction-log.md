@@ -236,6 +236,25 @@ Transfer events found: 0
 
 One more thing made this more than "one weird number" at the time: in that same session, the exact same `volume24h` value (`13756649423.5843249`) was also returned for **TSLAon**, a completely different contract on a completely different provider - real, live, currently-trading, 31 real transfers found on chain in the same window. Separately, `NVDAB` and `NVDAx` (different tickers, different providers) also briefly shared an identical value (`"20312925390"`) despite `NVDAB` showing 2177 real on-chain transfers against `NVDAx`'s 3. **Re-checked fresh in a later session**, though: `TSLAx` and `TSLAon` no longer match each other at all (`12433648121` vs `13756471512.88...`), so this isn't a permanently frozen or hardcoded shared value - more likely some kind of intermittent caching or batching on Binance's side that occasionally lets two tokens' figures collide for a window, not a constant. Downgrading that part of the claim accordingly; it's suggestive, not proven.
 
+### B18. `[PITFALL]` `wallet send` silently requires the recipient to already be in the App's address book - undocumented in the skill, found on the very first real send
+Hit on 2026-09-24, Phase 3 Day 1's gate: funding a freshly-generated deployer address (needed because `baw contract-call` requires an existing `--to`, so it can't deploy a contract - there is no `contract deploy`/`contract create` command anywhere in the CLI's help output).
+
+```
+$ baw wallet send --binanceChainId 56 --amount 0.0003 --tokenAddress 0xeeee...eeee --recipient 0x4FF4...0d418 --json
+{
+  "success": false,
+  "error": {
+    "code": 351703,
+    "name": "SERVICE_ERROR",
+    "message": "This transfer was blocked because the recipient address is not in your address book. Add this address in your binance wallet app, then retry the transfer."
+  }
+}
+```
+
+Nothing in `AW/SKILL.md` or `AW/references/wallet-view.md`/`approvals.md` mentions an address-book precondition for `wallet send` - the flag is documented as `--recipient <recipient>`, full stop, no note that it must already be a saved contact. A third-party press mention ("transfers restricted to whitelisted addresses saved in a user's address book") had been flagged in `opus-2026-09-24/d-agentic-wallet-mechanics.md` as unverified, search-snippet-only. **This confirms it's real**, live, on the very first attempt - not a search artifact.
+
+This is a genuine UX/DX gap for exactly the pattern Binance's own docs recommend (a fresh, disposable deployer key per project, funded from the main wallet): the CLI gives no way to add an address to the book programmatically, so a human has to open the App and add the recipient by hand before any agent-driven send to a new address can succeed. An unattended agent following the documented flow verbatim would simply fail here with no recovery path.
+
 The load-bearing claim - real reported volume, zero real on-chain activity - was independently re-verified in a separate session, at a different time, with a different check of the same window size, and held: still 0 real `Transfer` events for `TSLAx`. The check method itself was also verified against a known-liquid control in the same pass (`NVDAB`, same window size, same RPC: 12,893 real transfers found), ruling out "the on-chain check itself is just broken."
 
 **Verdict:** `tokenInfo.volume24h` cannot be used on its own to judge whether a tokenized-stock listing is actually liquid - it doesn't move with real on-chain activity for at least one real, reproducible case (`TSLAx`). `survey` (this project's own multi-provider comparison tool) reports it anyway, labeled `binanceReported`, next to an independently-verified `onChainVerified` transfer count, and makes tradability decisions off the latter only. **Redesign suggestion:** either fix `volume24h` to reflect real per-token activity, or document plainly that it's not a live per-token figure - right now it looks like real-time per-token data and isn't.
@@ -299,6 +318,42 @@ Enabled developer mode on a newly-created Agentic Wallet. **It turns itself back
 **Mitigation applied:** schedule at least one trivial real transaction (e.g. a $0.01 self-transfer) at least every 5–6 days during the build window to keep developer mode alive, rather than relying on it staying on for the full ~3 weeks untouched.
 
 **Redesign suggestion:** surface a countdown or expiry warning in the Agentic Wallet UI before developer mode silently disables, and mention the timeout explicitly on the developer-mode-enable screen and in the docs.
+
+### C15. `[AI-STACK][PITFALL]` `wallet send` to a new address is blocked with no way to fix it from the CLI - confirmed live, 2026-09-24
+Phase 3 Day 1's gate needed a fresh, disposable deployer key funded with a small amount of real BNB from the Agentic Wallet (necessary because `contract-call` requires an existing `--to`, so it can't deploy a contract at all - see C16). The very first `wallet send` to that brand-new address failed:
+
+```
+$ baw wallet send --binanceChainId 56 --amount 0.0003 --tokenAddress 0xeeee...eeee --recipient 0x4FF4...0d418 --json
+{
+  "success": false,
+  "error": {
+    "code": 351703,
+    "name": "SERVICE_ERROR",
+    "message": "This transfer was blocked because the recipient address is not in your address book. Add this address in your binance wallet app, then retry the transfer."
+  }
+}
+```
+
+Nothing in `AW/SKILL.md` or the `wallet send` reference docs mentions an address-book precondition - the flag is documented as `--recipient <recipient>`, full stop. A third-party press mention of address-book-restricted transfers had been flagged as unverified, search-snippet-only, in pre-build research; this confirms it's real, on the very first live attempt, not a search artifact.
+
+**No CLI escape hatch.** There is no `baw` command to add an address to the book. The fix required a human opening the Binance App and manually saving the address - and even that took several attempts: toggling the unrelated `abnormalTxnHandling` setting from `AutoReject` did nothing (different guardrail, same error), and the first attempt at adding the address inside the app also didn't immediately clear the block, for reasons still unclear (possibly network-selection or propagation delay - the second attempt, minutes later, worked).
+
+**Why it matters for the special:** this is exactly the pattern Binance's own docs recommend (a fresh, disposable per-project deployer key, funded from the main wallet) and it has no unattended path. An autonomous agent following the documented flow verbatim would simply fail here with no recovery - a real gap for the "automated strategies" story Binance's own workshop pitched.
+
+### C16. `[AI-STACK][PITFALL]` A contract-creation receipt with `to: ""` instead of `to: null` crashes hardhat-ethers's signer wrapper mid-deploy
+Confirmed live, 2026-09-24, deploying `contracts/Gate.sol` (Phase 3 Day 1's throwaway gate-test contract) to real BSC mainnet via `bsc-mainnet.public.blastapi.io`.
+
+`ContractFactory.deploy()` broadcast the transaction successfully - it really did land on chain, in a real block, with real bytecode at the resulting address, independently confirmed via a raw `eth_getTransactionReceipt` call afterward. But the promise from `.deploy()` still rejected:
+
+```
+Error: invalid value for value.to (invalid address (argument="address", value="", code=INVALID_ARGUMENT, ...))
+  at HardhatEthersProvider.getTransaction (.../hardhat-ethers-provider.ts:411:7)
+  at async checkTx (.../signers.ts:193:28)
+```
+
+The root cause: `hardhat-ethers`'s `HardhatEthersSigner.sendTransaction()` wrapper does an extra post-broadcast re-fetch of the transaction (`checkTx`) to hand back a fully-typed ethers `TransactionResponse`. For a contract-creation transaction, the raw JSON-RPC response from this endpoint sets `"to": ""` (empty string) rather than `"to": null`. Ethers v6's own transaction formatter treats an empty string as an invalid address and throws, rather than treating it as "no recipient" the way it does for `null`/`undefined`. This isn't a Covenant bug and isn't Binance's stack either - it's an RPC-formatting quirk this specific free-tier endpoint has, colliding with a stricter-than-necessary parser in `hardhat-ethers`.
+
+**Practically:** the deploy transaction itself always succeeds or fails independently of this crash - the crash happens strictly in the reporting/confirmation layer, after broadcast. But naive script logic that assumes `.deploy()` resolving is the only success signal will incorrectly treat every mainnet-via-`bsc`-network deploy as failed, even when it worked. **Fixed by bypassing `hardhat-ethers`'s wrapped signer for real mainnet deploys**: use a raw `ethers.Wallet` connected directly to a plain `ethers.JsonRpcProvider`, the same pattern `scripts/chaos-fork.ts` and `scripts/seed-status-page-demo.ts` already use against the fork, and independently confirm success via a direct `eth_getTransactionReceipt` call rather than trusting the ethers promise chain alone - the same "verify on-chain state, don't trust the return value" discipline this project already holds to everywhere else.
 
 ---
 

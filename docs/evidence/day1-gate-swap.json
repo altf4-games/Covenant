@@ -1,0 +1,37 @@
+{
+  "quote": {
+    "fromCoinSymbol": "BNB",
+    "fromCoinAmount": "0.00045",
+    "toCoinSymbol": "NVDAB",
+    "toCoinAmount": "0.001578538134325674",
+    "slippage": 0.01
+  },
+  "swap_order": {
+    "orderType": "market",
+    "orderId": "26092400001913061390",
+    "chain": "56",
+    "fromToken": "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE",
+    "fromTokenName": "BNB",
+    "fromTokenQty": "0.000450000000000000",
+    "toToken": "0x02Fca66C1D1aFB4E2A7884261eB00F63598a7436",
+    "toTokenName": "NVDAB",
+    "toTokenActualQty": "0.001578888415748593",
+    "status": "FINISHED",
+    "slippage": "1.0000",
+    "txHash": "0xaf1be071244418b88b1b0d817fe565195fe9775eaa2b598f3667cc4c003eae37",
+    "bookTime": "2026-09-24T20:27:52+05:30",
+    "updatedTime": "2026-09-24T20:27:53+05:30"
+  },
+  "independent_verification": {
+    "receipt_status": "0x1",
+    "block": "0x760af7d",
+    "from": "0xaa963e1b4f913975ee81139f4ba2953951e45844",
+    "real_nvdab_transfer_to_wallet": true,
+    "nvdab_contract": "0x02fca66c1d1afb4e2a7884261eb00f63598a7436",
+    "wallet_balance_after": {
+      "NVDAB": "0.001578888415748593",
+      "value_usd": "0.34983430627741574"
+    },
+    "note": "execution went through a router (to=0xb300000b72deaeb607a12d5f54773d1c19c7028d), not a direct pool - multiple intermediate hops visible in logs, consistent with the workshop's 'RFQ or pool, you don't pick it' guidance"
+  }
+}

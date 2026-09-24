@@ -1,0 +1,18 @@
+{
+  "success": true,
+  "data": {
+    "orderId": "26092400001913058784",
+    "status": "BROADCASTED",
+    "txHash": "0xa72cb5e133ac2be69e041f63f1bc159306ddf3691253af873bd022502aaabda8",
+    "message": null
+  },
+  "independent_verification": {
+    "receipt_status": "0x1",
+    "block": "0x760af01",
+    "from": "0xaa963e1b4f913975ee81139f4ba2953951e45844",
+    "to": "0x513f6ef7626afca3c4a9c1964a165ee3183b150d",
+    "pingCount_after": "1",
+    "lastCaller_after": "0xaa963e1b4f913975ee81139f4ba2953951e45844",
+    "note": "all fields re-read directly from raw eth_getTransactionReceipt and eth_call, not trusted from baw's own return value"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "success": true,
+  "data": {
+    "fromCoinSymbol": "BNB",
+    "fromCoinAmount": "0.00045",
+    "toCoinSymbol": "NVDAB",
+    "toCoinAmount": "0.001578538134325674",
+    "slippage": 0.01
+  }
+}

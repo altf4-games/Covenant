@@ -27,6 +27,15 @@ const BSC_RPC_URL = process.env.BSC_RPC_URL || "https://bsc-mainnet.public.blast
 
 export default defineConfig({
   plugins: [hardhatToolboxMochaEthersPlugin],
+  // Etherscan API V2: one key covers BSC and 60+ other EVM chains now,
+  // rather than a BscScan-specific key. hardhat-verify is bundled via the
+  // toolbox above, so this is the only config needed - see
+  // node_modules/@nomicfoundation/hardhat-verify/README.md.
+  verify: {
+    etherscan: {
+      apiKey: process.env.ETHERSCAN_API_KEY || "",
+    },
+  },
   // EDR only ships built-in hardfork-activation history for Ethereum mainnet and
   // OP chains, not BSC (chain id 56) - without this it refuses to fork with
   // "no known hardfork for execution on historical block". BSC's Cancun-equivalent
