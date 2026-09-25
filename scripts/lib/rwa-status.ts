@@ -76,3 +76,16 @@ export async function fetchAssetMarketStatus(chainId: number, contractAddress: s
 export function isHalted(status: Pick<AssetMarketStatus, "openState" | "reasonCode">): boolean {
   return !(status.openState && status.reasonCode === "TRADING");
 }
+
+/**
+ * Converts a decimal price string from the RWA dynamic endpoint (e.g.
+ * "226.40605755959772329895") into Covenant's 1e18 fixed-point `priceUsd`.
+ * Truncates past 18 decimals: the endpoint returns up to 36 for some
+ * tokens (xStocks), which `parseUnits` would reject outright.
+ */
+export function priceToUsdE18(price: string): bigint {
+  const trimmed = price.trim();
+  if (!/^\d+(\.\d+)?$/.test(trimmed)) throw new Error(`not a plain decimal price: "${price}"`);
+  const [whole, fraction = ""] = trimmed.split(".");
+  return BigInt(whole) * 10n ** 18n + BigInt((fraction + "0".repeat(18)).slice(0, 18));
+}

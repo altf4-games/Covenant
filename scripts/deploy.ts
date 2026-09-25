@@ -1,112 +1,164 @@
 /**
- * Deploys Covenant, sets an initial mandate, allowlists the default token,
- * and pushes a real initial oracle reading - all in one script, verified by
- * reading every value back on chain afterward rather than trusting the
- * deploy transactions' return values alone.
+ * Deploys Covenant v2 (the reconciled mandate), configures one token and a
+ * mandate, then reads every value back from chain before reporting success.
  *
- * Network-agnostic: run it against whichever network Hardhat targets. Today
- * that's the fork; the same script deploys to real BSC mainnet in Phase 3
- * without changes, per PLAN.md's "config change, not new development" plan.
+ * Roles: the deployer becomes the owner. The oracle updater and the agent
+ * (the Binance Agentic Wallet) must be two other addresses; the contract
+ * rejects any overlap. There is deliberately no default for either: the v1
+ * script defaulted the updater to the deployer, which the red-team flagged
+ * (docs/research/opus-2026-09-24/a-redteam.md H6).
+ *
+ * Uses a raw ethers.Wallet + JsonRpcProvider, not hardhat-ethers's wrapped
+ * signer: on this RPC a contract-creation receipt comes back with `to: ""`,
+ * which crashes the wrapper after a successful deploy (friction-log.md C16).
  *
  * Usage:
- *   npx hardhat run scripts/deploy.ts --network bscFork
- *
- * Env vars (all optional, sane defaults for a fork/testnet deploy):
- *   ORACLE_UPDATER_ADDRESS     defaults to the deployer's own address
- *   ORACLE_STALENESS_SECONDS   defaults to 900 (15 minutes)
- *   MANDATE_TOKEN_ADDRESS      defaults to real NVDAB (verified-facts.md)
- *   MANDATE_MAX_NOTIONAL       defaults to "50" (quote-token units, human-readable)
- *   MANDATE_MAX_TRADES_PER_DAY defaults to 10
- *   MANDATE_DURATION_DAYS      defaults to 30
+ *   npx tsx scripts/deploy.ts
+ * Env:
+ *   DEPLOYER_PRIVATE_KEY, ORACLE_UPDATER_ADDRESS, AGENT_ADDRESS   required
+ *   BSC_RPC_URL                    default https://bsc-mainnet.public.blastapi.io
+ *   MANDATE_TOKEN_ADDRESS          default real NVDAB (verified-facts.md)
+ *   MANDATE_MAX_NOTIONAL_USD       default "1"   (per trade, dollars)
+ *   MANDATE_MAX_TRADES_PER_DAY     default 5
+ *   MANDATE_DURATION_DAYS          default 30
+ *   TOKEN_MAX_SLIPPAGE_BPS         default 100 (1%)
+ *   TOKEN_MAX_POSITION_USD         default "2"   (dollars)
+ *   ORACLE_STALENESS_SECONDS       default 900
+ *   DECISION_TTL_SECONDS           default 600
  */
-import { network } from "hardhat";
-import { fetchAssetMarketStatus, isHalted } from "./lib/rwa-status.js";
+import { ethers } from "ethers";
+import covenantArtifact from "../artifacts/contracts/Covenant.sol/Covenant.json" with { type: "json" };
 
-const USDT = "0x55d398326f99059fF775485246999027B3197955";
-const PANCAKE_V3_SWAP_ROUTER = "0x1b81D678ffb9C0263b24A97847620C99d213eB14";
-const DEFAULT_MANDATE_TOKEN = "0x02fca66c1d1afb4e2a7884261eb00f63598a7436"; // real NVDAB
-const BSC_BINANCE_CHAIN_ID = 56;
-const ONE_DAY_SECONDS = 24 * 60 * 60;
+export const BSC_USDT = "0x55d398326f99059fF775485246999027B3197955";
+export const NVDAB = "0x02fca66c1d1afb4e2a7884261eb00f63598a7436";
 
-async function main() {
-  const { ethers } = await network.getOrCreate();
-  const [deployer] = await ethers.getSigners();
-
-  // `||`, not `??`, throughout: an empty-but-present .env line sets these to
-  // "", not undefined, which `??` would let straight through unfixed - see
-  // hardhat.config.ts's BSC_RPC_URL comment for where this was first caught.
-  const oracleUpdaterAddress = process.env.ORACLE_UPDATER_ADDRESS || deployer.address;
-  const stalenessBound = BigInt(process.env.ORACLE_STALENESS_SECONDS || 900);
-  const mandateToken = process.env.MANDATE_TOKEN_ADDRESS || DEFAULT_MANDATE_TOKEN;
-  const maxNotionalPerTrade = ethers.parseUnits(process.env.MANDATE_MAX_NOTIONAL || "50", 18);
-  const maxTradesPerDay = BigInt(process.env.MANDATE_MAX_TRADES_PER_DAY || 10);
-  const mandateDurationDays = Number(process.env.MANDATE_DURATION_DAYS || 30);
-
-  console.log(`Deploying Covenant as ${deployer.address}...`);
-  console.log(`  quoteToken (USDT):        ${USDT}`);
-  console.log(`  swapRouter (PancakeV3):   ${PANCAKE_V3_SWAP_ROUTER}`);
-  console.log(`  oracleUpdater:            ${oracleUpdaterAddress}`);
-  console.log(`  stalenessBound:           ${stalenessBound}s`);
-
-  const covenant = await ethers.deployContract("Covenant", [
-    USDT,
-    PANCAKE_V3_SWAP_ROUTER,
-    oracleUpdaterAddress,
-    stalenessBound,
-  ]);
-  await covenant.waitForDeployment();
-  const covenantAddress = await covenant.getAddress();
-  console.log(`Deployed at ${covenantAddress}`);
-
-  console.log(`\nAllowlisting mandate token ${mandateToken}...`);
-  await (await covenant.setAllowedToken(mandateToken, true)).wait();
-
-  const latestBlock = await ethers.provider.getBlock("latest");
-  const expiry = latestBlock!.timestamp + mandateDurationDays * ONE_DAY_SECONDS;
-  console.log(`Setting mandate: maxNotionalPerTrade=${ethers.formatUnits(maxNotionalPerTrade, 18)} maxTradesPerDay=${maxTradesPerDay} expiry=${new Date(expiry * 1000).toISOString()}...`);
-  await (await covenant.setMandate(maxNotionalPerTrade, maxTradesPerDay, expiry)).wait();
-
-  // Push a real initial oracle reading rather than leaving it unset (which
-  // previewDecision treats as stale/denied, correctly, but there's no reason
-  // to deploy into that state when the real answer is one live call away).
-  if (oracleUpdaterAddress.toLowerCase() === deployer.address.toLowerCase()) {
-    console.log(`\nFetching live RWA status for ${mandateToken} to seed the oracle...`);
-    try {
-      const status = await fetchAssetMarketStatus(BSC_BINANCE_CHAIN_ID, mandateToken);
-      const halted = isHalted(status);
-      console.log(`  live: openState=${status.openState} reasonCode=${status.reasonCode} -> halted=${halted}`);
-      await (await covenant.updateOracle(mandateToken, halted)).wait();
-    } catch (error) {
-      console.warn(`  could not seed the oracle from live data (${(error as Error).message}) - it will read as stale until updateOracle is called.`);
-    }
-  } else {
-    console.log(`\noracleUpdater is a different address (${oracleUpdaterAddress}) - skipping initial oracle seed, that account must call updateOracle itself.`);
-  }
-
-  // Verify every claim above by reading it back, not by trusting the
-  // transactions' return values - the no-dummy-data rule applies to the
-  // deploy script's own output too.
-  console.log("\nVerifying on-chain state...");
-  const [mandate, allowlisted, oracleStatus, owner] = await Promise.all([
-    covenant.mandate(),
-    covenant.allowedTokens(mandateToken),
-    covenant.oracleStatus(mandateToken),
-    covenant.owner(),
-  ]);
-  console.log(`  owner:            ${owner}`);
-  console.log(`  mandate.active:   ${mandate.active}`);
-  console.log(`  allowlisted:      ${allowlisted}`);
-  console.log(`  oracle.halted:    ${oracleStatus.halted}`);
-  console.log(`  oracle.updatedAt: ${oracleStatus.updatedAt === 0n ? "never" : new Date(Number(oracleStatus.updatedAt) * 1000).toISOString()}`);
-
-  if (mandate.active !== true || allowlisted !== true) {
-    throw new Error("Post-deploy verification failed: on-chain state doesn't match what was just submitted.");
-  }
-
-  console.log(`\nDeployment verified. Set this in .env:\nCOVENANT_ADDRESS=${covenantAddress}`);
+export interface DeployOptions {
+  deployer: ethers.Signer;
+  oracleUpdater: string;
+  agent: string;
+  quoteToken?: string;
+  token?: string;
+  maxNotionalUsd?: string;
+  maxTradesPerDay?: bigint;
+  durationDays?: number;
+  maxSlippageBps?: number;
+  maxPositionUsd?: string;
+  stalenessBound?: number;
+  decisionTtl?: number;
+  log?: (line: string) => void;
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+/** Polls for a real receipt instead of trusting the wrapper's promise chain. */
+async function waitForReceipt(provider: ethers.Provider, hash: string) {
+  for (let i = 0; i < 60; i++) {
+    const receipt = await provider.getTransactionReceipt(hash);
+    if (receipt) {
+      if (receipt.status !== 1) throw new Error(`tx ${hash} reverted`);
+      return receipt;
+    }
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+  throw new Error(`tx ${hash} not mined within 120s`);
+}
+
+export async function deployCovenant(opts: DeployOptions) {
+  const log = opts.log ?? (() => {});
+  const provider = opts.deployer.provider!;
+  const quoteToken = opts.quoteToken ?? BSC_USDT;
+  const token = opts.token ?? NVDAB;
+  const maxNotional = ethers.parseUnits(opts.maxNotionalUsd ?? "1", 18);
+  const maxTrades = opts.maxTradesPerDay ?? 5n;
+  const durationDays = opts.durationDays ?? 30;
+  const slippageBps = opts.maxSlippageBps ?? 100;
+  const maxPosition = ethers.parseUnits(opts.maxPositionUsd ?? "2", 18);
+  const stalenessBound = opts.stalenessBound ?? 900;
+  const decisionTtl = opts.decisionTtl ?? 600;
+  const owner = await opts.deployer.getAddress();
+
+  log(`owner (deployer):  ${owner}`);
+  log(`oracle updater:    ${opts.oracleUpdater}`);
+  log(`agent:             ${opts.agent}`);
+
+  const factory = new ethers.ContractFactory(covenantArtifact.abi, covenantArtifact.bytecode, opts.deployer);
+  const deployTx = await factory.getDeployTransaction(quoteToken, opts.oracleUpdater, opts.agent, stalenessBound, decisionTtl);
+  const sent = await opts.deployer.sendTransaction(deployTx);
+  const deployReceipt = await waitForReceipt(provider, sent.hash);
+  const address = deployReceipt.contractAddress;
+  if (!address) throw new Error("deploy receipt has no contractAddress");
+  log(`deployed at ${address} (tx ${sent.hash})`);
+
+  const covenant = new ethers.Contract(address, covenantArtifact.abi, opts.deployer);
+  const configTx = await covenant.configureToken(token, true, slippageBps, maxPosition);
+  await waitForReceipt(provider, configTx.hash);
+
+  const latest = (await provider.getBlock("latest"))!.timestamp;
+  const expiry = latest + durationDays * 24 * 60 * 60;
+  const mandateTx = await covenant.setMandate(maxNotional, maxTrades, expiry);
+  await waitForReceipt(provider, mandateTx.hash);
+
+  // Read everything back. No step above counts as done until chain agrees.
+  const [chainOwner, chainUpdater, chainAgent, mandate, cfg] = await Promise.all([
+    covenant.owner(),
+    covenant.oracleUpdater(),
+    covenant.agent(),
+    covenant.mandate(),
+    covenant.tokenConfig(token),
+  ]);
+  const checks: Array<[string, boolean]> = [
+    ["owner", chainOwner.toLowerCase() === owner.toLowerCase()],
+    ["oracleUpdater", chainUpdater.toLowerCase() === opts.oracleUpdater.toLowerCase()],
+    ["agent", chainAgent.toLowerCase() === opts.agent.toLowerCase()],
+    ["mandate.active", mandate.active === true],
+    ["mandate.maxNotionalPerTradeUsd", mandate.maxNotionalPerTradeUsd === maxNotional],
+    ["mandate.maxTradesPerDay", mandate.maxTradesPerDay === maxTrades],
+    ["mandate.expiry", mandate.expiry === BigInt(expiry)],
+    ["token.allowed", cfg.allowed === true],
+    ["token.maxSlippageBps", Number(cfg.maxSlippageBps) === slippageBps],
+    ["token.maxPositionUsd", cfg.maxPositionUsd === maxPosition],
+  ];
+  const failed = checks.filter(([, ok]) => !ok).map(([name]) => name);
+  if (failed.length > 0) throw new Error(`post-deploy read-back failed: ${failed.join(", ")}`);
+  log(`read back from chain: ${checks.length}/${checks.length} values match`);
+
+  return { address, deployTxHash: sent.hash, expiry };
+}
+
+if (import.meta.url === `file://${process.argv[1]}`) {
+  (async () => {
+    try {
+      process.loadEnvFile();
+    } catch {
+      // no .env - real environment variables only
+    }
+    const key = process.env.DEPLOYER_PRIVATE_KEY;
+    const oracleUpdater = process.env.ORACLE_UPDATER_ADDRESS;
+    const agent = process.env.AGENT_ADDRESS;
+    if (!key || !oracleUpdater || !agent) {
+      throw new Error("Set DEPLOYER_PRIVATE_KEY, ORACLE_UPDATER_ADDRESS and AGENT_ADDRESS (three different keys).");
+    }
+    // `||`, not `??`: .env.example ships these present but blank.
+    // NonceManager: three sequential sends from one key hit a real
+    // NONCE_EXPIRED race with a bare Wallet (README, chaos-fork.ts).
+    const deployer = new ethers.NonceManager(
+      new ethers.Wallet(key, new ethers.JsonRpcProvider(process.env.BSC_RPC_URL || "https://bsc-mainnet.public.blastapi.io")),
+    );
+    const result = await deployCovenant({
+      deployer,
+      oracleUpdater,
+      agent,
+      token: process.env.MANDATE_TOKEN_ADDRESS || undefined,
+      maxNotionalUsd: process.env.MANDATE_MAX_NOTIONAL_USD || undefined,
+      maxTradesPerDay: process.env.MANDATE_MAX_TRADES_PER_DAY ? BigInt(process.env.MANDATE_MAX_TRADES_PER_DAY) : undefined,
+      durationDays: process.env.MANDATE_DURATION_DAYS ? Number(process.env.MANDATE_DURATION_DAYS) : undefined,
+      maxSlippageBps: process.env.TOKEN_MAX_SLIPPAGE_BPS ? Number(process.env.TOKEN_MAX_SLIPPAGE_BPS) : undefined,
+      maxPositionUsd: process.env.TOKEN_MAX_POSITION_USD || undefined,
+      stalenessBound: process.env.ORACLE_STALENESS_SECONDS ? Number(process.env.ORACLE_STALENESS_SECONDS) : undefined,
+      decisionTtl: process.env.DECISION_TTL_SECONDS ? Number(process.env.DECISION_TTL_SECONDS) : undefined,
+      log: (line) => console.log(line),
+    });
+    console.log(`\nSet this in .env:\nCOVENANT_ADDRESS=${result.address}`);
+  })().catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });
+}

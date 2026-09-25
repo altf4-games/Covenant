@@ -355,6 +355,29 @@ The root cause: `hardhat-ethers`'s `HardhatEthersSigner.sendTransaction()` wrapp
 
 **Practically:** the deploy transaction itself always succeeds or fails independently of this crash - the crash happens strictly in the reporting/confirmation layer, after broadcast. But naive script logic that assumes `.deploy()` resolving is the only success signal will incorrectly treat every mainnet-via-`bsc`-network deploy as failed, even when it worked. **Fixed by bypassing `hardhat-ethers`'s wrapped signer for real mainnet deploys**: use a raw `ethers.Wallet` connected directly to a plain `ethers.JsonRpcProvider`, the same pattern `scripts/chaos-fork.ts` and `scripts/seed-status-page-demo.ts` already use against the fork, and independently confirm success via a direct `eth_getTransactionReceipt` call rather than trusting the ethers promise chain alone - the same "verify on-chain state, don't trust the return value" discipline this project already holds to everywhere else.
 
+### C17. `[AI-STACK][STOCK][PITFALL]` `market-order list` reports a bStock fill in *share* units; the chain moves *token* units, and nothing says which
+Found 2026-09-25, reconciling the Day-1 gate's real NVDAB buy (`docs/evidence/day1-gate-swap.json`, tx `0xaf1be071...eae37`) against the wallet's real balance on a mainnet fork.
+
+```
+baw market-order list --orderId 26092400001913061390
+  "toTokenActualQty": "0.001578888415748593"
+
+ERC-20 Transfer(to = the Agentic Wallet) in the same tx's receipt
+  data: 0x...059adfbe301f1e  = 0.001577660642762526
+
+NVDAB's own non-standard event 0x0226a2f5..., same tx, two values:
+  0x...059adfbe301f1e = 0.001577660642762526   (tokens)
+  0x...059bfd9b2921f1 = 0.001578888415748593   (shares - matches Binance's number)
+
+ratio: 1.000778224  = NVDAB's sharesMultiplier from the RWA dynamic endpoint
+```
+
+So the quantity Binance's order API calls the "actual" fill is the share amount. What the wallet actually received, and what `balanceOf` returns, is 0.078% less. The response has no unit field, no `sharesMultiplier`, and the skill docs describe `toTokenActualQty` as the token quantity.
+
+**Why it matters:** anything that reconciles Binance's own reported fills against chain state (an accountant, a PnL tracker, Covenant's `verify.ts`) sees a mismatch on every single honest bStock trade. It's the same class as the NameGate 8-vs-18-decimal bug, one layer up: not decimals, but share vs token units. An agent that settles with Binance's number would get every trade flagged. Covenant settles with the on-chain `Transfer` amount instead, and `verify.ts` compares against that.
+
+**Redesign suggestion:** return both `toTokenActualQty` (token units, what `balanceOf` moves) and `toShareActualQty`, or at minimum document which one the field is and include the `sharesMultiplier` used.
+
 ---
 
 ## D. BNB Agent Studio
