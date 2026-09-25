@@ -73,18 +73,20 @@ server.registerTool(
   {
     title: "Read a Covenant contract's current mandate",
     description:
-      "Reads the mandate (active, max USD per trade, max trades per day, expiry), today's trade count, and whether an approved decision is still in flight, directly from a deployed Covenant contract via eth_call. Read-only, no gas, no signing.",
+      "Reads the mandate (active, max USD per trade, max trades per day, expiry, and the separate daily-notional cap from red-team fix H7), today's trade count and cumulative notional, and whether an approved decision is still in flight, directly from a deployed Covenant contract via eth_call. Read-only, no gas, no signing.",
     inputSchema: {
       rpcUrl: z.string().describe("BSC JSON-RPC endpoint"),
       covenantAddress: z.string().describe("Deployed Covenant contract address"),
     },
   },
   async ({ rpcUrl, covenantAddress }) => {
-    const [raw, usedRaw, openRaw, agentRaw] = await Promise.all([
+    const [raw, usedRaw, openRaw, agentRaw, maxDailyRaw, dailyUsedRaw] = await Promise.all([
       ethCall(rpcUrl, covenantAddress, SELECTORS.mandate),
       ethCall(rpcUrl, covenantAddress, SELECTORS.tradesUsedToday),
       ethCall(rpcUrl, covenantAddress, SELECTORS.hasOpenDecision),
       ethCall(rpcUrl, covenantAddress, SELECTORS.agent),
+      ethCall(rpcUrl, covenantAddress, SELECTORS.maxDailyNotionalUsd),
+      ethCall(rpcUrl, covenantAddress, SELECTORS.notionalUsedToday),
     ]);
     const result = {
       active: asBool(raw, 0),
@@ -94,6 +96,9 @@ server.registerTool(
       tradesUsedToday: asUint(usedRaw, 0).toString(),
       decisionOpen: asBool(openRaw, 0),
       agent: "0x" + slot(agentRaw, 0).slice(-40),
+      // Red-team H7: 0 means the cap is disabled for this deployment.
+      maxDailyNotionalUsd: asUint(maxDailyRaw, 0).toString(),
+      notionalUsedToday: asUint(dailyUsedRaw, 0).toString(),
     };
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   },

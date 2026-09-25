@@ -20,6 +20,7 @@
  *   MANDATE_TOKEN_ADDRESS          default real NVDAB (verified-facts.md)
  *   MANDATE_MAX_NOTIONAL_USD       default "1"   (per trade, dollars)
  *   MANDATE_MAX_TRADES_PER_DAY     default 5
+ *   MANDATE_MAX_DAILY_NOTIONAL_USD default unset (dollars; unset/"0" leaves the cap off - red-team fix H7)
  *   MANDATE_DURATION_DAYS          default 30
  *   TOKEN_MAX_SLIPPAGE_BPS         default 100 (1%)
  *   TOKEN_MAX_POSITION_USD         default "2"   (dollars)
@@ -41,6 +42,8 @@ export interface DeployOptions {
   token?: string;
   maxNotionalUsd?: string;
   maxTradesPerDay?: bigint;
+  /** Red-team fix H7. Undefined or "0" leaves the cap off. */
+  maxDailyNotionalUsd?: string;
   durationDays?: number;
   maxSlippageBps?: number;
   maxPositionUsd?: string;
@@ -70,6 +73,7 @@ export async function deployCovenant(opts: DeployOptions) {
   const token = opts.token ?? NVDAB;
   const maxNotional = ethers.parseUnits(opts.maxNotionalUsd ?? "1", 18);
   const maxTrades = opts.maxTradesPerDay ?? 5n;
+  const maxDailyNotional = ethers.parseUnits(opts.maxDailyNotionalUsd ?? "0", 18);
   const durationDays = opts.durationDays ?? 30;
   const slippageBps = opts.maxSlippageBps ?? 100;
   const maxPosition = ethers.parseUnits(opts.maxPositionUsd ?? "2", 18);
@@ -101,13 +105,21 @@ export async function deployCovenant(opts: DeployOptions) {
   const mandateTx = await covenant.setMandate(maxNotional, maxTrades, expiry);
   await waitForReceipt(provider, mandateTx.hash);
 
+  // Red-team fix H7: a separate setter, not part of setMandate, so
+  // tightening it later never requires re-setting expiry and the rest of
+  // the mandate. Always called (even to explicitly set 0/disabled) so the
+  // read-back below proves the deployed value, not just the default.
+  const dailyNotionalTx = await covenant.setMaxDailyNotionalUsd(maxDailyNotional);
+  await waitForReceipt(provider, dailyNotionalTx.hash);
+
   // Read everything back. No step above counts as done until chain agrees.
-  const [chainOwner, chainUpdater, chainAgent, mandate, cfg] = await Promise.all([
+  const [chainOwner, chainUpdater, chainAgent, mandate, cfg, chainMaxDailyNotional] = await Promise.all([
     covenant.owner(),
     covenant.oracleUpdater(),
     covenant.agent(),
     covenant.mandate(),
     covenant.tokenConfig(token),
+    covenant.maxDailyNotionalUsd(),
   ]);
   const checks: Array<[string, boolean]> = [
     ["owner", chainOwner.toLowerCase() === owner.toLowerCase()],
@@ -117,6 +129,7 @@ export async function deployCovenant(opts: DeployOptions) {
     ["mandate.maxNotionalPerTradeUsd", mandate.maxNotionalPerTradeUsd === maxNotional],
     ["mandate.maxTradesPerDay", mandate.maxTradesPerDay === maxTrades],
     ["mandate.expiry", mandate.expiry === BigInt(expiry)],
+    ["maxDailyNotionalUsd", chainMaxDailyNotional === maxDailyNotional],
     ["token.allowed", cfg.allowed === true],
     ["token.maxSlippageBps", Number(cfg.maxSlippageBps) === slippageBps],
     ["token.maxPositionUsd", cfg.maxPositionUsd === maxPosition],
@@ -155,6 +168,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       token: process.env.MANDATE_TOKEN_ADDRESS || undefined,
       maxNotionalUsd: process.env.MANDATE_MAX_NOTIONAL_USD || undefined,
       maxTradesPerDay: process.env.MANDATE_MAX_TRADES_PER_DAY ? BigInt(process.env.MANDATE_MAX_TRADES_PER_DAY) : undefined,
+      maxDailyNotionalUsd: process.env.MANDATE_MAX_DAILY_NOTIONAL_USD || undefined,
       durationDays: process.env.MANDATE_DURATION_DAYS ? Number(process.env.MANDATE_DURATION_DAYS) : undefined,
       maxSlippageBps: process.env.TOKEN_MAX_SLIPPAGE_BPS ? Number(process.env.TOKEN_MAX_SLIPPAGE_BPS) : undefined,
       maxPositionUsd: process.env.TOKEN_MAX_POSITION_USD || undefined,

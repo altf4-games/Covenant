@@ -93,6 +93,10 @@ describe("Covenant MCP server (live, real subprocess speaking real MCP protocol)
     expect(payload.tradesUsedToday).to.equal("0");
     expect(payload.decisionOpen).to.equal(false);
     expect(payload.agent.toLowerCase()).to.equal(env.agentAddress.toLowerCase());
+    // Red-team H7: disabled by default on a fresh deploy (setupCovenant
+    // doesn't set it), so both read back as zero here.
+    expect(payload.maxDailyNotionalUsd).to.equal("0");
+    expect(payload.notionalUsedToday).to.equal("0");
   });
 
   it("check_halt reads real, live status from Binance for real NVDAB", async function () {

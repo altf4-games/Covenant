@@ -30,7 +30,10 @@ const asUint = (data: string, i: number) => BigInt(slot(data, i));
 // getEvent().topicHash) rather than typed by hand, and cross-checked
 // against real logs in test/judge.live.ts.
 export const TOPICS = {
-  DecisionCommitted: "0xb149ce5777ae975b7ac2254c0af8468715185b45df1aa8c2312e7f7505e3bed1",
+  // Changed by red-team fix H11 (2026-09-25): DecisionCommitted's signature
+  // grew four fields, which changes its topic hash even though none of the
+  // original fields moved.
+  DecisionCommitted: "0x85599ed59c2ad36a18a94f574384c38fa73f727980f79081420b0e6a1ffbd6ce",
   DecisionSettled: "0x5f5f16943bfa53515eb2d5089225b2c96b0e1a906fe47635ec6da118af7992b9",
   DecisionCancelled: "0xf825ba484bb648876e5bc189a2b67360ce0c51019c4f271f406cf58ddcc4961d",
 };
@@ -58,6 +61,11 @@ export interface CommittedDecision {
   quoteRef: string;
   researchRef: string;
   expiresAt: number;
+  /** Red-team H11: what was in force at commit time, no history replay needed. */
+  mandateMaxNotionalPerTradeUsd: string;
+  mandateMaxTradesPerDay: string;
+  mandateExpiry: number;
+  oracleUpdatedAt: number;
 }
 
 export interface SettledDecision {
@@ -95,6 +103,10 @@ export function decodeCovenantLog(log: Log): DecodedEvent | null {
       quoteRef: slot(data, 6),
       researchRef: slot(data, 7),
       expiresAt: Number(asUint(data, 8)),
+      mandateMaxNotionalPerTradeUsd: asUint(data, 9).toString(),
+      mandateMaxTradesPerDay: asUint(data, 10).toString(),
+      mandateExpiry: Number(asUint(data, 11)),
+      oracleUpdatedAt: Number(asUint(data, 12)),
     };
   }
   if (topic === TOPICS.DecisionSettled) {

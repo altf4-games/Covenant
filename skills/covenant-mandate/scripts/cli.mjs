@@ -65,6 +65,10 @@ const SELECTORS = {
   hasOpenDecision: "0x47ca1608", // hasOpenDecision()
   tradesUsedToday: "0x673009a9", // tradesUsedToday()
   agent: "0xf5ff5c76", // agent()
+  // Red-team H7.
+  maxDailyNotionalUsd: "0x5b8f6f8e", // maxDailyNotionalUsd()
+  notionalUsedToday: "0x96ae41f0", // notionalUsedToday()
+  setMaxDailyNotionalUsd: "0x884dc5bf", // setMaxDailyNotionalUsd(uint256)
 };
 
 // Mirrors Covenant.DenialReason, in order. Append-only on the contract side.
@@ -81,6 +85,7 @@ const DENIAL_REASONS = [
   "PositionLimit",
   "DecisionOpen",
   "ClosedMarketDrift",
+  "DailyNotionalExceeded",
 ];
 
 const SIDES = { buy: 0, sell: 1 };
@@ -386,7 +391,7 @@ const COMMANDS = {
     }
     const sideArg = hex32(sideIndex(side));
 
-    const [configRaw, mandateRaw, oracleRaw, usedRaw, openRaw, decisionRaw] = await Promise.all([
+    const [configRaw, mandateRaw, oracleRaw, usedRaw, openRaw, decisionRaw, maxDailyRaw, dailyUsedRaw] = await Promise.all([
       ethCall(rpcUrl, covenantAddress, SELECTORS.tokenConfig + addr32(tokenAddress)),
       ethCall(rpcUrl, covenantAddress, SELECTORS.mandate),
       ethCall(rpcUrl, covenantAddress, SELECTORS.oracleStatus + addr32(tokenAddress)),
@@ -397,6 +402,10 @@ const COMMANDS = {
         covenantAddress,
         SELECTORS.previewDecision + sideArg + addr32(tokenAddress) + hex32(amountIn) + hex32(quotedOut) + hex32(minOut),
       ),
+      // Red-team H7: not part of the Mandate struct (a separate setter, so
+      // tightening it doesn't require re-setting the rest of the mandate).
+      ethCall(rpcUrl, covenantAddress, SELECTORS.maxDailyNotionalUsd),
+      ethCall(rpcUrl, covenantAddress, SELECTORS.notionalUsedToday),
     ]);
 
     const reasonIndex = Number(asUint(decisionRaw, 0));
@@ -416,6 +425,8 @@ const COMMANDS = {
         expiry: asUint(mandateRaw, 3).toString(),
         tradesUsedToday: asUint(usedRaw, 0).toString(),
         decisionOpen: asBool(openRaw, 0),
+        maxDailyNotionalUsd: asUint(maxDailyRaw, 0).toString(),
+        notionalUsedToday: asUint(dailyUsedRaw, 0).toString(),
       },
       oracle: {
         halted: asBool(oracleRaw, 0),

@@ -8,7 +8,13 @@ export const ABI = [
   "function decisionTtl() view returns (uint256)",
   "function agent() view returns (address)",
   "function hasOpenDecision() view returns (bool)",
-  "event DecisionCommitted(uint256 indexed id, address indexed token, uint8 side, bool allowed, uint8 reason, uint256 amountIn, uint256 quotedOut, uint256 minOut, bytes32 quoteRef, bytes32 researchRef, uint64 expiresAt)",
+  // Red-team H7: separate from the Mandate struct on purpose - see Covenant.sol.
+  "function maxDailyNotionalUsd() view returns (uint256)",
+  "function notionalUsedToday() view returns (uint256)",
+  // Red-team H11: the last four fields are the mandate/oracle snapshot in
+  // force at commit time, added so a decision is provable without replaying
+  // MandateSet/OracleUpdated history.
+  "event DecisionCommitted(uint256 indexed id, address indexed token, uint8 side, bool allowed, uint8 reason, uint256 amountIn, uint256 quotedOut, uint256 minOut, bytes32 quoteRef, bytes32 researchRef, uint64 expiresAt, uint256 mandateMaxNotionalPerTradeUsd, uint256 mandateMaxTradesPerDay, uint256 mandateExpiry, uint256 oracleUpdatedAt)",
   "event DecisionSettled(uint256 indexed id, bytes32 indexed swapTxHash, uint256 amountOut, uint8 executionMode, bool belowMin)",
   "event DecisionCancelled(uint256 indexed id)",
 ];
@@ -18,6 +24,7 @@ export const DENIAL_REASONS = [
   "None", "MandateInactive", "MandateExpired", "TokenNotAllowed",
   "NotionalExceeded", "DailyLimitExceeded", "OracleStale", "OracleHalted",
   "SlippageTooLoose", "PositionLimit", "DecisionOpen", "ClosedMarketDrift",
+  "DailyNotionalExceeded",
 ];
 export const SIDES = ["buy", "sell"];
 export const EXECUTION_MODES = ["unknown", "pool", "rfq", "aggregator"];
@@ -90,6 +97,11 @@ export function joinDecisions(events) {
         quotedOut: args.quotedOut,
         minOut: args.minOut,
         expiresAt: Number(args.expiresAt),
+        // Red-team H11: the mandate/oracle snapshot in force at commit time.
+        mandateMaxNotionalPerTradeUsd: args.mandateMaxNotionalPerTradeUsd,
+        mandateMaxTradesPerDay: args.mandateMaxTradesPerDay,
+        mandateExpiry: Number(args.mandateExpiry),
+        oracleUpdatedAt: Number(args.oracleUpdatedAt),
         blockNumber: e.blockNumber,
         txHash: e.transactionHash,
       };

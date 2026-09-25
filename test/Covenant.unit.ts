@@ -27,6 +27,7 @@ const Reason = {
   PositionLimit: 9n,
   DecisionOpen: 10n,
   ClosedMarketDrift: 11n,
+  DailyNotionalExceeded: 12n,
 };
 const Side = { Buy: 0, Sell: 1 };
 const Mode = { Unknown: 0, Pool: 1, Rfq: 2, Aggregator: 3 };
@@ -166,6 +167,18 @@ describe("Covenant v2 (unit, mocked tokens)", function () {
       await f.covenant.setAgent(f.other.address);
       expect(await f.covenant.agent()).to.equal(f.other.address);
     });
+
+    it("setMaxDailyNotionalUsd (red-team H7) is owner-only, independent of setMandate, and defaults to disabled", async function () {
+      const f = await networkHelpers.loadFixture(deployFixture);
+      expect(await f.covenant.maxDailyNotionalUsd()).to.equal(0n);
+      await expect(f.covenant.connect(f.agent).setMaxDailyNotionalUsd(5n * E18)).to.be.revertedWithCustomError(f.covenant, "NotOwner");
+      await expect(f.covenant.setMaxDailyNotionalUsd(5n * E18)).to.emit(f.covenant, "MaxDailyNotionalSet").withArgs(5n * E18);
+      expect(await f.covenant.maxDailyNotionalUsd()).to.equal(5n * E18);
+      // Tightening it doesn't touch the mandate set separately by setMandate.
+      const latest = await networkHelpers.time.latest();
+      await f.covenant.setMandate(10n * E18, 5n, latest + ONE_DAY);
+      expect(await f.covenant.maxDailyNotionalUsd()).to.equal(5n * E18);
+    });
   });
 
   describe("oracle", function () {
@@ -296,6 +309,71 @@ describe("Covenant v2 (unit, mocked tokens)", function () {
       await f.covenant.connect(f.updater).updateOracle(f.stockAddress, false, 200n * E18, true, 200n * E18);
       expect(await f.covenant.hasOpenDecision()).to.equal(false);
       expect((await commit(f, Side.Buy, buyArgs(E18))).reason).to.equal(Reason.None);
+    });
+
+    it("DailyNotionalExceeded (red-team H7) is off by default: 0 means no cumulative cap", async function () {
+      const f = await networkHelpers.loadFixture(deployFixture);
+      await makeTradeable(f, { maxNotional: 10n * E18, maxTrades: 10n });
+      expect(await f.covenant.maxDailyNotionalUsd()).to.equal(0n);
+      expect((await commit(f, Side.Buy, buyArgs(10n * E18))).reason).to.equal(Reason.None);
+    });
+
+    it("DailyNotionalExceeded (red-team H7): caps cumulative same-day notional once set, and resets the next UTC day", async function () {
+      const f = await networkHelpers.loadFixture(deployFixture);
+      await makeTradeable(f, { maxNotional: 10n * E18, maxTrades: 10n });
+      await f.covenant.setMaxDailyNotionalUsd(15n * E18);
+
+      const first = await commit(f, Side.Buy, buyArgs(10n * E18));
+      expect(first.reason).to.equal(Reason.None);
+      await f.covenant.connect(f.agent).settle(first.id, SWAP_TX, buyArgs(10n * E18).quotedOut, Mode.Rfq);
+      expect(await f.covenant.notionalUsedToday()).to.equal(10n * E18);
+
+      // $10 used, $10 more would total $20 - over the $15 daily cap, even
+      // though each trade alone is under the $10-per-trade cap.
+      expect((await commit(f, Side.Buy, buyArgs(10n * E18))).reason).to.equal(Reason.DailyNotionalExceeded);
+
+      // Exactly at the boundary ($10 + $5 = $15) is allowed, not denied.
+      const second = await commit(f, Side.Buy, buyArgs(5n * E18));
+      expect(second.reason).to.equal(Reason.None);
+      await f.covenant.connect(f.agent).settle(second.id, SWAP_TX, buyArgs(5n * E18).quotedOut, Mode.Rfq);
+      expect(await f.covenant.notionalUsedToday()).to.equal(15n * E18);
+
+      await networkHelpers.time.increase(ONE_DAY);
+      await f.covenant.connect(f.updater).updateOracle(f.stockAddress, false, 200n * E18, true, 200n * E18);
+      expect(await f.covenant.notionalUsedToday()).to.equal(0n);
+      expect((await commit(f, Side.Buy, buyArgs(10n * E18))).reason).to.equal(Reason.None);
+    });
+
+    it("H7 (disclosed residual gap): the daily-notional cap is keyed by UTC calendar day like tradesUsedToday, so a burst straddling midnight can still clear the cap twice within under a minute", async function () {
+      // This is the exact double-burst the daily cap does not close on its
+      // own - documented in Covenant.sol's _evaluate and in
+      // docs/research/opus-2026-09-24/a-redteam.md's H7. A real fix needs a
+      // rolling window, not a calendar-day counter; out of scope for this
+      // build, but the gap is demonstrated here rather than left untested.
+      // Timestamps are spaced generously (not shaved to the exact second)
+      // because every transaction here mines its own block, and Hardhat's
+      // default automine timestamp is strictly increasing - too tight a gap
+      // would push the "first" trade itself past midnight before it lands.
+      const f = await networkHelpers.loadFixture(deployFixture);
+      await makeTradeable(f, { maxNotional: 10n * E18, maxTrades: 10n });
+      await f.covenant.setMaxDailyNotionalUsd(10n * E18);
+
+      const latest = await networkHelpers.time.latest();
+      const today = Math.floor(latest / ONE_DAY);
+      const justBeforeMidnight = (today + 1) * ONE_DAY - 15; // 23:59:45 UTC
+      await networkHelpers.time.increaseTo(justBeforeMidnight);
+      await f.covenant.connect(f.updater).updateOracle(f.stockAddress, false, 200n * E18, true, 200n * E18);
+
+      const first = await commit(f, Side.Buy, buyArgs(10n * E18));
+      expect(first.reason).to.equal(Reason.None); // uses the full $10 cap for "today"
+      await f.covenant.connect(f.agent).settle(first.id, SWAP_TX, buyArgs(10n * E18).quotedOut, Mode.Rfq);
+
+      await networkHelpers.time.increase(20); // crosses into the next UTC day
+      await f.covenant.connect(f.updater).updateOracle(f.stockAddress, false, 200n * E18, true, 200n * E18);
+      const second = await commit(f, Side.Buy, buyArgs(10n * E18));
+      // A second full $10 cleared within under a minute of the first - $20
+      // of same-notional exposure in one burst, exactly the gap H7 flags.
+      expect(second.reason).to.equal(Reason.None);
     });
 
     it("a denial doesn't count toward the day, doesn't open a decision, and expires on the spot", async function () {
@@ -462,6 +540,26 @@ describe("Covenant v2 (unit, mocked tokens)", function () {
       expect(stored.amountIn).to.equal(a.amountIn);
       expect(await f.covenant.openDecisionId()).to.equal(ev.id);
       expect(await f.covenant.tradesUsedToday()).to.equal(1n);
+    });
+
+    it("DecisionCommitted is self-describing (red-team H11): it carries the mandate and oracle snapshot in force, not just the decision", async function () {
+      const f = await networkHelpers.loadFixture(deployFixture);
+      const latest = await networkHelpers.time.latest();
+      const expiry = latest + 30 * ONE_DAY;
+      await f.covenant.setMandate(10n * E18, 5n, expiry);
+      await f.covenant.configureToken(f.stockAddress, true, 100, 50n * E18);
+      const oracleTx = await f.covenant.connect(f.updater).updateOracle(f.stockAddress, false, 200n * E18, true, 200n * E18);
+      const oracleReceipt = await oracleTx.wait();
+      const oracleBlock = await ethers.provider.getBlock(oracleReceipt!.blockNumber);
+      const oracleUpdatedAt = BigInt(oracleBlock!.timestamp);
+
+      const ev = await commit(f, Side.Buy, buyArgs(E18));
+      // A third party reading only this one event - no MandateSet/OracleUpdated
+      // replay - can confirm what was in force when this decision was made.
+      expect(ev.mandateMaxNotionalPerTradeUsd).to.equal(10n * E18);
+      expect(ev.mandateMaxTradesPerDay).to.equal(5n);
+      expect(ev.mandateExpiry).to.equal(BigInt(expiry));
+      expect(ev.oracleUpdatedAt).to.equal(oracleUpdatedAt);
     });
 
     it("settle records the real fill, closes the decision, and flags a fill below the minimum", async function () {

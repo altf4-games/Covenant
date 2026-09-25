@@ -54,10 +54,20 @@ export default defineConfig({
     profiles: {
       default: {
         version: "0.8.34",
+        // Red-team H11's enriched DecisionCommitted event pushed commit()
+        // over the legacy codegen's stack depth (HHE910 "stack too deep").
+        // viaIR is the standard Solidity fix for that - it changes only
+        // compilation internals, not contract behavior - so it's on for
+        // both profiles rather than routing around the error with fewer
+        // event fields.
+        settings: {
+          viaIR: true,
+        },
       },
       production: {
         version: "0.8.34",
         settings: {
+          viaIR: true,
           optimizer: {
             enabled: true,
             runs: 200,

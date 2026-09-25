@@ -55,7 +55,11 @@ contract Covenant {
         SlippageTooLoose,
         PositionLimit,
         DecisionOpen,
-        ClosedMarketDrift
+        ClosedMarketDrift,
+        // Red-team H7: a cumulative cap on top of the per-trade notional cap,
+        // so "maxNotionalPerTrade x maxTradesPerDay" isn't the real daily
+        // exposure. Appended last to keep the list append-only.
+        DailyNotionalExceeded
     }
 
     /// @notice How the real fill was executed, as reported by the agent at
@@ -78,6 +82,10 @@ contract Covenant {
     struct DailyUsage {
         uint256 day;
         uint256 count;
+        // Red-team H7: cumulative notional traded today, in quote-token
+        // units. Tracked alongside `count` so a cap can bound total daily
+        // exposure, not just the number of trades.
+        uint256 notionalUsd;
     }
 
     struct TokenConfig {
@@ -134,6 +142,12 @@ contract Covenant {
 
     Mandate public mandate;
     DailyUsage public usage;
+    /// @notice Red-team H7: cumulative cap on same-day notional, independent
+    /// of `mandate.maxNotionalPerTradeUsd x maxTradesPerDay`. 0 disables it,
+    /// same convention as `maxClosedMarketDriftBps`. Owner-settable
+    /// separately from `setMandate` so existing mandates aren't invalidated
+    /// by adding this cap.
+    uint256 public maxDailyNotionalUsd;
 
     mapping(address => TokenConfig) public tokenConfig;
     mapping(address => OracleStatus) public oracleStatus;
@@ -149,6 +163,8 @@ contract Covenant {
 
     event MandateSet(uint256 maxNotionalPerTradeUsd, uint256 maxTradesPerDay, uint256 expiry);
     event MandateRevoked();
+    /// @notice Red-team H7.
+    event MaxDailyNotionalSet(uint256 maxDailyNotionalUsd);
     event TokenConfigured(address indexed token, bool allowed, uint16 maxSlippageBps, uint256 maxPositionUsd);
     event ClosedMarketDriftSet(address indexed token, uint16 maxClosedMarketDriftBps);
     event OracleUpdaterChanged(address indexed updater);
@@ -159,6 +175,14 @@ contract Covenant {
 
     /// @notice Emitted for every commit, allowed or denied. This is the
     /// public record a trade is reconciled against.
+    ///
+    /// Red-team H11: a decision used to be provable only by replaying
+    /// `MandateSet`/`OracleUpdated` history to reconstruct what was in force
+    /// at commit time. The last four fields make each event self-describing:
+    /// the mandate's per-trade cap, trade-count cap and expiry, plus the
+    /// oracle's `updatedAt` for this token, all as read at the moment this
+    /// decision was evaluated - a third party can check a denial or approval
+    /// against just this one event, with no history replay required.
     event DecisionCommitted(
         uint256 indexed id,
         address indexed token,
@@ -170,7 +194,11 @@ contract Covenant {
         uint256 minOut,
         bytes32 quoteRef,
         bytes32 researchRef,
-        uint64 expiresAt
+        uint64 expiresAt,
+        uint256 mandateMaxNotionalPerTradeUsd,
+        uint256 mandateMaxTradesPerDay,
+        uint256 mandateExpiry,
+        uint256 oracleUpdatedAt
     );
 
     event DecisionSettled(
@@ -269,6 +297,15 @@ contract Covenant {
         emit MandateRevoked();
     }
 
+    /// @notice Red-team H7. A cumulative cap on same-day notional across all
+    /// trades, independent of the per-trade cap and the trade-count cap. 0
+    /// disables it. Kept separate from `setMandate` so tightening this
+    /// afterward doesn't require re-setting expiry and the other fields.
+    function setMaxDailyNotionalUsd(uint256 amount) external onlyOwner {
+        maxDailyNotionalUsd = amount;
+        emit MaxDailyNotionalSet(amount);
+    }
+
     /// @notice Allow a token by exact address and set its slippage bound
     /// and position cap. There is no ticker resolution on chain on purpose:
     /// that step is where provider confusion (NVDAB vs NVDAon) and
@@ -358,7 +395,7 @@ contract Covenant {
         bytes32 quoteRef,
         bytes32 researchRef
     ) external onlyAgent returns (uint256 id) {
-        DenialReason reason = _evaluate(side, token, amountIn, quotedOut, minOut);
+        (DenialReason reason, uint256 notional) = _evaluate(side, token, amountIn, quotedOut, minOut);
         bool allowed = reason == DenialReason.None;
 
         id = nextDecisionId++;
@@ -378,12 +415,30 @@ contract Covenant {
         d.researchRef = researchRef;
 
         if (allowed) {
-            _recordTrade();
+            _recordTrade(notional);
             openDecisionId = id;
         }
 
+        // Red-team H11: snapshot what was in force for this decision, so
+        // the event alone (no history replay) can prove it was evaluated
+        // correctly.
+        Mandate memory m = mandate;
         emit DecisionCommitted(
-            id, token, side, allowed, reason, amountIn, quotedOut, minOut, quoteRef, researchRef, expiresAt
+            id,
+            token,
+            side,
+            allowed,
+            reason,
+            amountIn,
+            quotedOut,
+            minOut,
+            quoteRef,
+            researchRef,
+            expiresAt,
+            m.maxNotionalPerTradeUsd,
+            m.maxTradesPerDay,
+            m.expiry,
+            oracleStatus[token].updatedAt
         );
     }
 
@@ -432,7 +487,8 @@ contract Covenant {
         view
         returns (DenialReason)
     {
-        return _evaluate(side, token, amountIn, quotedOut, minOut);
+        (DenialReason reason,) = _evaluate(side, token, amountIn, quotedOut, minOut);
+        return reason;
     }
 
     function getDecision(uint256 id) external view returns (Decision memory) {
@@ -442,6 +498,13 @@ contract Covenant {
     function tradesUsedToday() public view returns (uint256) {
         uint256 today = block.timestamp / 1 days;
         return usage.day == today ? usage.count : 0;
+    }
+
+    /// @notice Red-team H7. Cumulative notional (quote-token units) traded
+    /// on today's UTC calendar day.
+    function notionalUsedToday() public view returns (uint256) {
+        uint256 today = block.timestamp / 1 days;
+        return usage.day == today ? usage.notionalUsd : 0;
     }
 
     /// @notice True while an approved decision is neither settled,
@@ -457,29 +520,41 @@ contract Covenant {
     // Internal
     // ---------------------------------------------------------------------
 
+    /// @dev Returns the denial reason (`None` if allowed) and the trade's
+    /// notional in quote-token units, so `commit` doesn't recompute it to
+    /// feed `_recordTrade`.
     function _evaluate(Side side, address token, uint256 amountIn, uint256 quotedOut, uint256 minOut)
         internal
         view
-        returns (DenialReason)
+        returns (DenialReason, uint256)
     {
         Mandate memory m = mandate;
-        if (!m.active) return DenialReason.MandateInactive;
-        if (block.timestamp > m.expiry) return DenialReason.MandateExpired;
+        if (!m.active) return (DenialReason.MandateInactive, 0);
+        if (block.timestamp > m.expiry) return (DenialReason.MandateExpired, 0);
 
         TokenConfig memory cfg = tokenConfig[token];
-        if (!cfg.allowed) return DenialReason.TokenNotAllowed;
+        if (!cfg.allowed) return (DenialReason.TokenNotAllowed, 0);
 
         // One trade in flight at a time. Without this, several buys could
         // each pass the position check against the same pre-trade balance.
-        if (hasOpenDecision()) return DenialReason.DecisionOpen;
+        if (hasOpenDecision()) return (DenialReason.DecisionOpen, 0);
 
         OracleStatus memory o = oracleStatus[token];
-        if (o.updatedAt == 0 || block.timestamp - o.updatedAt > stalenessBound) return DenialReason.OracleStale;
-        if (o.halted) return DenialReason.OracleHalted;
+        if (o.updatedAt == 0 || block.timestamp - o.updatedAt > stalenessBound) return (DenialReason.OracleStale, 0);
+        if (o.halted) return (DenialReason.OracleHalted, 0);
 
         uint256 notional = side == Side.Buy ? amountIn : (amountIn * o.priceUsd) / 1e18;
-        if (notional > m.maxNotionalPerTradeUsd) return DenialReason.NotionalExceeded;
-        if (tradesUsedToday() >= m.maxTradesPerDay) return DenialReason.DailyLimitExceeded;
+        if (notional > m.maxNotionalPerTradeUsd) return (DenialReason.NotionalExceeded, 0);
+        if (tradesUsedToday() >= m.maxTradesPerDay) return (DenialReason.DailyLimitExceeded, 0);
+        // Red-team H7: a cumulative cap independent of maxNotionalPerTradeUsd
+        // x maxTradesPerDay. Still keyed by the UTC calendar day like
+        // tradesUsedToday, so it does not by itself close the midnight
+        // double-burst window this cap was added for - see
+        // test/Covenant.unit.ts's "H7: midnight double-burst" test, which
+        // demonstrates the residual gap this cap does not close.
+        if (maxDailyNotionalUsd > 0 && notionalUsedToday() + notional > maxDailyNotionalUsd) {
+            return (DenialReason.DailyNotionalExceeded, 0);
+        }
 
         // The minimum must be close to the agent's own quote AND to the
         // oracle price. The oracle leg means an understated quote can't be
@@ -487,7 +562,7 @@ contract Covenant {
         uint256 oracleOut = side == Side.Buy ? (amountIn * 1e18) / o.priceUsd : (amountIn * o.priceUsd) / 1e18;
         uint256 floorBps = 10_000 - cfg.maxSlippageBps;
         if (quotedOut == 0 || minOut * 10_000 < quotedOut * floorBps || minOut * 10_000 < oracleOut * floorBps) {
-            return DenialReason.SlippageTooLoose;
+            return (DenialReason.SlippageTooLoose, 0);
         }
 
         // Feature 1: the closed-market drift rule. The implied price is
@@ -499,12 +574,12 @@ contract Covenant {
             if (side == Side.Buy) {
                 uint256 implied = (amountIn * 1e18) / quotedOut;
                 if (implied * 10_000 > o.lastCloseUsd * (10_000 + uint256(cfg.maxClosedMarketDriftBps))) {
-                    return DenialReason.ClosedMarketDrift;
+                    return (DenialReason.ClosedMarketDrift, 0);
                 }
             } else {
                 uint256 implied = (quotedOut * 1e18) / amountIn;
                 if (implied * 10_000 < o.lastCloseUsd * (10_000 - uint256(cfg.maxClosedMarketDriftBps))) {
-                    return DenialReason.ClosedMarketDrift;
+                    return (DenialReason.ClosedMarketDrift, 0);
                 }
             }
         }
@@ -514,10 +589,12 @@ contract Covenant {
         if (side == Side.Buy) {
             uint256 held = IERC20Balance(token).balanceOf(agent);
             uint256 received = quotedOut > oracleOut ? quotedOut : oracleOut;
-            if (((held + received) * o.priceUsd) / 1e18 > cfg.maxPositionUsd) return DenialReason.PositionLimit;
+            if (((held + received) * o.priceUsd) / 1e18 > cfg.maxPositionUsd) {
+                return (DenialReason.PositionLimit, 0);
+            }
         }
 
-        return DenialReason.None;
+        return (DenialReason.None, notional);
     }
 
     function _existing(uint256 id) internal view returns (Decision storage) {
@@ -525,13 +602,15 @@ contract Covenant {
         return _decisions[id];
     }
 
-    function _recordTrade() internal {
+    function _recordTrade(uint256 notional) internal {
         uint256 today = block.timestamp / 1 days;
         if (usage.day == today) {
             usage.count += 1;
+            usage.notionalUsd += notional;
         } else {
             usage.day = today;
             usage.count = 1;
+            usage.notionalUsd = notional;
         }
     }
 }

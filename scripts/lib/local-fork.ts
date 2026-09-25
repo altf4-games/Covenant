@@ -59,7 +59,15 @@ export async function startForkNode(port: number): Promise<{ rpcUrl: string; pro
  */
 export async function setupCovenant(
   rpcUrl: string,
-  opts: { maxNotionalUsd?: string; maxPositionUsd?: string; maxSlippageBps?: number; maxTradesPerDay?: bigint; maxClosedMarketDriftBps?: number } = {},
+  opts: {
+    maxNotionalUsd?: string;
+    maxPositionUsd?: string;
+    maxSlippageBps?: number;
+    maxTradesPerDay?: bigint;
+    maxClosedMarketDriftBps?: number;
+    /** Red-team fix H7. Undefined/"0" leaves the cap off. */
+    maxDailyNotionalUsd?: string;
+  } = {},
 ) {
   const provider = new ethers.JsonRpcProvider(rpcUrl);
   const owner = new ethers.NonceManager(new ethers.Wallet(DEV_KEYS.owner, provider));
@@ -76,6 +84,7 @@ export async function setupCovenant(
     maxSlippageBps: opts.maxSlippageBps ?? 100,
     maxTradesPerDay: opts.maxTradesPerDay ?? 10n,
     maxClosedMarketDriftBps: opts.maxClosedMarketDriftBps ?? 100,
+    maxDailyNotionalUsd: opts.maxDailyNotionalUsd,
   });
 
   const live = await readLiveOracle(56, NVDAB);
