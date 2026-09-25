@@ -69,6 +69,7 @@
   .err { color: var(--deny); font-size: 12px; margin-top: 8px; }
   .empty { color: var(--muted); font-style: italic; }
   a { color: var(--accent); }
+  .plain-row td { border-bottom: 1px solid var(--border); padding: 2px 8px 8px; white-space: normal; color: var(--muted); font-style: italic; }
 </style>
 </head>
 <body>
@@ -102,7 +103,7 @@
 
 <script type="module">
 import { ethers } from "https://cdn.jsdelivr.net/npm/ethers@6/+esm";
-import { ABI, fetchDecisionEvents, joinDecisions, resolveFromBlock } from "./lib.mjs";
+import { ABI, fetchDecisionEvents, joinDecisions, resolveFromBlock, describeDecision } from "./lib.mjs";
 
 const MAX_DECISIONS = 50;
 
@@ -210,6 +211,10 @@ function renderDecisions(decisions) {
 
   const rows = decisions.map((d) => {
     const c = d.commit;
+    // Plain-English feed: stock names and USD, not a hex reason index and a
+    // truncated address - the technical row underneath still has the raw
+    // fields for anyone who wants them.
+    const plain = describeDecision(d, (wei) => ethers.formatUnits(wei, 18));
     return `
       <tr>
         <td>#${d.id}</td>
@@ -221,7 +226,8 @@ function renderDecisions(decisions) {
         <td>${statusBadge(d)}</td>
         <td>${c && !c.allowed ? c.reason : d.settle ? d.settle.executionMode : ""}</td>
         <td><span title="${c ? c.txHash : ""}">${c ? fmtAddr(c.txHash) : "-"}</span></td>
-      </tr>`;
+      </tr>
+      <tr class="plain-row"><td colspan="9">${plain}</td></tr>`;
   }).join("");
 
   el.innerHTML = `

@@ -1,7 +1,7 @@
 import { expect } from "chai";
 import { ethers } from "ethers";
 import covenantArtifact from "../artifacts/contracts/Covenant.sol/Covenant.json" with { type: "json" };
-import { ABI, fetchDecisionEvents, joinDecisions, resolveFromBlock, DEFAULT_LOOKBACK_BLOCKS } from "../status-page/lib.mjs";
+import { ABI, fetchDecisionEvents, joinDecisions, resolveFromBlock, DEFAULT_LOOKBACK_BLOCKS, describeDecision, tokenName } from "../status-page/lib.mjs";
 import { startForkNode, setupCovenant, buyAt } from "../scripts/lib/local-fork.js";
 
 // This suite exists because the bug it guards against was found by actually
@@ -88,6 +88,19 @@ describe("status page: real decision reads and the fork-boundary hang", function
     expect(cancelled.commit.allowed).to.equal(true);
     expect(cancelled.cancelled).to.equal(true);
     expect(cancelled.settle).to.equal(null);
+
+    // describeDecision on these same real decisions: a plain-English feed,
+    // stock names and USD instead of hex reason indices and raw addresses.
+    const fmt = (wei: bigint) => ethers.formatUnits(wei, 18);
+    expect(tokenName(NVDAB)).to.equal("NVIDIA (NVDAB)");
+    expect(tokenName(IMPERSONATOR_BSTOCKS)).to.equal(IMPERSONATOR_BSTOCKS.slice(0, 6) + "…" + IMPERSONATOR_BSTOCKS.slice(-4));
+
+    expect(describeDecision(denied, fmt)).to.match(/^Buy order: spend [\d.]+ USDT for .+ — denied: TokenNotAllowed\.$/);
+    expect(describeDecision(denied, fmt)).to.not.include(IMPERSONATOR_BSTOCKS);
+
+    expect(describeDecision(settled, fmt)).to.match(/^Buy order: spend [\d.]+ USDT for NVIDIA \(NVDAB\) — filled, received [\d.]+ NVIDIA \(NVDAB\) via aggregator\.$/);
+
+    expect(describeDecision(cancelled, fmt)).to.match(/^Buy order: spend [\d.]+ USDT for .+ — allowed, then abandoned without trading\.$/);
   });
 
   it("resolveFromBlock defaults to a window that would itself cross the fork boundary on a fresh fork", function () {

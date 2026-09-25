@@ -47,6 +47,11 @@ async function commitAndVerify(label: string, rpcUrl: string, covenant: ethers.C
 }
 
 async function main() {
+  try {
+    process.loadEnvFile();
+  } catch {
+    // no .env - real environment variables only
+  }
   console.log(`Forking BSC mainnet via ${BSC_FORK_URL}...`);
   const node = await startForkNode(RPC_PORT);
   process.on("exit", node.stop);

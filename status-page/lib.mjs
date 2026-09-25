@@ -32,6 +32,59 @@ export const EXECUTION_MODES = ["unknown", "pool", "rfq", "aggregator"];
 export const DEFAULT_LOOKBACK_BLOCKS = 500;
 export const DEFAULT_LOGS_TIMEOUT_MS = 8_000;
 
+// Real bStock names, for the plain-English decision feed - the same 14
+// tickers curated in skills/covenant-mandate/scripts/theme-map.json (real
+// BSC addresses, verified live against Binance's RWA token list,
+// 2026-09-25), duplicated here rather than imported so this file keeps
+// working with a plain relative-path <script type="module"> import in the
+// browser, no bundler or JSON-import-assertion support required.
+export const TOKEN_NAMES = {
+  "0x02fca66c1d1afb4e2a7884261eb00f63598a7436": "NVIDIA (NVDAB)",
+  "0x75fd4cf6f8392e41e70391d60c90c0d5211603a1": "AMD (AMDB)",
+  "0x76682c454467b3a1150ad8b6a92fc5ee2c21d7ed": "Broadcom (AVGOB)",
+  "0xd42a79ebb7f527f40faecd196ffb47ad5e8d6f8c": "Arm (ARMB)",
+  "0xe614e2fc6c787035ff51f452e8e826bfd32d5283": "Intel (INTCB)",
+  "0x5f7a56e877b9130608bf8be962621011182fefe1": "Qualcomm (QCOMB)",
+  "0xab78b89b5bb00236be0b4b20704cbfa04efc711c": "TSMC (TSMB)",
+  "0xcdf2f3e0fa43c47a6662a91c9e4a7c5f69762699": "Micron (MUB)",
+  "0x431a3bee82e2ca41e49895cbece5bb0f76a89b7a": "Apple (AAPLB)",
+  "0x80106cb3ead06659a5ad19df39d9b4733863b9b0": "Microsoft (MSFTB)",
+  "0x3f53de71c126bdabae20f9cd64848d317f6c3238": "Alphabet (GOOGLB)",
+  "0x1a4b499833a79a09ad7cf1d42d7dacf71e92eb00": "Amazon (AMZNB)",
+  "0x7425889fe94f9d693e8daefe88bcced6acfef4c0": "Meta (METAB)",
+  "0x5b1910eaad6450e50f816082aa078c41f10c292f": "Tesla (TSLAB)",
+};
+
+/** Real name if known, else a truncated address - never a raw full address in a sentence. */
+export function tokenName(address) {
+  return TOKEN_NAMES[address.toLowerCase()] ?? (address.slice(0, 6) + "…" + address.slice(-4));
+}
+
+/**
+ * A plain-English decision feed: "Denied: NVIDIA's market is halted" instead
+ * of a hex reason index, and USD/token names instead of wei and addresses.
+ * `fmtAmount` is injected (rather than imported from ethers here) so this
+ * function stays usable in a plain Node test without pulling ethers in.
+ */
+export function describeDecision(d, fmtAmount) {
+  const c = d.commit;
+  if (!c) return `Decision #${d.id}: settled, but its commit falls outside the scanned block range.`;
+
+  const name = tokenName(c.token);
+  const spendLabel = c.side === "buy" ? "USDT" : name;
+  const verb = c.side === "buy" ? "Buy" : "Sell";
+  const base = `${verb} order: spend ${fmtAmount(c.amountIn)} ${spendLabel} for ${name}`;
+
+  if (!c.allowed) return `${base} — denied: ${c.reason}.`;
+  if (d.cancelled) return `${base} — allowed, then abandoned without trading.`;
+  if (d.settle) {
+    const receiveLabel = c.side === "buy" ? name : "USDT";
+    const belowNote = d.settle.belowMin ? " (below the minimum accepted)" : "";
+    return `${base} — filled, received ${fmtAmount(d.settle.amountOut)} ${receiveLabel} via ${d.settle.executionMode}${belowNote}.`;
+  }
+  return `${base} — allowed, awaiting settlement.`;
+}
+
 /**
  * Reads all of Covenant's decision events in one eth_getLogs call, bounded
  * by a client-side timeout.

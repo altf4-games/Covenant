@@ -25,6 +25,7 @@ Worth knowing before reading the code:
 - **Feature 3, the position cap, reads real state.** `commit` calls `balanceOf(agent)` on the stock token at decision time and denies with `PositionLimit` if the post-trade holding would exceed the owner's cap. It uses the larger of the quote and the oracle's output, so an understated quote can't slip past it.
 - **Feature 1, the closed-market drift rule, answers this hackathon's opening problem.** The organizers' pitch: a tokenized stock "trades straight through the weekend, priced off a reference that has not updated in two days". While the NYSE's regular session is closed, `commit` denies a buy priced more than the owner's bound above the token's price at the last NYSE close, or a sell that far below it (`ClosedMarketDrift`). Binance's status endpoint can't say when the NYSE is shut (for bStocks it reports `TRADING` around the clock, friction-log C18), so the oracle takes the session from a NYSE calendar built from nyse.com's own holiday and early-close table, and the last-close price from the token's hourly candle ending exactly at that close. On 2026-09-25 at 07:21 UTC, with the NYSE shut, NVDAB was 0.84% above Thursday's close; the chaos-fork run below refuses a buy at that premium.
 - **Provider pinning, not ticker resolution.** The allowlist is exact addresses. A ticker exists under several providers (NVDAB vs Ondo's NVDAon), and impersonator tokens exist, so resolution happens off chain in the skill, which refuses to guess.
+- **Feature 2, the plain-English mandate compiler, redesigned around a real constraint.** The owner writes a sentence like *"Only AI-chip stocks, at most $1 per trade, 3 trades a day, no weekend premium over 1%"*; `compile-mandate` in the skill's CLI resolves the theme against [`skills/covenant-mandate/scripts/theme-map.json`](skills/covenant-mandate/scripts/theme-map.json) - a small, self-maintained ticker→theme map of real bStock addresses - and produces one `setMandateForTokens` transaction that configures the mandate and every token in the theme at once. This is a redesign, not the original pitch: the RWA API's advertised sector filter (Magnificent 7 / AI Chips / ETF / Buffett Portfolio) doesn't exist server-side (friction-log A10, 13+ real signed calls with every plausible parameter value returning the same unfiltered 488-token list). `Covenant.sol` gained `setMandateForTokens` for this - a genuine batch setter, not a loop of separate transactions dressed up as one - so "one owner transaction sets the whole mandate" is literally true even when the theme spans eight tokens.
 
 Around the contract:
 
@@ -121,13 +122,13 @@ npm install
 npx hardhat test
 ```
 
-Eleven suites, 100 tests:
+Eleven suites, 105 tests:
 
-- `test/Covenant.unit.ts` (43): in-memory chain with a mock ERC20. Every denial reason, including Feature 1's drift rule (with the real NVDAB numbers from 2026-09-25) and the red-team H7 daily-notional cap (with a test that deliberately demonstrates its disclosed midnight-boundary limitation rather than hiding it), the three-distinct-roles rule, agent-only commit/settle/cancel (a stranger, the owner and the updater all revert), the settle and cancel lifecycle, the understated-quote attack, Feature 3's position cap, red-team H11's self-describing `DecisionCommitted` event, and preview/commit agreement.
+- `test/Covenant.unit.ts` (44): in-memory chain with a mock ERC20. Every denial reason, including Feature 1's drift rule (with the real NVDAB numbers from 2026-09-25) and the red-team H7 daily-notional cap (with a test that deliberately demonstrates its disclosed midnight-boundary limitation rather than hiding it), the three-distinct-roles rule, agent-only commit/settle/cancel (a stranger, the owner and the updater all revert), the settle and cancel lifecycle, the understated-quote attack, Feature 3's position cap, red-team H11's self-describing `DecisionCommitted` event, Feature 2's `setMandateForTokens` batch setter, and preview/commit agreement.
 - `test/Covenant.fork.ts` (7): a real fork of BSC mainnet with the real Agentic Wallet impersonated as the agent, so the position cap reads the NVDAB it really bought on Day 1. Includes a full commit, real swap and settle loop against live PancakeSwap liquidity.
 - `test/nyse-calendar.ts` (8): the NYSE calendar against real dates, including a holiday, an early close, both daylight-saving switches, and a year with no data (it refuses).
 - `test/oracle-updater.live.ts` (4): Binance's real status, price and K-line endpoints, posted on chain by the real updater code and read back; the last close is re-derived independently from a separate K-line fetch.
-- `test/skill-cli.live.ts` (14): the skill's own commands against a spawned fork node, including its commit, settle and cancel calldata sent as real transactions.
+- `test/skill-cli.live.ts` (17): the skill's own commands against a spawned fork node, including its commit, settle and cancel calldata sent as real transactions, Feature 2's `compile-mandate` turning a real plain-English sentence into one real transaction that configures eight real tokens, and `classify-execution-mode` against the real Day-1 router address.
 - `test/status-page.live.ts` (3): the page's event reading, joined per decision, and the fork-boundary timeout. Runs its boundary test last on purpose (see below).
 - `test/mcp-server.live.ts` (8): the MCP server as a real subprocess, driven by the real MCP client.
 - `test/off-hours-logger.live.ts` (2): the cron logger against Binance's live endpoints.
@@ -143,7 +144,7 @@ The live suites share `scripts/lib/local-fork.ts`, which deploys with the real `
 python3 -m http.server 4173 --directory status-page
 ```
 
-Open `http://localhost:4173` and point it at an RPC URL and a deployed Covenant (or pass `?rpc=...&contract=...&fromBlock=...`). It shows the mandate and every decision, joined with its settle or cancel. `scripts/seed-status-page-demo.ts` deploys to a local `hardhat node --fork` and records a denial, a settled trade and a cancelled one, if you want something to look at.
+Open `http://localhost:4173` and point it at an RPC URL and a deployed Covenant (or pass `?rpc=...&contract=...&fromBlock=...`). It shows the mandate and every decision, joined with its settle or cancel, each with a plain-English line underneath ("Buy order: spend 0.5 USDT for NVIDIA (NVDAB) — denied: NotionalExceeded.") - real stock names from a small pinned map, not raw addresses or wei. `scripts/seed-status-page-demo.ts` deploys to a local `hardhat node --fork` and records a denial, a settled trade and a cancelled one, if you want something to look at.
 
 ## Running the MCP server
 

@@ -16,6 +16,11 @@ const RPC_URL = process.env.RPC_URL || "http://127.0.0.1:8545";
 const IMPERSONATOR = "0x2F701b108a9aF5558960325A0239D0a13c2C4444";
 
 async function main() {
+  try {
+    process.loadEnvFile();
+  } catch {
+    // no .env - real environment variables only
+  }
   const firstBlock = await new ethers.JsonRpcProvider(RPC_URL).getBlockNumber();
   const env = await setupCovenant(RPC_URL, { maxNotionalUsd: "1", maxPositionUsd: "2" });
   const covenant = new ethers.Contract(env.covenantAddress, covenantArtifact.abi, env.agent);
