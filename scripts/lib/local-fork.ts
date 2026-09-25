@@ -51,14 +51,15 @@ export async function startForkNode(port: number): Promise<{ rpcUrl: string; pro
 
 /**
  * Deploys Covenant v2 on a local fork with three distinct dev keys, and
- * posts the real live NVDAB price with the market marked open, so allow
- * paths can run whatever the market is doing right now. Signers are
+ * posts the real live NVDAB price and real last-close price with the market
+ * marked open and the session marked open, so allow paths can run whatever
+ * the market is doing right now. Signers are
  * NonceManager-wrapped: many sequential sends from one key hit a real
  * NONCE_EXPIRED race with a bare Wallet (README, "Tests, and what they caught").
  */
 export async function setupCovenant(
   rpcUrl: string,
-  opts: { maxNotionalUsd?: string; maxPositionUsd?: string; maxSlippageBps?: number; maxTradesPerDay?: bigint } = {},
+  opts: { maxNotionalUsd?: string; maxPositionUsd?: string; maxSlippageBps?: number; maxTradesPerDay?: bigint; maxClosedMarketDriftBps?: number } = {},
 ) {
   const provider = new ethers.JsonRpcProvider(rpcUrl);
   const owner = new ethers.NonceManager(new ethers.Wallet(DEV_KEYS.owner, provider));
@@ -74,12 +75,13 @@ export async function setupCovenant(
     maxPositionUsd: opts.maxPositionUsd ?? "100",
     maxSlippageBps: opts.maxSlippageBps ?? 100,
     maxTradesPerDay: opts.maxTradesPerDay ?? 10n,
+    maxClosedMarketDriftBps: opts.maxClosedMarketDriftBps ?? 100,
   });
 
   const live = await readLiveOracle(56, NVDAB);
-  await pushOracleUpdate({ signer: updater, covenantAddress, token: NVDAB, reading: { halted: false, priceUsd: live.priceUsd } });
+  await pushOracleUpdate({ signer: updater, covenantAddress, token: NVDAB, reading: { halted: false, priceUsd: live.priceUsd, sessionOpen: true, lastCloseUsd: live.lastCloseUsd } });
 
-  return { provider, owner, updater, agent, agentAddress, covenantAddress, livePrice: live.priceUsd };
+  return { provider, owner, updater, agent, agentAddress, covenantAddress, livePrice: live.priceUsd, liveReading: live };
 }
 
 /** A buy of `usd` dollars of NVDAB priced at `price`, minimum 0.5% below the quote. */

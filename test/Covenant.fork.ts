@@ -73,7 +73,7 @@ describe("Covenant v2 (fork, real BSC mainnet state)", function () {
     // doing right now; the live halt signal itself is tested in
     // test/oracle-updater.live.ts, and a halt is exercised explicitly below.
     livePrice = (await readLiveOracle(56, NVDAB)).priceUsd;
-    await covenant.connect(updater).updateOracle(NVDAB, false, livePrice);
+    await covenant.connect(updater).updateOracle(NVDAB, false, livePrice, true, livePrice);
 
     const latest = await networkHelpers.time.latest();
     await covenant.setMandate(5n * E18, 10n, latest + 30 * 24 * 60 * 60);
@@ -175,14 +175,14 @@ describe("Covenant v2 (fork, real BSC mainnet state)", function () {
   });
 
   it("denies once the oracle reports a halt; a denied commit records the refusal and opens nothing", async function () {
-    await covenant.connect(updater).updateOracle(NVDAB, true, livePrice);
+    await covenant.connect(updater).updateOracle(NVDAB, true, livePrice, true, livePrice);
     const quotedOut = (E18 * E18) / livePrice;
     const receipt = await (await covenant.connect(agent).commit(Side.Buy, NVDAB, E18, quotedOut, (quotedOut * 99n) / 100n, QUOTE_REF, ethers.ZeroHash)).wait();
     const decision = parseCommitted(covenant, receipt);
     expect(decision.allowed).to.equal(false);
     expect(decision.reason).to.equal(Reason.OracleHalted);
     expect(await covenant.openDecisionId()).to.equal(0n);
-    await covenant.connect(updater).updateOracle(NVDAB, false, livePrice);
+    await covenant.connect(updater).updateOracle(NVDAB, false, livePrice, true, livePrice);
   });
 
   it("nobody but the agent can commit - not even a real funded USDT holder (griefing closed)", async function () {

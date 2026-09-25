@@ -6,8 +6,9 @@
  * deploys Covenant with the real deploy script, posts the real live NVDAB
  * price, then commits trades built to break the mandate - an impersonator
  * token, a notional over the cap, a trade during a halt, a minimum
- * smuggled in behind an understated quote, a buy past the position cap,
- * and a stranger trying to commit at all - plus one legitimate trade.
+ * smuggled in behind an understated quote, a buy at an overnight premium
+ * while the NYSE is closed (with live prices), a buy past the position
+ * cap, and a stranger trying to commit at all - plus one legitimate trade.
  *
  * Covenant's commit doesn't revert on a denial; it records the refusal as
  * an event. So each result is re-read from the transaction's receipt by
@@ -70,9 +71,40 @@ async function main() {
     const fakeQuote = one.quotedOut / 10n;
     await commitAndVerify("attempt: understated quote to smuggle in a loose minimum", node.rpcUrl, covenant, [0, NVDAB, one.amountIn, fakeQuote, (fakeQuote * 995n) / 1000n]);
 
-    await (await asUpdater.updateOracle(NVDAB, true, env.livePrice)).wait();
+    await (await asUpdater.updateOracle(NVDAB, true, env.livePrice, true, env.livePrice)).wait();
     await commitAndVerify("attempt: trade NVDAB while the oracle reports a halt", node.rpcUrl, covenant, [0, NVDAB, one.amountIn, one.quotedOut, one.minOut]);
-    await (await asUpdater.updateOracle(NVDAB, false, env.livePrice)).wait();
+    await (await asUpdater.updateOracle(NVDAB, false, env.livePrice, true, env.livePrice)).wait();
+
+    // Feature 1 with live numbers: the token's real price now against its
+    // real price at the last NYSE close (Binance's K-line). The session is
+    // posted as closed; if NYSE happens to be open while this runs, that's
+    // said out loud rather than hidden. The bound is set to half the real
+    // gap, so whichever way the price moved overnight, the trade that pays
+    // that premium is the one refused.
+    console.log("\n--- Closed-market drift (Feature 1), with live prices ---");
+    const reading = env.liveReading;
+    const gapBps = ((reading.priceUsd - reading.lastCloseUsd) * 10_000n) / reading.lastCloseUsd;
+    console.log(`  NYSE regular session open right now: ${reading.sessionOpen}${reading.sessionOpen ? " (posting it as closed for this demo)" : ""}`);
+    console.log(`  last close ${reading.lastCloseAt.toISOString()}: $${ethers.formatUnits(reading.lastCloseUsd, 18)}; now: $${ethers.formatUnits(reading.priceUsd, 18)} (${gapBps >= 0n ? "+" : ""}${Number(gapBps) / 100}%)`);
+    if (gapBps > -2n && gapBps < 2n) {
+      console.log("  real gap under 0.02% right now - too small to demonstrate the rule honestly, skipping");
+    } else {
+      const asOwner = new ethers.Contract(env.covenantAddress, covenantArtifact.abi, env.owner);
+      const bound = (gapBps < 0n ? -gapBps : gapBps) / 2n;
+      await (await asOwner.setClosedMarketDrift(NVDAB, bound)).wait();
+      await (await asUpdater.updateOracle(NVDAB, false, reading.priceUsd, false, reading.lastCloseUsd)).wait();
+      console.log(`  mandate's closed-market drift bound set to ${Number(bound) / 100}%`);
+      if (gapBps > 0n) {
+        await commitAndVerify("attempt: buy at the overnight premium while NYSE is closed", node.rpcUrl, covenant, [0, NVDAB, one.amountIn, one.quotedOut, one.minOut]);
+      } else {
+        const tokens = (5n * E18) / 1000n;
+        const out = (tokens * env.livePrice) / E18;
+        await commitAndVerify("attempt: sell at the overnight discount while NYSE is closed", node.rpcUrl, covenant, [1, NVDAB, tokens, out, (out * 995n) / 1000n]);
+      }
+      // Back to an open session and the default 1% bound for the rest of the run.
+      await (await asUpdater.updateOracle(NVDAB, false, reading.priceUsd, true, reading.lastCloseUsd)).wait();
+      await (await asOwner.setClosedMarketDrift(NVDAB, 100)).wait();
+    }
 
     // The agent key holds no NVDAB on this fork, and there's no Binance
     // backend here to execute a swap, so a real NVDAB holder sends it some.

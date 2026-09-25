@@ -23,6 +23,7 @@
  *   MANDATE_DURATION_DAYS          default 30
  *   TOKEN_MAX_SLIPPAGE_BPS         default 100 (1%)
  *   TOKEN_MAX_POSITION_USD         default "2"   (dollars)
+ *   TOKEN_MAX_CLOSED_MARKET_DRIFT_BPS  default 100 (1%; 0 turns the rule off)
  *   ORACLE_STALENESS_SECONDS       default 900
  *   DECISION_TTL_SECONDS           default 600
  */
@@ -43,6 +44,7 @@ export interface DeployOptions {
   durationDays?: number;
   maxSlippageBps?: number;
   maxPositionUsd?: string;
+  maxClosedMarketDriftBps?: number;
   stalenessBound?: number;
   decisionTtl?: number;
   log?: (line: string) => void;
@@ -71,6 +73,7 @@ export async function deployCovenant(opts: DeployOptions) {
   const durationDays = opts.durationDays ?? 30;
   const slippageBps = opts.maxSlippageBps ?? 100;
   const maxPosition = ethers.parseUnits(opts.maxPositionUsd ?? "2", 18);
+  const driftBps = opts.maxClosedMarketDriftBps ?? 100;
   const stalenessBound = opts.stalenessBound ?? 900;
   const decisionTtl = opts.decisionTtl ?? 600;
   const owner = await opts.deployer.getAddress();
@@ -90,6 +93,8 @@ export async function deployCovenant(opts: DeployOptions) {
   const covenant = new ethers.Contract(address, covenantArtifact.abi, opts.deployer);
   const configTx = await covenant.configureToken(token, true, slippageBps, maxPosition);
   await waitForReceipt(provider, configTx.hash);
+  const driftTx = await covenant.setClosedMarketDrift(token, driftBps);
+  await waitForReceipt(provider, driftTx.hash);
 
   const latest = (await provider.getBlock("latest"))!.timestamp;
   const expiry = latest + durationDays * 24 * 60 * 60;
@@ -115,6 +120,7 @@ export async function deployCovenant(opts: DeployOptions) {
     ["token.allowed", cfg.allowed === true],
     ["token.maxSlippageBps", Number(cfg.maxSlippageBps) === slippageBps],
     ["token.maxPositionUsd", cfg.maxPositionUsd === maxPosition],
+    ["token.maxClosedMarketDriftBps", Number(cfg.maxClosedMarketDriftBps) === driftBps],
   ];
   const failed = checks.filter(([, ok]) => !ok).map(([name]) => name);
   if (failed.length > 0) throw new Error(`post-deploy read-back failed: ${failed.join(", ")}`);
@@ -152,6 +158,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       durationDays: process.env.MANDATE_DURATION_DAYS ? Number(process.env.MANDATE_DURATION_DAYS) : undefined,
       maxSlippageBps: process.env.TOKEN_MAX_SLIPPAGE_BPS ? Number(process.env.TOKEN_MAX_SLIPPAGE_BPS) : undefined,
       maxPositionUsd: process.env.TOKEN_MAX_POSITION_USD || undefined,
+      maxClosedMarketDriftBps: process.env.TOKEN_MAX_CLOSED_MARKET_DRIFT_BPS ? Number(process.env.TOKEN_MAX_CLOSED_MARKET_DRIFT_BPS) : undefined,
       stalenessBound: process.env.ORACLE_STALENESS_SECONDS ? Number(process.env.ORACLE_STALENESS_SECONDS) : undefined,
       decisionTtl: process.env.DECISION_TTL_SECONDS ? Number(process.env.DECISION_TTL_SECONDS) : undefined,
       log: (line) => console.log(line),

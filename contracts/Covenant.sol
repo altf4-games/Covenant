@@ -54,7 +54,8 @@ contract Covenant {
         OracleHalted,
         SlippageTooLoose,
         PositionLimit,
-        DecisionOpen
+        DecisionOpen,
+        ClosedMarketDrift
     }
 
     /// @notice How the real fill was executed, as reported by the agent at
@@ -83,12 +84,18 @@ contract Covenant {
         bool allowed;
         uint16 maxSlippageBps;
         uint256 maxPositionUsd;
+        // Feature 1. 0 turns the closed-market drift rule off for this token.
+        uint16 maxClosedMarketDriftBps;
     }
 
     struct OracleStatus {
         bool halted;
         uint256 priceUsd;
         uint256 updatedAt;
+        // Feature 1: is the underlying exchange (NYSE) in its regular
+        // session, and the token's own price at that session's last close.
+        bool sessionOpen;
+        uint256 lastCloseUsd;
     }
 
     struct Decision {
@@ -143,9 +150,12 @@ contract Covenant {
     event MandateSet(uint256 maxNotionalPerTradeUsd, uint256 maxTradesPerDay, uint256 expiry);
     event MandateRevoked();
     event TokenConfigured(address indexed token, bool allowed, uint16 maxSlippageBps, uint256 maxPositionUsd);
+    event ClosedMarketDriftSet(address indexed token, uint16 maxClosedMarketDriftBps);
     event OracleUpdaterChanged(address indexed updater);
     event AgentChanged(address indexed agent);
-    event OracleUpdated(address indexed token, bool halted, uint256 priceUsd, uint256 updatedAt);
+    event OracleUpdated(
+        address indexed token, bool halted, uint256 priceUsd, bool sessionOpen, uint256 lastCloseUsd, uint256 updatedAt
+    );
 
     /// @notice Emitted for every commit, allowed or denied. This is the
     /// public record a trade is reconciled against.
@@ -269,8 +279,23 @@ contract Covenant {
     {
         if (token == address(0)) revert ZeroAddress();
         if (maxSlippageBps > 10_000) revert InvalidBound();
-        tokenConfig[token] = TokenConfig({allowed: allowed, maxSlippageBps: maxSlippageBps, maxPositionUsd: maxPositionUsd});
+        TokenConfig storage cfg = tokenConfig[token];
+        cfg.allowed = allowed;
+        cfg.maxSlippageBps = maxSlippageBps;
+        cfg.maxPositionUsd = maxPositionUsd;
         emit TokenConfigured(token, allowed, maxSlippageBps, maxPositionUsd);
+    }
+
+    /// @notice Feature 1: while the underlying exchange is closed, deny a
+    /// buy priced more than `bps` above the token's last-close price, or a
+    /// sell priced that far below it. In plain words: don't let the agent
+    /// pay a weekend premium on a stock whose real market is shut. 0 turns
+    /// the rule off for this token.
+    function setClosedMarketDrift(address token, uint16 bps) external onlyOwner {
+        if (token == address(0)) revert ZeroAddress();
+        if (bps > 10_000) revert InvalidBound();
+        tokenConfig[token].maxClosedMarketDriftBps = bps;
+        emit ClosedMarketDriftSet(token, bps);
     }
 
     function setAgent(address newAgent) external onlyOwner {
@@ -292,12 +317,24 @@ contract Covenant {
     // Oracle
     // ---------------------------------------------------------------------
 
-    /// @notice Push a token's live market status and price, fed from the
-    /// RWA Data API and the market K-line endpoint by scripts/oracle-updater.ts.
-    function updateOracle(address token, bool halted, uint256 priceUsd) external onlyOracleUpdater {
-        if (priceUsd == 0) revert ZeroPrice();
-        oracleStatus[token] = OracleStatus({halted: halted, priceUsd: priceUsd, updatedAt: block.timestamp});
-        emit OracleUpdated(token, halted, priceUsd, block.timestamp);
+    /// @notice Push a token's live market status and price, plus the
+    /// underlying exchange's session state and the token's price at its
+    /// last close. Fed by scripts/oracle-updater.ts from the RWA status and
+    /// dynamic endpoints, a NYSE calendar, and the market K-line endpoint.
+    /// All five fields go stale together.
+    function updateOracle(address token, bool halted, uint256 priceUsd, bool sessionOpen, uint256 lastCloseUsd)
+        external
+        onlyOracleUpdater
+    {
+        if (priceUsd == 0 || lastCloseUsd == 0) revert ZeroPrice();
+        oracleStatus[token] = OracleStatus({
+            halted: halted,
+            priceUsd: priceUsd,
+            updatedAt: block.timestamp,
+            sessionOpen: sessionOpen,
+            lastCloseUsd: lastCloseUsd
+        });
+        emit OracleUpdated(token, halted, priceUsd, sessionOpen, lastCloseUsd, block.timestamp);
     }
 
     // ---------------------------------------------------------------------
@@ -451,6 +488,25 @@ contract Covenant {
         uint256 floorBps = 10_000 - cfg.maxSlippageBps;
         if (quotedOut == 0 || minOut * 10_000 < quotedOut * floorBps || minOut * 10_000 < oracleOut * floorBps) {
             return DenialReason.SlippageTooLoose;
+        }
+
+        // Feature 1: the closed-market drift rule. The implied price is
+        // from the agent's own quote; the slippage check above already ties
+        // the quote to both the minimum and the oracle, so an inflated quote
+        // can't hide a bad fill. Both sides of the comparison are the token's
+        // own price, so no token-to-share normalisation is needed here.
+        if (!o.sessionOpen && cfg.maxClosedMarketDriftBps > 0) {
+            if (side == Side.Buy) {
+                uint256 implied = (amountIn * 1e18) / quotedOut;
+                if (implied * 10_000 > o.lastCloseUsd * (10_000 + uint256(cfg.maxClosedMarketDriftBps))) {
+                    return DenialReason.ClosedMarketDrift;
+                }
+            } else {
+                uint256 implied = (quotedOut * 1e18) / amountIn;
+                if (implied * 10_000 < o.lastCloseUsd * (10_000 - uint256(cfg.maxClosedMarketDriftBps))) {
+                    return DenialReason.ClosedMarketDrift;
+                }
+            }
         }
 
         // Feature 3: the position cap, read from the wallet's real on-chain

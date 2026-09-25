@@ -39,15 +39,21 @@ describe("chaos-fork.ts (live, real subprocess, the actual judge-facing command)
     expect(output.stdout).to.match(/smuggle in a loose minimum[\s\S]*?reason:\s+SlippageTooLoose/);
     expect(output.stdout).to.match(/while the oracle reports a halt[\s\S]*?reason:\s+OracleHalted/);
     expect(output.stdout).to.match(/pass the \$3 position cap[\s\S]*?reason:\s+PositionLimit/);
+    // Feature 1 with live prices: either the real overnight gap is big
+    // enough to demonstrate, and the premium-paying trade is refused, or
+    // the script says honestly that it isn't.
+    expect(output.stdout).to.match(/overnight (premium|discount) while NYSE is closed[\s\S]*?reason:\s+ClosedMarketDrift|too small to demonstrate the rule honestly/);
     expect(output.stdout).to.match(/a stranger commits[\s\S]*?reverted:\s+NotAgent/);
 
     // The contrast trade goes through, so the guard isn't rejecting everything.
     expect(output.stdout).to.match(/within every limit[\s\S]*?allowed:\s+true[\s\S]*?reason:\s+None/);
 
-    // Every tx hash printed is a real 32-byte hash: six commits (the
-    // stranger's attempt reverts, so it has no hash).
+    // Every tx hash printed is a real 32-byte hash: six or seven commits,
+    // depending on whether the drift demo ran (the stranger's attempt
+    // reverts, so it has no hash).
     const txHashes = [...output.stdout.matchAll(/tx:\s+(0x[0-9a-f]{64})/g)].map((m) => m[1]);
-    expect(txHashes.length).to.equal(6);
+    const driftRan = !output.stdout.includes("too small to demonstrate");
+    expect(txHashes.length).to.equal(driftRan ? 7 : 6);
     expect(output.stdout).to.not.include("FAILED TO INDEPENDENTLY VERIFY");
   });
 });

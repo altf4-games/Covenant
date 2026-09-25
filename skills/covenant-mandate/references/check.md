@@ -65,3 +65,4 @@ These mirror `Covenant.sol`'s `DenialReason`. Tell the user the reason in plain 
 | `DailyLimitExceeded` | The day's trade count is used up. | It resets at the next UTC midnight. Say when. |
 | `SlippageTooLoose` | `minOut` is too far below the quote or the oracle price, or the quote is zero. | Re-quote and set `minOut` within `token.maxSlippageBps`. |
 | `PositionLimit` | After this buy the wallet's real holding would exceed `token.maxPositionUsd`. | Offer a smaller buy, or stop. |
+| `ClosedMarketDrift` | The NYSE's regular session is closed (`oracle.sessionOpen` is false) and this buy is priced more than `token.maxClosedMarketDriftBps` above the last close (`oracle.lastCloseUsd`), or this sell that far below it. | Tell the user the market is closed and the token is trading at a premium (or discount) to its last close. Wait for the open, or stop. |

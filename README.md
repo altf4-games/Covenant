@@ -1,10 +1,10 @@
 # Covenant
 
-An on-chain mandate for an AI agent trading tokenized stocks from a Binance Agentic Wallet. The owner sets the rules: which stocks by exact address, dollars per trade, trades per day, a slippage bound, a position cap. Before every trade the agent commits it to Covenant, and the contract decides on chain whether the mandate allows it. The wallet then trades natively with `baw market-order swap`, and the agent settles the real fill back on chain. `scripts/verify.ts` reconciles every real transfer in and out of the wallet against settled decisions, so a trade made without an approved decision shows up for anyone with an RPC.
+An on-chain mandate for an AI agent trading tokenized stocks from a Binance Agentic Wallet. The owner sets the rules: which stocks by exact address, dollars per trade, trades per day, a slippage bound, a position cap, and how far from its last NYSE close a stock may trade while the NYSE is shut. Before every trade the agent commits it to Covenant, and the contract decides on chain whether the mandate allows it. The wallet then trades natively with `baw market-order swap`, and the agent settles the real fill back on chain. `scripts/verify.ts` reconciles every real transfer in and out of the wallet against settled decisions, so a trade made without an approved decision shows up for anyone with an RPC.
 
 Built for the BNB Hack: Tokenized Stocks Edition. Every claim on this page is backed by a real transaction, re-read from chain: on a fork of BSC mainnet against the real deployed tokens and live Binance data, and for the Agentic Wallet leg, on BSC mainnet itself (`docs/evidence/`). Covenant's own mainnet deployment is the last step of the build, done once.
 
-**What it claims, and what it doesn't.** Covenant doesn't hold funds and can't physically stop the wallet from trading; Binance's own wallet guardrails (daily limit, token scope, session expiry) are the hard, private limit. What Covenant adds is market-aware and public: halt and market-session status, exact-address provider pinning, slippage checked against both the agent's quote and an oracle price, a position cap read from the wallet's real balance, and a public record of every decision, allow or deny. The claim is **no trade can happen unseen**, not "no trade can happen".
+**What it claims, and what it doesn't.** Covenant doesn't hold funds and can't physically stop the wallet from trading; Binance's own wallet guardrails (daily limit, token scope, session expiry) are the hard, private limit. What Covenant adds is market-aware and public: halt status, a closed-market drift rule, exact-address provider pinning, slippage checked against both the agent's quote and an oracle price, a position cap read from the wallet's real balance, and a public record of every decision, allow or deny. The claim is **no trade can happen unseen**, not "no trade can happen".
 
 The closest verified prior art (Harness, ETHOnline 2026, Ledger's "AI Agents x Ledger" 1st place) enforces a single daily budget with no reasoned per-decision record. Covenant evaluates a richer mandate and records every decision on chain. And unlike an advisory critic agent that rates a decision after the fact, Covenant's decision comes before the trade: a trade without an approved decision committed in advance is a detectable violation.
 
@@ -14,7 +14,7 @@ One contract, [`contracts/Covenant.sol`](contracts/Covenant.sol), and three keys
 
 The loop:
 
-1. **`commit(side, token, amountIn, quotedOut, minOut, quoteRef, researchRef)`**, agent only. Covenant checks the mandate (active, not expired), the token (allowed by exact address), that no other approved decision is in flight, the oracle (fresh, not halted), the notional (buys in USDT, sells through the oracle price), the day's trade count, the slippage bound (`minOut` against both the quote and the oracle price), and for buys, the position cap. It records the decision and emits `DecisionCommitted`, allowed or denied.
+1. **`commit(side, token, amountIn, quotedOut, minOut, quoteRef, researchRef)`**, agent only. Covenant checks the mandate (active, not expired), the token (allowed by exact address), that no other approved decision is in flight, the oracle (fresh, not halted), the notional (buys in USDT, sells through the oracle price), the day's trade count, the slippage bound (`minOut` against both the quote and the oracle price), and for buys, the position cap. While the NYSE is closed it also applies the closed-market drift rule. It records the decision and emits `DecisionCommitted`, allowed or denied.
 2. **The trade**, natively: `baw market-order swap`, through Binance's router, RFQ fills and MEV protection. Covenant never touches the money.
 3. **`settle(id, swapTxHash, amountOut, executionMode)`**, agent only, with the real swap's hash and the real amount received. `cancel(id)` abandons an approved decision instead.
 
@@ -23,6 +23,7 @@ Worth knowing before reading the code:
 - **Denials don't revert.** A reverted transaction would discard its own event, leaving no trace of the refusal. `commit` records the denial and returns, so refusals are on chain too, at gas cost only.
 - **One `_evaluate`, two callers.** `previewDecision` (read-only, what the skill's `check` uses) and `commit` run the same internal function, so a preview can't drift from the real decision. Tested directly in `test/Covenant.unit.ts`.
 - **Feature 3, the position cap, reads real state.** `commit` calls `balanceOf(agent)` on the stock token at decision time and denies with `PositionLimit` if the post-trade holding would exceed the owner's cap. It uses the larger of the quote and the oracle's output, so an understated quote can't slip past it.
+- **Feature 1, the closed-market drift rule, answers this hackathon's opening problem.** The organizers' pitch: a tokenized stock "trades straight through the weekend, priced off a reference that has not updated in two days". While the NYSE's regular session is closed, `commit` denies a buy priced more than the owner's bound above the token's price at the last NYSE close, or a sell that far below it (`ClosedMarketDrift`). Binance's status endpoint can't say when the NYSE is shut (for bStocks it reports `TRADING` around the clock, friction-log C18), so the oracle takes the session from a NYSE calendar built from nyse.com's own holiday and early-close table, and the last-close price from the token's hourly candle ending exactly at that close. On 2026-09-25 at 07:21 UTC, with the NYSE shut, NVDAB was 0.84% above Thursday's close; the chaos-fork run below refuses a buy at that premium.
 - **Provider pinning, not ticker resolution.** The allowlist is exact addresses. A ticker exists under several providers (NVDAB vs Ondo's NVDAon), and impersonator tokens exist, so resolution happens off chain in the skill, which refuses to guess.
 
 Around the contract:
@@ -30,7 +31,7 @@ Around the contract:
 - [`skills/covenant-mandate/`](skills/covenant-mandate/): a Binance Wallet Skill (zero-dependency `scripts/cli.mjs`, Node 22 or later) that resolves tickers, checks a trade's decision before spending gas, and builds the commit, settle and cancel calldata that `baw contract-call` carries. Its `SKILL.md` and `references/loop.md` describe the loop as observed live on mainnet.
 - [`status-page/index.html`](status-page/index.html): one static file, no backend. Reads the mandate and every decision straight from any RPC.
 - [`mcp-server/index.ts`](mcp-server/index.ts): the skill's reads as MCP tools (`resolve_ticker`, `survey_providers`, `get_mandate_status`, `check_halt`, `preview_trade`), so any MCP-capable agent can query the mandate.
-- [`scripts/oracle-updater.ts`](scripts/oracle-updater.ts): posts live market status (RWA asset-market-status endpoint) and price (RWA dynamic endpoint). If either read fails it posts nothing, the oracle goes stale, and every commit is denied.
+- [`scripts/oracle-updater.ts`](scripts/oracle-updater.ts): posts live market status (RWA asset-market-status endpoint), price (RWA dynamic endpoint), whether the NYSE session is open ([`scripts/lib/nyse-calendar.ts`](scripts/lib/nyse-calendar.ts)), and the last-close price (market K-line endpoint). If any read fails it posts nothing, the oracle goes stale, and every commit is denied.
 
 The skill's `resolve` refuses to guess on an ambiguous ticker; `survey` reports all three providers (ondo, xstock, bstock) at once, each labeled `not-listed-on-bsc`, `dead` or `live`. "Dead" comes from real on-chain `Transfer` activity, not Binance's reported `volume24h`, which was found to be unreliable (see "Tests, and what they caught").
 
@@ -70,17 +71,18 @@ It flags a trade with no settled decision (`UNMATCHED_TRADE`), a settle pointing
 npm run chaos-fork
 ```
 
-A real run from 2026-09-25, with a mandate of NVDAB only, $2 per trade, a $3 position cap and 1% slippage, at a live price of $225.49. These hashes exist on that local fork, not on BscScan; Covenant's mainnet deployment is the last build step.
+A real run from 2026-09-25, with a mandate of NVDAB only, $2 per trade, a $3 position cap and 1% slippage, at a live price of $225.58. The NYSE was closed and NVDAB was 0.84% above Thursday's close, so the drift bound was set to 0.42%. These hashes exist on that local fork, not on BscScan; Covenant's mainnet deployment is the last build step.
 
 | Attempt | tx hash | block | Result |
 |---|---|---|---|
-| Impersonator token | `0x9ff126759ec67c0a1873c8ad7cf72148ceddceea5b614ab897472189cc772b15` | 123907542 | denied, `TokenNotAllowed` |
-| $50, over the $2 cap | `0xd77b05f4814f55499ed3c59cad078d27a074c85122d0141b1716a6867fda6709` | 123907543 | denied, `NotionalExceeded` |
-| Quote understated 10x to hide a loose minimum | `0xaaa06f4819a68b8499e1c466d3b6aec46a279358b84ba9cd6161d61260c2c7b3` | 123907544 | denied, `SlippageTooLoose` |
-| Trade while the oracle reports a halt | `0xc331e9010fcd7df9fe96399816529aab40b04f346a63fc1acb372510a69d6b0e` | 123907546 | denied, `OracleHalted` |
-| $2 more with ~$1.69 already held, over the $3 cap | `0xbec55d012ab461edefaf23e1c71316a09b2623b3b500b500a1da9f06016cdf3b` | 123907549 | denied, `PositionLimit` |
+| Impersonator token | `0xbf7f850f8bb02c0d6db0f35152350f6aa310a5c341d6bb8abe213a9d3fbc566f` | 123909274 | denied, `TokenNotAllowed` |
+| $50, over the $2 cap | `0xc431d7e97b926c5a5f73b4d10a30b2ca4ab3b6386e7c0e92605046badf53f87a` | 123909275 | denied, `NotionalExceeded` |
+| Quote understated 10x to hide a loose minimum | `0x5b08a06aad533cde92e4a6a13644cbaad814fbd5db1da17036d539a39fb7a106` | 123909276 | denied, `SlippageTooLoose` |
+| Trade while the oracle reports a halt | `0x6f35371e4db1f362160ff083f908b0c59a17e42fa359601a98608e39bab6a8e5` | 123909278 | denied, `OracleHalted` |
+| Buy at the real overnight premium, NYSE closed | `0xf78a3a30914b4f031f22c9cd83ac140729acd54c479b8b3ea4602388bbf57ae0` | 123909282 | denied, `ClosedMarketDrift` |
+| $2 more with ~$1.69 already held, over the $3 cap | `0x02180dd72a751084d9b63684d9ed7ee45bbb607d5cfd8a9078ced019c6a6b63c` | 123909286 | denied, `PositionLimit` |
 | A stranger commits under the owner's mandate | none | none | reverted, `NotAgent` |
-| $1, within every limit | `0x43b5106d0b74ec52207664048c87da559875e9bf95cce2800b63d6854081cf6d` | 123907550 | allowed |
+| $1, within every limit | `0x704c9875cee397b7e3b26334500b90be75b26428eaa5137241d7a285d69d125f` | 123909287 | allowed |
 
 `test/chaos-fork.live.ts` runs this exact command as a subprocess and asserts on its real output.
 
@@ -110,11 +112,12 @@ npm install
 npx hardhat test
 ```
 
-Ten suites, 80 tests:
+Eleven suites, 95 tests:
 
-- `test/Covenant.unit.ts` (31): in-memory chain with a mock ERC20. Every denial reason, the three-distinct-roles rule, agent-only commit/settle/cancel (a stranger, the owner and the updater all revert), the settle and cancel lifecycle, the understated-quote attack, Feature 3's position cap, and preview/commit agreement.
+- `test/Covenant.unit.ts` (38): in-memory chain with a mock ERC20. Every denial reason, including Feature 1's drift rule (with the real NVDAB numbers from 2026-09-25), the three-distinct-roles rule, agent-only commit/settle/cancel (a stranger, the owner and the updater all revert), the settle and cancel lifecycle, the understated-quote attack, Feature 3's position cap, and preview/commit agreement.
 - `test/Covenant.fork.ts` (7): a real fork of BSC mainnet with the real Agentic Wallet impersonated as the agent, so the position cap reads the NVDAB it really bought on Day 1. Includes a full commit, real swap and settle loop against live PancakeSwap liquidity.
-- `test/oracle-updater.live.ts` (4): Binance's real status and price endpoints, posted on chain by the real updater code and read back.
+- `test/nyse-calendar.ts` (8): the NYSE calendar against real dates, including a holiday, an early close, both daylight-saving switches, and a year with no data (it refuses).
+- `test/oracle-updater.live.ts` (4): Binance's real status, price and K-line endpoints, posted on chain by the real updater code and read back; the last close is re-derived independently from a separate K-line fetch.
 - `test/skill-cli.live.ts` (14): the skill's own commands against a spawned fork node, including its commit, settle and cancel calldata sent as real transactions.
 - `test/status-page.live.ts` (3): the page's event reading, joined per decision, and the fork-boundary timeout. Runs its boundary test last on purpose (see below).
 - `test/mcp-server.live.ts` (8): the MCP server as a real subprocess, driven by the real MCP client.
@@ -263,3 +266,11 @@ Fixed by reading `eth_getBlockByNumber("latest")` directly over raw RPC for anyt
 - **A minimum exactly at the slippage floor rounds under it.** The fork test first set `minOut = quotedOut * 97 / 100` with a 3% bound. Integer division rounds down, so the minimum landed a hair below the floor and the contract, correctly, would have denied it. Caught reading the test before running it; the test now leaves a margin.
 - **The chaos-fork demo's "legitimate" trade was denied, correctly.** Its first v2 run funded the agent with $3.38 of NVDAB to demonstrate the $3 position cap, then ran the contrast trade meant to be allowed. It was denied `PositionLimit`, because the wallet was already over the cap. The contract was right and the scenario was wrong; the demo now funds $1.69, so $2 more crosses the cap and $1 more doesn't.
 - **An ethers `Result` loses its named keys when spread.** The unit suite's first v2 run failed 21 tests at once, all reading `undefined` for event fields. The helper did `{ ...parsed.args }`, which keeps an ethers `Result`'s indexed entries but not its names. `parsed.args.toObject()` fixed all 21.
+
+### A summarizer misread NYSE's holiday table; the raw page didn't
+
+Feature 1 needs NYSE's 2026 holidays. A web-fetch summary of nyse.com's calendar page came back confidently listing MLK Day, Memorial Day, Juneteenth, July 3 and Labor Day as 1:00 p.m. early closes, and left Thanksgiving out. That's wrong: those are full closures. Reading the raw HTML showed why. The table has one column per year and every row is a full closure, and the early closes (Nov 27 and Dec 24, 2026) live in the footnotes, which the summary had folded into the wrong rows. The calendar in `scripts/lib/nyse-calendar.ts` is built from the raw table and footnotes. Had the summary been used, the drift rule would have treated five full holidays as trading days and allowed afternoon trades on them at whatever premium the token carried.
+
+### At exactly the drift bound, rounding denies
+
+A buy priced exactly 1% over the last close, with a 1% bound, is denied. `quotedOut = amountIn × 1e18 / price` truncates, which puts the implied price 20,200 wei over the bound (about 1e-16 of the price). It's the same effect as the slippage-floor case above, and it errs toward refusing, the right direction for a guard, so the contract is unchanged. The unit test asserts the denial at the exact bound and an allow just inside it, so the direction can't silently flip.

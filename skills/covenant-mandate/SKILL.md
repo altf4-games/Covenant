@@ -26,7 +26,7 @@ metadata:
 
 # Covenant Mandate Skill
 
-Covenant ([contracts/Covenant.sol](../../contracts/Covenant.sol)) is an on-chain decision ledger. The owner sets a mandate: allowed tokens by exact address, max dollars per trade, trades per day, a slippage bound, and a position cap. Before each trade you **commit** it and Covenant decides on chain. You trade natively with `baw market-order swap`, then **settle** the real fill. `scripts/verify.ts` reconciles every real transfer in and out of the wallet against settled decisions.
+Covenant ([contracts/Covenant.sol](../../contracts/Covenant.sol)) is an on-chain decision ledger. The owner sets a mandate: allowed tokens by exact address, max dollars per trade, trades per day, a slippage bound, a position cap, and how far from its last NYSE close a stock may be bought or sold while the NYSE is shut. Before each trade you **commit** it and Covenant decides on chain. You trade natively with `baw market-order swap`, then **settle** the real fill. `scripts/verify.ts` reconciles every real transfer in and out of the wallet against settled decisions.
 
 ## What this is and isn't
 

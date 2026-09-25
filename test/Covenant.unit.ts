@@ -26,6 +26,7 @@ const Reason = {
   SlippageTooLoose: 8n,
   PositionLimit: 9n,
   DecisionOpen: 10n,
+  ClosedMarketDrift: 11n,
 };
 const Side = { Buy: 0, Sell: 1 };
 const Mode = { Unknown: 0, Pool: 1, Rfq: 2, Aggregator: 3 };
@@ -62,7 +63,7 @@ async function makeTradeable(
   const latest = await networkHelpers.time.latest();
   await f.covenant.setMandate(maxNotional, maxTrades, latest + 30 * ONE_DAY);
   await f.covenant.configureToken(f.stockAddress, true, slippageBps, maxPositionUsd);
-  await f.covenant.connect(f.updater).updateOracle(f.stockAddress, false, price);
+  await f.covenant.connect(f.updater).updateOracle(f.stockAddress, false, price, true, price);
 }
 
 /** A buy of `usd` quote units at the oracle price, minimum 0.5% below. */
@@ -170,10 +171,10 @@ describe("Covenant v2 (unit, mocked tokens)", function () {
   describe("oracle", function () {
     it("updateOracle is updater-only, rejects a zero price, and records price and halt", async function () {
       const f = await networkHelpers.loadFixture(deployFixture);
-      await expect(f.covenant.connect(f.agent).updateOracle(f.stockAddress, false, E18)).to.be.revertedWithCustomError(f.covenant, "NotOracleUpdater");
-      await expect(f.covenant.connect(f.owner).updateOracle(f.stockAddress, false, E18)).to.be.revertedWithCustomError(f.covenant, "NotOracleUpdater");
-      await expect(f.covenant.connect(f.updater).updateOracle(f.stockAddress, false, 0n)).to.be.revertedWithCustomError(f.covenant, "ZeroPrice");
-      await f.covenant.connect(f.updater).updateOracle(f.stockAddress, true, 221n * E18);
+      await expect(f.covenant.connect(f.agent).updateOracle(f.stockAddress, false, E18, true, E18)).to.be.revertedWithCustomError(f.covenant, "NotOracleUpdater");
+      await expect(f.covenant.connect(f.owner).updateOracle(f.stockAddress, false, E18, true, E18)).to.be.revertedWithCustomError(f.covenant, "NotOracleUpdater");
+      await expect(f.covenant.connect(f.updater).updateOracle(f.stockAddress, false, 0n, true, 0n)).to.be.revertedWithCustomError(f.covenant, "ZeroPrice");
+      await f.covenant.connect(f.updater).updateOracle(f.stockAddress, true, 221n * E18, true, 221n * E18);
       const status = await f.covenant.oracleStatus(f.stockAddress);
       expect(status.halted).to.equal(true);
       expect(status.priceUsd).to.equal(221n * E18);
@@ -227,7 +228,7 @@ describe("Covenant v2 (unit, mocked tokens)", function () {
       await f.covenant.setMandate(10n * E18, 5n, latest + 30 * ONE_DAY);
       await f.covenant.configureToken(f.stockAddress, true, 100, 50n * E18);
       expect((await commit(f, Side.Buy, buyArgs(E18))).reason).to.equal(Reason.OracleStale);
-      await f.covenant.connect(f.updater).updateOracle(f.stockAddress, false, 200n * E18);
+      await f.covenant.connect(f.updater).updateOracle(f.stockAddress, false, 200n * E18, true, 200n * E18);
       await networkHelpers.time.increase(STALENESS_BOUND + 1);
       expect((await commit(f, Side.Buy, buyArgs(E18))).reason).to.equal(Reason.OracleStale);
     });
@@ -235,7 +236,7 @@ describe("Covenant v2 (unit, mocked tokens)", function () {
     it("OracleHalted while the oracle reports a halt", async function () {
       const f = await networkHelpers.loadFixture(deployFixture);
       await makeTradeable(f);
-      await f.covenant.connect(f.updater).updateOracle(f.stockAddress, true, 200n * E18);
+      await f.covenant.connect(f.updater).updateOracle(f.stockAddress, true, 200n * E18, true, 200n * E18);
       expect((await commit(f, Side.Buy, buyArgs(E18))).reason).to.equal(Reason.OracleHalted);
     });
 
@@ -281,7 +282,7 @@ describe("Covenant v2 (unit, mocked tokens)", function () {
       expect((await commit(f, Side.Buy, buyArgs(E18))).reason).to.equal(Reason.DailyLimitExceeded);
 
       await networkHelpers.time.increase(ONE_DAY);
-      await f.covenant.connect(f.updater).updateOracle(f.stockAddress, false, 200n * E18);
+      await f.covenant.connect(f.updater).updateOracle(f.stockAddress, false, 200n * E18, true, 200n * E18);
       expect((await commit(f, Side.Buy, buyArgs(E18))).reason).to.equal(Reason.None);
     });
 
@@ -292,7 +293,7 @@ describe("Covenant v2 (unit, mocked tokens)", function () {
       expect((await commit(f, Side.Buy, buyArgs(E18))).reason).to.equal(Reason.DecisionOpen);
 
       await networkHelpers.time.increase(DECISION_TTL + 1);
-      await f.covenant.connect(f.updater).updateOracle(f.stockAddress, false, 200n * E18);
+      await f.covenant.connect(f.updater).updateOracle(f.stockAddress, false, 200n * E18, true, 200n * E18);
       expect(await f.covenant.hasOpenDecision()).to.equal(false);
       expect((await commit(f, Side.Buy, buyArgs(E18))).reason).to.equal(Reason.None);
     });
@@ -350,6 +351,99 @@ describe("Covenant v2 (unit, mocked tokens)", function () {
       await makeTradeable(f, { maxPositionUsd: 1n * E18 });
       await f.stock.mint(f.agent.address, 10n * E18); // far over the cap already
       expect((await commit(f, Side.Sell, sellArgs((2n * E18) / 100n))).reason).to.equal(Reason.None);
+    });
+  });
+
+  describe("Feature 1: closed-market drift guard", function () {
+    /** Session closed, the token trading at `current` now, having closed at `lastClose`. */
+    async function closedMarket(f: Awaited<ReturnType<typeof deployFixture>>, current: bigint, lastClose: bigint) {
+      await f.covenant.connect(f.updater).updateOracle(f.stockAddress, false, current, false, lastClose);
+    }
+
+    it("setClosedMarketDrift is owner-only, bounded, and emits", async function () {
+      const f = await networkHelpers.loadFixture(deployFixture);
+      await expect(f.covenant.connect(f.agent).setClosedMarketDrift(f.stockAddress, 100)).to.be.revertedWithCustomError(f.covenant, "NotOwner");
+      await expect(f.covenant.setClosedMarketDrift(f.stockAddress, 10_001)).to.be.revertedWithCustomError(f.covenant, "InvalidBound");
+      await expect(f.covenant.setClosedMarketDrift(ethers.ZeroAddress, 100)).to.be.revertedWithCustomError(f.covenant, "ZeroAddress");
+      await expect(f.covenant.setClosedMarketDrift(f.stockAddress, 100)).to.emit(f.covenant, "ClosedMarketDriftSet").withArgs(f.stockAddress, 100);
+      expect((await f.covenant.tokenConfig(f.stockAddress)).maxClosedMarketDriftBps).to.equal(100n);
+    });
+
+    it("configureToken doesn't reset the drift bound set separately", async function () {
+      const f = await networkHelpers.loadFixture(deployFixture);
+      await f.covenant.setClosedMarketDrift(f.stockAddress, 150);
+      await f.covenant.configureToken(f.stockAddress, true, 100, E18);
+      expect((await f.covenant.tokenConfig(f.stockAddress)).maxClosedMarketDriftBps).to.equal(150n);
+    });
+
+    it("the oracle rejects a zero last-close price", async function () {
+      const f = await networkHelpers.loadFixture(deployFixture);
+      await expect(f.covenant.connect(f.updater).updateOracle(f.stockAddress, false, 200n * E18, false, 0n)).to.be.revertedWithCustomError(f.covenant, "ZeroPrice");
+    });
+
+    it("while closed, a buy priced over the bound above the last close is denied; within it, allowed", async function () {
+      const f = await networkHelpers.loadFixture(deployFixture);
+      await makeTradeable(f, { slippageBps: 100 });
+      await f.covenant.setClosedMarketDrift(f.stockAddress, 100); // 1%
+
+      await closedMarket(f, 203n * E18, 200n * E18); // +1.5% since the close
+      expect((await commit(f, Side.Buy, buyArgs(E18, 203n * E18))).reason).to.equal(Reason.ClosedMarketDrift);
+
+      await closedMarket(f, 201n * E18, 200n * E18); // +0.5%
+      expect(await f.covenant.previewDecision(Side.Buy, f.stockAddress, ...Object.values(buyArgs(E18, 201n * E18)) as [bigint, bigint, bigint])).to.equal(Reason.None);
+
+      // Just inside +1%: allowed.
+      await closedMarket(f, 20199n * E18 / 100n, 200n * E18);
+      expect(await f.covenant.previewDecision(Side.Buy, f.stockAddress, ...Object.values(buyArgs(E18, 20199n * E18 / 100n)) as [bigint, bigint, bigint])).to.equal(Reason.None);
+
+      // Exactly +1% is denied: quotedOut truncates, which puts the implied
+      // price 20,200 wei (about 1e-16) over the bound. Rounding errs toward
+      // denial, the safe direction for a guard; asserted so it stays that way.
+      await closedMarket(f, 202n * E18, 200n * E18);
+      expect(await f.covenant.previewDecision(Side.Buy, f.stockAddress, ...Object.values(buyArgs(E18, 202n * E18)) as [bigint, bigint, bigint])).to.equal(Reason.ClosedMarketDrift);
+    });
+
+    it("while closed, a sell priced over the bound below the last close is denied", async function () {
+      const f = await networkHelpers.loadFixture(deployFixture);
+      await makeTradeable(f, { slippageBps: 100 });
+      await f.covenant.setClosedMarketDrift(f.stockAddress, 100);
+      const tokens = (2n * E18) / 100n;
+
+      await closedMarket(f, 197n * E18, 200n * E18); // -1.5%
+      expect((await commit(f, Side.Sell, sellArgs(tokens, 197n * E18))).reason).to.equal(Reason.ClosedMarketDrift);
+
+      await closedMarket(f, 199n * E18, 200n * E18); // -0.5%
+      expect((await commit(f, Side.Sell, sellArgs(tokens, 199n * E18))).reason).to.equal(Reason.None);
+    });
+
+    it("doesn't apply while the session is open, or when the bound is 0", async function () {
+      const f = await networkHelpers.loadFixture(deployFixture);
+      await makeTradeable(f, { slippageBps: 100 });
+      await f.covenant.setClosedMarketDrift(f.stockAddress, 100);
+
+      // Session open: a price 5% above the last close is just the market.
+      await f.covenant.connect(f.updater).updateOracle(f.stockAddress, false, 210n * E18, true, 200n * E18);
+      expect(await f.covenant.previewDecision(Side.Buy, f.stockAddress, ...Object.values(buyArgs(E18, 210n * E18)) as [bigint, bigint, bigint])).to.equal(Reason.None);
+
+      // Session closed, rule off.
+      await f.covenant.setClosedMarketDrift(f.stockAddress, 0);
+      await closedMarket(f, 210n * E18, 200n * E18);
+      expect(await f.covenant.previewDecision(Side.Buy, f.stockAddress, ...Object.values(buyArgs(E18, 210n * E18)) as [bigint, bigint, bigint])).to.equal(Reason.None);
+    });
+
+    it("with the real NVDAB numbers seen on 2026-09-25 (last close $223.679, $224.379 overnight, +0.31%)", async function () {
+      // From Binance's K-line and dynamic endpoints at 07:21 UTC, NYSE closed.
+      const lastClose = 223_679007987152600000n;
+      const now = 224_379144003205100000n;
+      const f = await networkHelpers.loadFixture(deployFixture);
+      await makeTradeable(f, { slippageBps: 100 });
+      await closedMarket(f, now, lastClose);
+      const a = buyArgs(E18, now);
+
+      await f.covenant.setClosedMarketDrift(f.stockAddress, 20); // 0.2%: that overnight premium is too much
+      expect(await f.covenant.previewDecision(Side.Buy, f.stockAddress, a.amountIn, a.quotedOut, a.minOut)).to.equal(Reason.ClosedMarketDrift);
+      await f.covenant.setClosedMarketDrift(f.stockAddress, 100); // 1%: acceptable
+      expect(await f.covenant.previewDecision(Side.Buy, f.stockAddress, a.amountIn, a.quotedOut, a.minOut)).to.equal(Reason.None);
     });
   });
 

@@ -80,6 +80,7 @@ const DENIAL_REASONS = [
   "SlippageTooLoose",
   "PositionLimit",
   "DecisionOpen",
+  "ClosedMarketDrift",
 ];
 
 const SIDES = { buy: 0, sell: 1 };
@@ -406,6 +407,7 @@ const COMMANDS = {
         allowed: asBool(configRaw, 0),
         maxSlippageBps: Number(asUint(configRaw, 1)),
         maxPositionUsd: asUint(configRaw, 2).toString(),
+        maxClosedMarketDriftBps: Number(asUint(configRaw, 3)),
       },
       mandate: {
         active: asBool(mandateRaw, 0),
@@ -419,6 +421,8 @@ const COMMANDS = {
         halted: asBool(oracleRaw, 0),
         priceUsd: asUint(oracleRaw, 1).toString(),
         updatedAt: asUint(oracleRaw, 2).toString(),
+        sessionOpen: asBool(oracleRaw, 3),
+        lastCloseUsd: asUint(oracleRaw, 4).toString(),
       },
       decision: {
         allowed: reasonIndex === 0,

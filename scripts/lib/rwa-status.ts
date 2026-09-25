@@ -77,6 +77,36 @@ export function isHalted(status: Pick<AssetMarketStatus, "openState" | "reasonCo
   return !(status.openState && status.reasonCode === "TRADING");
 }
 
+const KLINE_URL = "https://www.binance.com/bapi/defi/v1/public/wallet-direct/buw/wallet/dex/market/token/kline/ai";
+
+/** [openTime ms, open, high, low, close, volume, closeTime ms], as the endpoint returns them. */
+export type Kline = [number, string, string, string, string, string, number];
+
+/**
+ * Hourly candles for a token from Binance's public market K-line endpoint
+ * (v1; the v2 path 404s). Returns roughly the last 300 hours, which covers
+ * any weekend plus holiday.
+ */
+export async function fetchHourlyKlines(chainId: number, contractAddress: string): Promise<Kline[]> {
+  const url = new URL(KLINE_URL);
+  url.searchParams.set("chainId", String(chainId));
+  url.searchParams.set("contractAddress", contractAddress);
+  url.searchParams.set("interval", "1h");
+  const response = await fetch(url, { headers: REQUEST_HEADERS });
+  if (!response.ok) throw new Error(`K-line request failed: HTTP ${response.status}`);
+  const body = (await response.json()) as { success: boolean; code: string; data?: { klineInfos?: Kline[] } };
+  const klines = body.data?.klineInfos;
+  if (!body.success || !Array.isArray(klines)) throw new Error(`K-line endpoint returned an error: code=${body.code}`);
+  return klines;
+}
+
+/** The close price of the candle that ends exactly at `closeAt`, or throws: no nearby-candle guessing. */
+export function closePriceAt(klines: Kline[], closeAt: Date): string {
+  const candle = klines.find((k) => k[6] === closeAt.getTime());
+  if (!candle) throw new Error(`no hourly candle ends at ${closeAt.toISOString()} - refusing to guess a last-close price`);
+  return candle[4];
+}
+
 /**
  * Converts a decimal price string from the RWA dynamic endpoint (e.g.
  * "226.40605755959772329895") into Covenant's 1e18 fixed-point `priceUsd`.

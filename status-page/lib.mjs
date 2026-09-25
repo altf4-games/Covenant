@@ -17,7 +17,7 @@ export const ABI = [
 export const DENIAL_REASONS = [
   "None", "MandateInactive", "MandateExpired", "TokenNotAllowed",
   "NotionalExceeded", "DailyLimitExceeded", "OracleStale", "OracleHalted",
-  "SlippageTooLoose", "PositionLimit", "DecisionOpen",
+  "SlippageTooLoose", "PositionLimit", "DecisionOpen", "ClosedMarketDrift",
 ];
 export const SIDES = ["buy", "sell"];
 export const EXECUTION_MODES = ["unknown", "pool", "rfq", "aggregator"];

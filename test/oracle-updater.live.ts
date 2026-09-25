@@ -1,6 +1,7 @@
 import { expect } from "chai";
 import { network } from "hardhat";
-import { isHalted, priceToUsdE18 } from "../scripts/lib/rwa-status.js";
+import { isHalted, priceToUsdE18, fetchHourlyKlines } from "../scripts/lib/rwa-status.js";
+import { isRegularSessionOpen, lastRegularClose } from "../scripts/lib/nyse-calendar.js";
 import { readLiveOracle, pushOracleUpdate } from "../scripts/oracle-updater.js";
 
 const { ethers, networkHelpers } = await network.getOrCreate("bscFork");
@@ -23,10 +24,22 @@ describe("Oracle updater (live RWA status + live price -> real on-chain write)",
     const covenant = await ethers.deployContract("Covenant", [USDT, updater.address, agent.address, 900, 600]);
     const covenantAddress = await covenant.getAddress();
 
-    const reading = await readLiveOracle(BSC_BINANCE_CHAIN_ID, NVDAB);
+    const now = new Date();
+    const reading = await readLiveOracle(BSC_BINANCE_CHAIN_ID, NVDAB, now);
     console.log(
       `      (live NVDAB: openState=${reading.status.openState} reasonCode=${reading.status.reasonCode} -> halted=${reading.halted}, price=${reading.rawPrice})`,
     );
+    console.log(`      (NYSE session open: ${reading.sessionOpen}; last close ${reading.lastCloseAt.toISOString()} at ${reading.rawLastClose})`);
+
+    // Feature 1's fields, re-derived independently: the session from the
+    // calendar, and the last close from a separate fetch of the real K-line.
+    expect(reading.sessionOpen).to.equal(isRegularSessionOpen(now));
+    expect(reading.lastCloseAt.getTime()).to.equal(lastRegularClose(now).getTime());
+    const candle = (await fetchHourlyKlines(BSC_BINANCE_CHAIN_ID, NVDAB)).find((k) => k[6] === reading.lastCloseAt.getTime())!;
+    expect(reading.lastCloseUsd).to.equal(priceToUsdE18(candle[4]));
+    // Real, not a units bug: within 20% of the live price.
+    expect(reading.lastCloseUsd * 10n).to.be.greaterThan(reading.priceUsd * 8n);
+    expect(reading.lastCloseUsd * 10n).to.be.lessThan(reading.priceUsd * 12n);
     // A real stock price, not a placeholder: NVDAB traded around $220 when
     // this was written. A loose band still catches a units bug (1e18 off).
     expect(reading.priceUsd).to.be.greaterThan(10n * E18);
@@ -36,12 +49,15 @@ describe("Oracle updater (live RWA status + live price -> real on-chain write)",
     const posted = await pushOracleUpdate({ signer: updater, covenantAddress, token: NVDAB, reading });
     expect(posted.halted).to.equal(reading.halted);
     expect(posted.priceUsd).to.equal(reading.priceUsd);
+    expect(posted.sessionOpen).to.equal(reading.sessionOpen);
+    expect(posted.lastCloseUsd).to.equal(reading.lastCloseUsd);
     expect(posted.updatedAt).to.be.greaterThanOrEqual(BigInt(before));
 
     // End to end: real API -> real write -> real guard read.
     const latest = await networkHelpers.time.latest();
     await covenant.setMandate(10n * E18, 5n, latest + 30 * 24 * 60 * 60);
     await covenant.configureToken(NVDAB, true, 100, 10n * E18);
+    await covenant.setClosedMarketDrift(NVDAB, 10_000); // wide open: this test is about the live halt signal
     const amountIn = E18; // $1
     const quotedOut = (amountIn * E18) / reading.priceUsd;
     const minOut = (quotedOut * 995n) / 1000n;
@@ -52,7 +68,7 @@ describe("Oracle updater (live RWA status + live price -> real on-chain write)",
   it("refuses to post when the updater key is the agent's or the owner's", async function () {
     const [owner, updater, agent] = await ethers.getSigners();
     const covenant = await ethers.deployContract("Covenant", [USDT, updater.address, agent.address, 900, 600]);
-    const reading = { halted: false, priceUsd: 200n * E18 };
+    const reading = { halted: false, priceUsd: 200n * E18, sessionOpen: true, lastCloseUsd: 200n * E18 };
     for (const wrong of [owner, agent]) {
       await expect(
         pushOracleUpdate({ signer: wrong, covenantAddress: await covenant.getAddress(), token: NVDAB, reading }),

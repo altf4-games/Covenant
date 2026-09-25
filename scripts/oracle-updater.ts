@@ -10,6 +10,12 @@
  * posted, the oracle ages past its staleness bound, and every commit is
  * denied `OracleStale`. A missing price is never guessed.
  *
+ * Feature 1 adds two fields: whether the NYSE regular session is open,
+ * from scripts/lib/nyse-calendar.ts (Binance's status endpoint says
+ * "TRADING" for bStocks around the clock, friction-log.md C18), and the
+ * token's price at the last NYSE close, from the hourly candle ending
+ * exactly then on Binance's K-line endpoint.
+ *
  * Uses a raw ethers.Wallet, not hardhat-ethers's wrapped signer, for the
  * same reason as scripts/deploy.ts (friction-log.md C16).
  *
@@ -20,7 +26,8 @@
  */
 import { ethers } from "ethers";
 import covenantArtifact from "../artifacts/contracts/Covenant.sol/Covenant.json" with { type: "json" };
-import { fetchAssetMarketStatus, isHalted, priceToUsdE18, type AssetMarketStatus } from "./lib/rwa-status.js";
+import { fetchAssetMarketStatus, isHalted, priceToUsdE18, fetchHourlyKlines, closePriceAt, type AssetMarketStatus } from "./lib/rwa-status.js";
+import { isRegularSessionOpen, lastRegularClose } from "./lib/nyse-calendar.js";
 import { fetchDynamic } from "../skills/covenant-mandate/scripts/cli.mjs";
 
 const DEFAULT_CHAIN_ID = 56;
@@ -31,18 +38,41 @@ export interface LiveOracleReading {
   halted: boolean;
   rawPrice: string;
   priceUsd: bigint;
+  sessionOpen: boolean;
+  lastCloseAt: Date;
+  rawLastClose: string;
+  lastCloseUsd: bigint;
 }
 
-/** Reads both live sources. Throws rather than returning a partial reading. */
-export async function readLiveOracle(chainId: number, token: string): Promise<LiveOracleReading> {
-  const [status, dynamic] = await Promise.all([fetchAssetMarketStatus(chainId, token), fetchDynamic(chainId, token)]);
+/** Reads every live source. Throws rather than returning a partial reading. */
+export async function readLiveOracle(chainId: number, token: string, now: Date = new Date()): Promise<LiveOracleReading> {
+  const [status, dynamic, klines] = await Promise.all([
+    fetchAssetMarketStatus(chainId, token),
+    fetchDynamic(chainId, token),
+    fetchHourlyKlines(chainId, token),
+  ]);
   const rawPrice = dynamic?.tokenInfo?.price;
   if (typeof rawPrice !== "string" && typeof rawPrice !== "number") {
     throw new Error(`no live price for ${token} on chain ${chainId} - refusing to post a guess`);
   }
   const priceUsd = priceToUsdE18(String(rawPrice));
   if (priceUsd === 0n) throw new Error(`live price for ${token} is zero - refusing to post it`);
-  return { status, halted: isHalted(status), rawPrice: String(rawPrice), priceUsd };
+
+  const lastCloseAt = lastRegularClose(now);
+  const rawLastClose = closePriceAt(klines, lastCloseAt);
+  const lastCloseUsd = priceToUsdE18(rawLastClose);
+  if (lastCloseUsd === 0n) throw new Error(`last-close price for ${token} is zero - refusing to post it`);
+
+  return {
+    status,
+    halted: isHalted(status),
+    rawPrice: String(rawPrice),
+    priceUsd,
+    sessionOpen: isRegularSessionOpen(now),
+    lastCloseAt,
+    rawLastClose,
+    lastCloseUsd,
+  };
 }
 
 /** Posts a reading and confirms it by reading the contract back. */
@@ -50,18 +80,31 @@ export async function pushOracleUpdate(opts: {
   signer: ethers.Signer;
   covenantAddress: string;
   token: string;
-  reading: Pick<LiveOracleReading, "halted" | "priceUsd">;
+  reading: Pick<LiveOracleReading, "halted" | "priceUsd" | "sessionOpen" | "lastCloseUsd">;
 }) {
   const covenant = new ethers.Contract(opts.covenantAddress, covenantArtifact.abi, opts.signer);
-  const tx = await covenant.updateOracle(opts.token, opts.reading.halted, opts.reading.priceUsd);
+  const r = opts.reading;
+  const tx = await covenant.updateOracle(opts.token, r.halted, r.priceUsd, r.sessionOpen, r.lastCloseUsd);
   const receipt = await tx.wait();
   if (!receipt || receipt.status !== 1) throw new Error(`updateOracle reverted (tx ${tx.hash})`);
 
   const onChain = await covenant.oracleStatus(opts.token);
-  if (onChain.halted !== opts.reading.halted || onChain.priceUsd !== opts.reading.priceUsd) {
+  if (
+    onChain.halted !== r.halted ||
+    onChain.priceUsd !== r.priceUsd ||
+    onChain.sessionOpen !== r.sessionOpen ||
+    onChain.lastCloseUsd !== r.lastCloseUsd
+  ) {
     throw new Error("on-chain oracle state doesn't match what was just submitted");
   }
-  return { txHash: receipt.hash as string, halted: onChain.halted as boolean, priceUsd: onChain.priceUsd as bigint, updatedAt: onChain.updatedAt as bigint };
+  return {
+    txHash: receipt.hash as string,
+    halted: onChain.halted as boolean,
+    priceUsd: onChain.priceUsd as bigint,
+    sessionOpen: onChain.sessionOpen as boolean,
+    lastCloseUsd: onChain.lastCloseUsd as bigint,
+    updatedAt: onChain.updatedAt as bigint,
+  };
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
@@ -81,6 +124,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
 
     const reading = await readLiveOracle(chainId, token);
     console.log(`live: openState=${reading.status.openState} reasonCode=${reading.status.reasonCode} -> halted=${reading.halted}, price=${reading.rawPrice}`);
+    console.log(`NYSE session open: ${reading.sessionOpen}; last close ${reading.lastCloseAt.toISOString()} at ${reading.rawLastClose}`);
 
     const signer = new ethers.Wallet(privateKey, new ethers.JsonRpcProvider(rpcUrl));
     const result = await pushOracleUpdate({ signer, covenantAddress, token, reading });
