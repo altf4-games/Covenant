@@ -11,6 +11,7 @@
     "test": "hardhat test",
     "mcp-server": "tsx mcp-server/index.ts",
     "judge": "tsx scripts/judge.ts",
+    "verify": "tsx scripts/verify.ts",
     "chaos-fork": "tsx scripts/chaos-fork.ts"
   },
   "keywords": [],

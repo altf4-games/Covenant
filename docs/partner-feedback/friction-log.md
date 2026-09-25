@@ -378,6 +378,23 @@ So the quantity Binance's order API calls the "actual" fill is the share amount.
 
 **Redesign suggestion:** return both `toTokenActualQty` (token units, what `balanceOf` moves) and `toShareActualQty`, or at minimum document which one the field is and include the `sharesMultiplier` used.
 
+### C18. `[STOCK][DOCS]` While the NYSE is closed, the market-status endpoint says bStocks are "TRADING" and gives no session information at all
+Checked live on Friday 2026-09-25 at 07:21 UTC, with the NYSE closed (it opens at 13:30 UTC), for Covenant's closed-market drift guard, which needs to know when the underlying exchange is shut.
+
+```
+GET .../rwa/asset/market/status/ai?chainId=56&contractAddress=0x02fca6...7436    (NVDAB, bStock)
+{"openState":true,"marketStatus":null,"reasonCode":"TRADING","reasonMsg":null,"nextOpenTime":null,"nextCloseTime":null}
+
+GET .../rwa/asset/market/status/ai?chainId=56&contractAddress=0xa9ee28...6f75    (NVDAon, Ondo)
+{"openState":true,"marketStatus":"overnight","reasonCode":"TRADING","reasonMsg":null,"nextOpenTime":1790323260000,"nextCloseTime":1790322900000}
+```
+
+The bStock trades around the clock, so `TRADING` is true of the token, but every field that could say the *underlying* market is closed is null. Ondo does report a session, `overnight`, but its `nextCloseTime` (07:55 UTC) and `nextOpenTime` (08:01 UTC) are Ondo's own session boundaries, not NYSE's, and they're in milliseconds while the rest of the API's timestamps in this project have been seconds.
+
+**Why it matters:** this is the gap the hackathon's own opening pitch describes ("the tokenized stock trades straight through the weekend, priced off a reference that has not updated in two days"). An agent that asks Binance's status endpoint whether NVDA's market is open, for the token this track most wants built on, gets "TRADING" at 3 a.m. New York time with nothing to indicate otherwise. Covenant works around it with a deterministic NYSE calendar in the oracle updater.
+
+**Redesign suggestion:** add an underlying-market field (`underlyingSession: "regular" | "pre" | "post" | "closed"`, plus the next regular open and close) that's populated for bStocks too, and document the units of the time fields.
+
 ---
 
 ## D. BNB Agent Studio
