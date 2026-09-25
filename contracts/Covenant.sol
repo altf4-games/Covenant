@@ -1,89 +1,48 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.34;
 
-/// @dev Just the ERC20 surface Covenant needs. No point pulling in a full
-/// OpenZeppelin dependency for four function signatures.
-interface IERC20 {
-    function transferFrom(address from, address to, uint256 amount) external returns (bool);
-    function transfer(address to, uint256 amount) external returns (bool);
-    function approve(address spender, uint256 amount) external returns (bool);
-}
-
-/// @dev PancakeSwap V3 SwapRouter, exactInputSingle only. Verified live on BSC
-/// mainnet at 0x1b81D678ffb9C0263b24A97847620C99d213eB14 (factory() returns
-/// the real PancakeV3Factory address) - see docs/research/verified-facts.md.
-///
-/// Field order matches PancakeSwap's own ISwapRouter.sol exactly (confirmed
-/// against github.com/pancakeswap/pancake-v3-contracts) - `deadline` sits
-/// between `recipient` and `amountIn`. An earlier version of this file was
-/// missing that field entirely, which doesn't fail to compile (the struct is
-/// still well-formed Solidity) but silently misaligns every field from
-/// `amountIn` onward when ABI-encoded against the real router, producing a
-/// revert with no reason string. Caught by test/Covenant.fork.ts, which is
-/// exactly the kind of bug an interface written against docs/memory instead
-/// of the deployed contract's actual source produces - see the README's
-/// "Tests, and what they caught" section.
-interface IPancakeV3SwapRouter {
-    struct ExactInputSingleParams {
-        address tokenIn;
-        address tokenOut;
-        uint24 fee;
-        address recipient;
-        uint256 deadline;
-        uint256 amountIn;
-        uint256 amountOutMinimum;
-        uint160 sqrtPriceLimitX96;
-    }
-
-    function exactInputSingle(ExactInputSingleParams calldata params) external payable returns (uint256 amountOut);
+/// @dev Only `balanceOf`, declared `view` so the compiler issues a
+/// STATICCALL: an allowlisted token can't change Covenant's state from
+/// inside it, so no reentrancy guard is needed.
+interface IERC20Balance {
+    function balanceOf(address account) external view returns (uint256);
 }
 
 /// @title Covenant
-/// @notice An on-chain execution mandate for tokenized-stock trades. A human
-/// sets a mandate (which tokens, how much per trade, how many trades a day,
-/// until when); an agent proposes swaps against it; Covenant decides, on
-/// chain, whether the trade happens - and writes an attestation event either
-/// way, so the decision is independently verifiable by anyone with an RPC
-/// endpoint, not just trusted because the agent says so.
+/// @notice An on-chain decision ledger for an AI agent trading tokenized
+/// stocks. The agent's Binance Agentic Wallet keeps custody and executes
+/// every trade natively (`baw market-order swap`). Before each trade the
+/// agent commits the trade here and Covenant decides, on chain, whether the
+/// owner's mandate allows it. After the trade the agent settles the real
+/// fill. `scripts/verify.ts` then reconciles every real token transfer in
+/// and out of the wallet against settled decisions, so any trade made
+/// without an approved decision shows up publicly.
 ///
-/// @dev Design choices worth flagging for a reviewer:
+/// @dev What this does and doesn't claim. Covenant can't physically stop the
+/// wallet from trading; Binance's own wallet guardrails bound that. What it
+/// guarantees is that no trade happens unseen: each one either maps to a
+/// decision committed on chain before it happened, or it's flagged. See
+/// docs/research/opus-review-2026-09-24.md §5 for why this design replaced
+/// v1's `guardedSwap` and the oracle bond (both remain in git history).
 ///
-/// 1. Guard failures do not revert. A reverted transaction discards every
-///    state change, including events - so a denial that reverted would leave
-///    no on-chain trace for a judge (or anyone else) to point to. Instead,
-///    `guardedSwap` evaluates the mandate and oracle first, and if the trade
-///    is denied it emits `Attestation(..., allowed: false, reason: ...)` and
-///    returns 0 without reverting. The transaction still mines, costs gas
-///    only, and moves no principal. A genuine DEX-level failure (e.g. price
-///    moved past `amountOutMinimum`) still reverts normally, because that is
-///    PancakeSwap's decision, not Covenant's.
+/// Units: every USD figure (notional caps, position caps, oracle prices) is
+/// in the quote token's smallest unit. BSC USDT and every bStock have 18
+/// decimals (docs/research/verified-facts.md), so `priceUsd` is quote units
+/// per 1e18 token units, i.e. the plain price scaled by 1e18.
 ///
-/// 2. Non-custodial. Covenant never holds trading funds between calls. The
-///    caller approves `quoteToken` beforehand; a call that passes the guard
-///    pulls exactly `amountIn` via `transferFrom`, swaps it, and has the
-///    router deliver the output directly to the caller. A denied call never
-///    touches the caller's balance at all.
-///
-/// 3. "Per day" means the UTC calendar day (`block.timestamp / 1 days`), not
-///    a strict sliding 24h window. That is a real simplification, not an
-///    oversight - it is what "max trades per day" means to a human setting a
-///    mandate, and it is cheap to reason about and test. Documented here so
-///    nobody mistakes it for a bug later.
-///
-/// 4. The guard above verifies oracle data is *fresh*, not *accurate* - a
-///    malicious or buggy oracle updater could post a status that passes
-///    every check and is simply wrong. The bond/challenge/slash mechanism
-///    further down (`postBond`, `challengeUpdate`, `resolveChallenge`) makes
-///    that specific trust assumption economically enforced instead of
-///    merely trusted. See that section's own comment for the two disclosed
-///    simplifications (role-tied bond, manual resolution) and
-///    docs/research/slashable-guard-spec.md for the full design rationale.
+/// "Per day" is the UTC calendar day (`block.timestamp / 1 days`).
 contract Covenant {
     // ---------------------------------------------------------------------
     // Types
     // ---------------------------------------------------------------------
 
-    /// @notice Why a proposed trade was allowed or denied. `None` means allowed.
+    enum Side {
+        Buy, // spend `amountIn` quote tokens, receive the stock token
+        Sell // spend `amountIn` stock tokens, receive quote tokens
+    }
+
+    /// @notice Why a proposed trade was denied. `None` means allowed.
+    /// Values are append-only: off-chain decoders index into this list.
     enum DenialReason {
         None,
         MandateInactive,
@@ -92,24 +51,63 @@ contract Covenant {
         NotionalExceeded,
         DailyLimitExceeded,
         OracleStale,
-        OracleHalted
+        OracleHalted,
+        SlippageTooLoose,
+        PositionLimit,
+        DecisionOpen
+    }
+
+    /// @notice How the real fill was executed, as reported by the agent at
+    /// settle time. bStocks can fill through RFQ or a pool, and the wallet
+    /// picks, not the agent (official workshop, 2026-09-24).
+    enum ExecutionMode {
+        Unknown,
+        Pool,
+        Rfq,
+        Aggregator
     }
 
     struct Mandate {
         bool active;
-        uint256 maxNotionalPerTrade; // in quoteToken units (e.g. USDT wei)
+        uint256 maxNotionalPerTradeUsd;
         uint256 maxTradesPerDay;
-        uint256 expiry; // unix timestamp; trade denied once block.timestamp exceeds this
+        uint256 expiry;
     }
 
     struct DailyUsage {
-        uint256 day; // block.timestamp / 1 days, for the last recorded trade
-        uint256 count; // trades recorded on `day`
+        uint256 day;
+        uint256 count;
+    }
+
+    struct TokenConfig {
+        bool allowed;
+        uint16 maxSlippageBps;
+        uint256 maxPositionUsd;
     }
 
     struct OracleStatus {
         bool halted;
-        uint256 updatedAt; // unix timestamp of the last update; 0 = never updated
+        uint256 priceUsd;
+        uint256 updatedAt;
+    }
+
+    struct Decision {
+        Side side;
+        address token;
+        uint256 amountIn;
+        uint256 quotedOut;
+        uint256 minOut;
+        bool allowed;
+        DenialReason reason;
+        uint64 committedAt;
+        uint64 expiresAt;
+        bool settled;
+        bool cancelled;
+        bytes32 quoteRef;
+        bytes32 researchRef;
+        bytes32 swapTxHash;
+        uint256 amountOut;
+        ExecutionMode executionMode;
     }
 
     // ---------------------------------------------------------------------
@@ -118,138 +116,76 @@ contract Covenant {
 
     address public owner;
     address public oracleUpdater;
+    address public agent;
 
-    /// @notice The token trades are denominated and paid in (USDT on BSC).
+    /// @notice The token trades are priced in (USDT on BSC).
     address public immutable quoteToken;
-    /// @notice PancakeSwap V3 SwapRouter this contract forwards allowed swaps to.
-    address public immutable swapRouter;
-    /// @notice Oracle data older than this many seconds is treated as stale, not trusted.
+    /// @notice Oracle data older than this is treated as stale.
     uint256 public immutable stalenessBound;
+    /// @notice How long an approved decision stays valid for execution.
+    uint256 public immutable decisionTtl;
 
     Mandate public mandate;
     DailyUsage public usage;
 
-    /// @notice Provider-pinned allowlist: the exact token address a mandate
-    /// permits, e.g. real NVDAB, never a bare "NVDA" ticker that could
-    /// resolve to a different provider's token or a scam contract.
-    mapping(address => bool) public allowedTokens;
+    mapping(address => TokenConfig) public tokenConfig;
     mapping(address => OracleStatus) public oracleStatus;
+    mapping(uint256 => Decision) internal _decisions;
 
-    uint256 private _locked = 1;
-
-    // ---------------------------------------------------------------------
-    // Slashable oracle-accuracy guard (Phase 2.5)
-    // ---------------------------------------------------------------------
-    //
-    // The mandate/oracle/attestation guard above can verify oracle data is
-    // *fresh* (the staleness bound) but not *accurate* - a malicious or
-    // buggy updater could post a status that passes every check above and
-    // is simply wrong. This section makes that specific trust assumption
-    // economically enforced instead of merely trusted: the updater posts a
-    // bond, anyone can challenge a specific update with off-chain evidence
-    // it was wrong, and an upheld challenge slashes part of the bond to the
-    // challenger. See docs/research/slashable-guard-spec.md for the full
-    // design rationale.
-    //
-    // Disclosed simplifications, deliberate for a hackathon demo, not a
-    // production security model:
-    // - The bond is tied to the *role* (whichever address currently holds
-    //   `oracleUpdater`), not to a specific historical address. If the role
-    //   changes hands, the incoming updater inherits accountability for
-    //   whatever bond is already posted; the outgoing updater should
-    //   withdraw first if that's not the intent. A production version would
-    //   key bonds per-address and record which address posted each
-    //   individual update.
-    // - Resolution is manual (`onlyOwner`), not an on-chain dispute system.
-    //   `challengeUpdate`'s `updateTimestamp` is challenger-supplied and
-    //   only enforced for the challenge-window check - this contract only
-    //   retains each token's *latest* oracle status, so it cannot itself
-    //   verify a challenge's claimed timestamp against history. That
-    //   verification, and the actual "was this update wrong" judgment, is
-    //   the resolver's job, checked off chain against the real event log
-    //   and the real RWA status endpoint - the same honest scope
-    //   disclosure the design spec itself calls for.
-
-    uint256 public constant CHALLENGE_WINDOW = 1 hours;
-    uint256 public constant BOND_COOLDOWN = 1 hours;
-    uint256 public constant SLASH_BPS = 2000; // 20%, matches Verity's precedent
-    uint256 private constant BPS_DENOMINATOR = 10000;
-
-    uint256 public updaterBond;
-    uint256 public bondPostedAt;
-    uint256 public openChallengeCount;
-    uint256 public nextChallengeId = 1; // 0 is reserved to mean "no active challenge"
-
-    struct Challenge {
-        address token;
-        uint256 updateTimestamp; // challenger-claimed timestamp of the specific update being challenged
-        address challenger;
-        uint256 submittedAt;
-        bool resolved;
-        bool upheld;
-    }
-
-    mapping(uint256 => Challenge) public challenges;
-    /// @notice (token, updateTimestamp) -> the currently-active challengeId
-    /// against that specific update, or 0 if none. Prevents a second
-    /// challenge on the same update while one is still unresolved; cleared
-    /// on resolution so the same update can be re-challenged afterward if
-    /// the first challenge was dismissed and new evidence surfaces.
-    mapping(bytes32 => uint256) public activeChallengeForUpdate;
+    uint256 public nextDecisionId = 1;
+    /// @notice The single approved decision still in flight, or 0.
+    uint256 public openDecisionId;
 
     // ---------------------------------------------------------------------
     // Events
     // ---------------------------------------------------------------------
 
-    event MandateSet(uint256 maxNotionalPerTrade, uint256 maxTradesPerDay, uint256 expiry);
+    event MandateSet(uint256 maxNotionalPerTradeUsd, uint256 maxTradesPerDay, uint256 expiry);
     event MandateRevoked();
-    event TokenAllowlisted(address indexed token, bool allowed);
+    event TokenConfigured(address indexed token, bool allowed, uint16 maxSlippageBps, uint256 maxPositionUsd);
     event OracleUpdaterChanged(address indexed updater);
-    event OracleUpdated(address indexed token, bool halted, uint256 updatedAt);
+    event AgentChanged(address indexed agent);
+    event OracleUpdated(address indexed token, bool halted, uint256 priceUsd, uint256 updatedAt);
 
-    event BondPosted(address indexed updater, uint256 amount, uint256 newBalance);
-    event BondWithdrawn(address indexed updater, uint256 amount);
-
-    /// @notice A challenge against a specific oracle update, identified by
-    /// (token, updateTimestamp). `evidenceHash` is a keccak256 of whatever
-    /// off-chain evidence the challenger is pointing at (e.g. the real RWA
-    /// status API response fetched near that timestamp) - the hash is cheap
-    /// to store and lets a resolver or judge confirm the evidence they're
-    /// looking at is the exact evidence referenced, without paying to store
-    /// the evidence itself on chain.
-    event ChallengeSubmitted(
-        uint256 indexed challengeId, address indexed challenger, address indexed token, uint256 updateTimestamp, bytes32 evidenceHash
-    );
-    event ChallengeResolved(uint256 indexed challengeId, bool upheld, uint256 slashedAmount);
-
-    /// @notice Emitted on every guarded swap attempt, allowed or denied. This
-    /// is the attestation: the thing a judge (or anyone) reads back from
-    /// chain to independently verify what Covenant actually decided.
-    event Attestation(
-        address indexed caller,
-        address indexed tokenOut,
-        uint256 amountIn,
-        uint256 amountOut,
+    /// @notice Emitted for every commit, allowed or denied. This is the
+    /// public record a trade is reconciled against.
+    event DecisionCommitted(
+        uint256 indexed id,
+        address indexed token,
+        Side side,
         bool allowed,
-        DenialReason reason
+        DenialReason reason,
+        uint256 amountIn,
+        uint256 quotedOut,
+        uint256 minOut,
+        bytes32 quoteRef,
+        bytes32 researchRef,
+        uint64 expiresAt
     );
+
+    event DecisionSettled(
+        uint256 indexed id, bytes32 indexed swapTxHash, uint256 amountOut, ExecutionMode executionMode, bool belowMin
+    );
+
+    event DecisionCancelled(uint256 indexed id);
 
     // ---------------------------------------------------------------------
-    // Errors (admin paths only - guard denials use Attestation, not reverts)
+    // Errors (access and input validation only - policy denials are
+    // recorded as DecisionCommitted events, never reverts)
     // ---------------------------------------------------------------------
 
     error NotOwner();
     error NotOracleUpdater();
-    error ExpiryInPast();
+    error NotAgent();
     error ZeroAddress();
-    error Reentrant();
-    error BondCooldownActive();
-    error OpenChallengesExist();
-    error ChallengeWindowClosed();
-    error UpdateAlreadyChallenged();
-    error ChallengeDoesNotExist();
-    error ChallengeAlreadyResolved();
-    error TransferFailed();
+    error RolesNotDistinct();
+    error ExpiryInPast();
+    error InvalidBound();
+    error ZeroPrice();
+    error DecisionDoesNotExist();
+    error DecisionNotAllowed();
+    error DecisionClosed();
+    error ZeroTxHash();
 
     // ---------------------------------------------------------------------
     // Modifiers
@@ -265,274 +201,272 @@ contract Covenant {
         _;
     }
 
-    modifier nonReentrant() {
-        if (_locked != 1) revert Reentrant();
-        _locked = 2;
+    modifier onlyAgent() {
+        if (msg.sender != agent) revert NotAgent();
         _;
-        _locked = 1;
     }
 
     // ---------------------------------------------------------------------
     // Constructor
     // ---------------------------------------------------------------------
 
-    constructor(address _quoteToken, address _swapRouter, address _oracleUpdater, uint256 _stalenessBound) {
-        if (_quoteToken == address(0) || _swapRouter == address(0) || _oracleUpdater == address(0)) {
+    /// @dev Owner, oracle updater and agent must be three different keys.
+    /// If the agent could post its own oracle, or the owner doubled as the
+    /// updater, the checks below would mean nothing (red-team finding H6).
+    constructor(
+        address _quoteToken,
+        address _oracleUpdater,
+        address _agent,
+        uint256 _stalenessBound,
+        uint256 _decisionTtl
+    ) {
+        if (_quoteToken == address(0) || _oracleUpdater == address(0) || _agent == address(0)) {
             revert ZeroAddress();
         }
+        if (_oracleUpdater == msg.sender || _agent == msg.sender || _oracleUpdater == _agent) {
+            revert RolesNotDistinct();
+        }
+        if (_stalenessBound < 60 || _stalenessBound > 1 days) revert InvalidBound();
+        if (_decisionTtl < 60 || _decisionTtl > 1 hours) revert InvalidBound();
+
         owner = msg.sender;
         quoteToken = _quoteToken;
-        swapRouter = _swapRouter;
         oracleUpdater = _oracleUpdater;
+        agent = _agent;
         stalenessBound = _stalenessBound;
+        decisionTtl = _decisionTtl;
         emit OracleUpdaterChanged(_oracleUpdater);
+        emit AgentChanged(_agent);
     }
 
     // ---------------------------------------------------------------------
     // Owner administration
     // ---------------------------------------------------------------------
 
-    /// @notice Set (or replace) the active mandate. Overwrites whatever was there before.
-    function setMandate(uint256 maxNotionalPerTrade, uint256 maxTradesPerDay, uint256 expiry) external onlyOwner {
+    function setMandate(uint256 maxNotionalPerTradeUsd, uint256 maxTradesPerDay, uint256 expiry) external onlyOwner {
         if (expiry <= block.timestamp) revert ExpiryInPast();
-        mandate = Mandate({active: true, maxNotionalPerTrade: maxNotionalPerTrade, maxTradesPerDay: maxTradesPerDay, expiry: expiry});
-        emit MandateSet(maxNotionalPerTrade, maxTradesPerDay, expiry);
+        mandate = Mandate({
+            active: true,
+            maxNotionalPerTradeUsd: maxNotionalPerTradeUsd,
+            maxTradesPerDay: maxTradesPerDay,
+            expiry: expiry
+        });
+        emit MandateSet(maxNotionalPerTradeUsd, maxTradesPerDay, expiry);
     }
 
-    /// @notice Deactivate the mandate immediately, without waiting for expiry.
     function revokeMandate() external onlyOwner {
         mandate.active = false;
         emit MandateRevoked();
     }
 
-    /// @notice Allow or disallow a specific token address for trading. Always
-    /// the exact provider-pinned address - there is deliberately no
-    /// ticker-to-address resolution on chain, because that resolution step is
-    /// exactly where provider confusion (NVDAB vs NVDAon) and scam tokens get
-    /// injected. Resolve off chain, pin the address here.
-    function setAllowedToken(address token, bool allowed) external onlyOwner {
+    /// @notice Allow a token by exact address and set its slippage bound
+    /// and position cap. There is no ticker resolution on chain on purpose:
+    /// that step is where provider confusion (NVDAB vs NVDAon) and
+    /// impersonator tokens get in. Resolve off chain, pin the address here.
+    function configureToken(address token, bool allowed, uint16 maxSlippageBps, uint256 maxPositionUsd)
+        external
+        onlyOwner
+    {
         if (token == address(0)) revert ZeroAddress();
-        allowedTokens[token] = allowed;
-        emit TokenAllowlisted(token, allowed);
+        if (maxSlippageBps > 10_000) revert InvalidBound();
+        tokenConfig[token] = TokenConfig({allowed: allowed, maxSlippageBps: maxSlippageBps, maxPositionUsd: maxPositionUsd});
+        emit TokenConfigured(token, allowed, maxSlippageBps, maxPositionUsd);
+    }
+
+    function setAgent(address newAgent) external onlyOwner {
+        if (newAgent == address(0)) revert ZeroAddress();
+        if (newAgent == owner || newAgent == oracleUpdater) revert RolesNotDistinct();
+        agent = newAgent;
+        openDecisionId = 0;
+        emit AgentChanged(newAgent);
     }
 
     function setOracleUpdater(address updater) external onlyOwner {
         if (updater == address(0)) revert ZeroAddress();
+        if (updater == owner || updater == agent) revert RolesNotDistinct();
         oracleUpdater = updater;
         emit OracleUpdaterChanged(updater);
-    }
-
-    /// @notice Recover a token accidentally sent directly to this contract.
-    /// Covenant is non-custodial by design during normal operation (see
-    /// contract-level docs), so the only way a balance ends up here is a
-    /// mistaken direct transfer - this exists so that mistake isn't permanent.
-    function rescueToken(address token, uint256 amount, address to) external onlyOwner {
-        if (to == address(0)) revert ZeroAddress();
-        IERC20(token).transfer(to, amount);
     }
 
     // ---------------------------------------------------------------------
     // Oracle
     // ---------------------------------------------------------------------
 
-    /// @notice Push a halt/tradable status update for a token. Restricted to
-    /// a single authorized updater address (set by the owner), fed from the
-    /// RWA Data API off chain in Phase 2.
-    function updateOracle(address token, bool halted) external onlyOracleUpdater {
-        oracleStatus[token] = OracleStatus({halted: halted, updatedAt: block.timestamp});
-        emit OracleUpdated(token, halted, block.timestamp);
+    /// @notice Push a token's live market status and price, fed from the
+    /// RWA Data API and the market K-line endpoint by scripts/oracle-updater.ts.
+    function updateOracle(address token, bool halted, uint256 priceUsd) external onlyOracleUpdater {
+        if (priceUsd == 0) revert ZeroPrice();
+        oracleStatus[token] = OracleStatus({halted: halted, priceUsd: priceUsd, updatedAt: block.timestamp});
+        emit OracleUpdated(token, halted, priceUsd, block.timestamp);
     }
 
     // ---------------------------------------------------------------------
-    // The guard
+    // The decision loop: commit -> (native swap) -> settle
     // ---------------------------------------------------------------------
 
-    /// @notice Propose a swap of `amountIn` of `quoteToken` into `tokenOut`.
-    /// Covenant checks the mandate and the oracle; if both pass it pulls
-    /// `amountIn` from the caller (who must have approved this contract
-    /// first), forwards the swap to PancakeSwap, and sends the output
-    /// straight to the caller. If either check fails, nothing is pulled and
-    /// nothing is swapped - the call still succeeds, but only an Attestation
-    /// with `allowed: false` is emitted.
-    /// @param tokenOut The exact token address being bought. Must be
-    /// allowlisted; there is no ticker resolution here on purpose.
-    /// @param fee The PancakeSwap V3 pool fee tier (e.g. 2500 for 0.25%).
-    /// @param amountIn Amount of `quoteToken` to spend, in its own decimals.
-    /// @param amountOutMinimum Slippage floor passed straight to PancakeSwap.
-    /// This is the caller's protection against price movement, not part of
-    /// Covenant's mandate - a swap that reverts here reverts for real,
-    /// because it is a DEX-level failure, not a guard decision.
-    /// @return amountOut The amount of `tokenOut` received; 0 if denied.
-    function guardedSwap(address tokenOut, uint24 fee, uint256 amountIn, uint256 amountOutMinimum)
-        external
-        nonReentrant
-        returns (uint256 amountOut)
-    {
-        DenialReason reason = _evaluate(tokenOut, amountIn);
-        if (reason != DenialReason.None) {
-            emit Attestation(msg.sender, tokenOut, amountIn, 0, false, reason);
-            return 0;
+    /// @notice Decide a trade before it happens. Never reverts on a policy
+    /// denial: a denied commit still mines and emits `DecisionCommitted`
+    /// with `allowed: false`, so refusals are on chain too.
+    /// @param quotedOut What `baw market-order quote` said the trade returns.
+    /// @param minOut The least the agent will accept. Must sit within the
+    /// token's slippage bound of both the quote and the oracle price.
+    /// @param quoteRef Hash of the raw quote response, for the audit trail.
+    /// @param researchRef Hash of any paid research behind the trade, or 0.
+    function commit(
+        Side side,
+        address token,
+        uint256 amountIn,
+        uint256 quotedOut,
+        uint256 minOut,
+        bytes32 quoteRef,
+        bytes32 researchRef
+    ) external onlyAgent returns (uint256 id) {
+        DenialReason reason = _evaluate(side, token, amountIn, quotedOut, minOut);
+        bool allowed = reason == DenialReason.None;
+
+        id = nextDecisionId++;
+        uint64 expiresAt = allowed ? uint64(block.timestamp + decisionTtl) : uint64(block.timestamp);
+
+        Decision storage d = _decisions[id];
+        d.side = side;
+        d.token = token;
+        d.amountIn = amountIn;
+        d.quotedOut = quotedOut;
+        d.minOut = minOut;
+        d.allowed = allowed;
+        d.reason = reason;
+        d.committedAt = uint64(block.timestamp);
+        d.expiresAt = expiresAt;
+        d.quoteRef = quoteRef;
+        d.researchRef = researchRef;
+
+        if (allowed) {
+            _recordTrade();
+            openDecisionId = id;
         }
 
-        _recordTrade();
-
-        IERC20(quoteToken).transferFrom(msg.sender, address(this), amountIn);
-        // Reset to 0 first: some ERC20s (famously mainnet USDT) refuse to
-        // change a non-zero allowance directly. BSC's USDT doesn't carry that
-        // restriction (verified: it's a standard OZ-style ERC20), but paying
-        // one extra SSTORE to not depend on that fact is the defensible
-        // choice, not a maybe-unnecessary one.
-        IERC20(quoteToken).approve(swapRouter, 0);
-        IERC20(quoteToken).approve(swapRouter, amountIn);
-
-        amountOut = IPancakeV3SwapRouter(swapRouter).exactInputSingle(
-            IPancakeV3SwapRouter.ExactInputSingleParams({
-                tokenIn: quoteToken,
-                tokenOut: tokenOut,
-                fee: fee,
-                recipient: msg.sender,
-                // Atomic single-transaction swap - `block.timestamp` is not a real
-                // deadline constraint (it's always satisfied within this call), it's
-                // just the value the real router's ABI requires here.
-                deadline: block.timestamp,
-                amountIn: amountIn,
-                amountOutMinimum: amountOutMinimum,
-                sqrtPriceLimitX96: 0
-            })
+        emit DecisionCommitted(
+            id, token, side, allowed, reason, amountIn, quotedOut, minOut, quoteRef, researchRef, expiresAt
         );
-
-        emit Attestation(msg.sender, tokenOut, amountIn, amountOut, true, DenialReason.None);
     }
 
-    // ---------------------------------------------------------------------
-    // Slashable oracle-accuracy guard
-    // ---------------------------------------------------------------------
-
-    /// @notice The oracle updater posts a bond, slashable if a challenge
-    /// against one of their updates is upheld. Native BNB, not the quote
-    /// token - keeps this independent of USDT allowance/approval plumbing.
-    /// Restarts the cooldown on every deposit, including a top-up: capital
-    /// added right before an anticipated challenge can't be withdrawn early.
-    function postBond() external payable onlyOracleUpdater {
-        updaterBond += msg.value;
-        bondPostedAt = block.timestamp;
-        emit BondPosted(msg.sender, msg.value, updaterBond);
-    }
-
-    /// @notice Withdraw the entire bond. Only the current oracle updater,
-    /// only after the cooldown since the last deposit, and only with no
-    /// unresolved challenges outstanding.
-    function withdrawBond() external onlyOracleUpdater nonReentrant {
-        if (openChallengeCount > 0) revert OpenChallengesExist();
-        if (block.timestamp < bondPostedAt + BOND_COOLDOWN) revert BondCooldownActive();
-        uint256 amount = updaterBond;
-        updaterBond = 0;
-        (bool ok,) = msg.sender.call{value: amount}("");
-        if (!ok) revert TransferFailed();
-        emit BondWithdrawn(msg.sender, amount);
-    }
-
-    /// @notice Challenge a specific past oracle update for `token`, claimed
-    /// to have happened at `updateTimestamp`. Anyone can challenge - no
-    /// stake required to submit one, since the resolver (not this function)
-    /// is what actually protects against frivolous challenges. Reverts if
-    /// the challenge window since `updateTimestamp` has already closed, or
-    /// if that exact update already has an unresolved challenge against it.
-    /// @param evidenceHash keccak256 of the off-chain evidence being
-    /// referenced (e.g. a fetched RWA status API response near that time) -
-    /// stored so a resolver or judge can confirm the evidence they're shown
-    /// later is the exact evidence originally pointed at.
-    function challengeUpdate(address token, uint256 updateTimestamp, bytes32 evidenceHash)
+    /// @notice Record the real fill of an approved decision. The numbers are
+    /// the agent's claim; verify.ts checks them against the swap's real
+    /// transfers. Settling after `expiresAt` is allowed (the swap may have
+    /// landed in time), and verify.ts checks the swap's block timestamp.
+    function settle(uint256 id, bytes32 swapTxHash, uint256 amountOut, ExecutionMode executionMode)
         external
-        returns (uint256 challengeId)
+        onlyAgent
     {
-        if (block.timestamp > updateTimestamp + CHALLENGE_WINDOW) revert ChallengeWindowClosed();
-        bytes32 key = keccak256(abi.encodePacked(token, updateTimestamp));
-        if (activeChallengeForUpdate[key] != 0) revert UpdateAlreadyChallenged();
+        Decision storage d = _existing(id);
+        if (!d.allowed) revert DecisionNotAllowed();
+        if (d.settled || d.cancelled) revert DecisionClosed();
+        if (swapTxHash == bytes32(0)) revert ZeroTxHash();
 
-        challengeId = nextChallengeId++;
-        activeChallengeForUpdate[key] = challengeId;
-        challenges[challengeId] = Challenge({
-            token: token,
-            updateTimestamp: updateTimestamp,
-            challenger: msg.sender,
-            submittedAt: block.timestamp,
-            resolved: false,
-            upheld: false
-        });
+        d.settled = true;
+        d.swapTxHash = swapTxHash;
+        d.amountOut = amountOut;
+        d.executionMode = executionMode;
+        if (openDecisionId == id) openDecisionId = 0;
 
-        openChallengeCount += 1;
-        emit ChallengeSubmitted(challengeId, msg.sender, token, updateTimestamp, evidenceHash);
+        emit DecisionSettled(id, swapTxHash, amountOut, executionMode, amountOut < d.minOut);
     }
 
-    /// @notice Resolve a challenge. Deliberately manual/operator-adjudicated
-    /// (owner-only), not an on-chain dispute system - see the storage-section
-    /// comment above for why that's a disclosed simplification, not faked
-    /// decentralization. If upheld, slashes `SLASH_BPS` of whatever the bond
-    /// *currently* holds (never a fixed amount), so a second slash after an
-    /// earlier one can never underflow - it just slashes a smaller absolute
-    /// amount, gracefully, including down to zero.
-    function resolveChallenge(uint256 challengeId, bool upheld) external onlyOwner nonReentrant {
-        if (challengeId == 0 || challengeId >= nextChallengeId) revert ChallengeDoesNotExist();
-        Challenge storage c = challenges[challengeId];
-        if (c.resolved) revert ChallengeAlreadyResolved();
+    /// @notice Abandon an approved decision without trading. It still
+    /// counts toward the day, so commit/cancel can't be used to churn.
+    function cancel(uint256 id) external onlyAgent {
+        Decision storage d = _existing(id);
+        if (!d.allowed) revert DecisionNotAllowed();
+        if (d.settled || d.cancelled) revert DecisionClosed();
 
-        c.resolved = true;
-        c.upheld = upheld;
-        openChallengeCount -= 1;
-        bytes32 key = keccak256(abi.encodePacked(c.token, c.updateTimestamp));
-        activeChallengeForUpdate[key] = 0;
-
-        uint256 slashed = 0;
-        if (upheld) {
-            slashed = (updaterBond * SLASH_BPS) / BPS_DENOMINATOR;
-            updaterBond -= slashed;
-            if (slashed > 0) {
-                (bool ok,) = c.challenger.call{value: slashed}("");
-                if (!ok) revert TransferFailed();
-            }
-        }
-
-        emit ChallengeResolved(challengeId, upheld, slashed);
+        d.cancelled = true;
+        if (openDecisionId == id) openDecisionId = 0;
+        emit DecisionCancelled(id);
     }
 
     // ---------------------------------------------------------------------
     // Views
     // ---------------------------------------------------------------------
 
-    /// @notice Trades already recorded for the current UTC calendar day.
+    /// @notice The exact decision `commit` would make right now, with no
+    /// state change. Same `_evaluate` as `commit`, so the two can't drift.
+    function previewDecision(Side side, address token, uint256 amountIn, uint256 quotedOut, uint256 minOut)
+        external
+        view
+        returns (DenialReason)
+    {
+        return _evaluate(side, token, amountIn, quotedOut, minOut);
+    }
+
+    function getDecision(uint256 id) external view returns (Decision memory) {
+        return _decisions[id];
+    }
+
     function tradesUsedToday() public view returns (uint256) {
         uint256 today = block.timestamp / 1 days;
         return usage.day == today ? usage.count : 0;
     }
 
-    /// @notice Read-only version of the guard's decision, for off-chain
-    /// preview (e.g. `contract-call preview`) without spending gas on a
-    /// state-changing call. Mirrors `_evaluate` exactly - if this and
-    /// `guardedSwap` ever disagree, that is a bug in one of them.
-    function previewDecision(address tokenOut, uint256 amountIn) external view returns (DenialReason) {
-        return _evaluate(tokenOut, amountIn);
+    /// @notice True while an approved decision is neither settled,
+    /// cancelled, nor past its expiry.
+    function hasOpenDecision() public view returns (bool) {
+        uint256 id = openDecisionId;
+        if (id == 0) return false;
+        Decision storage d = _decisions[id];
+        return !d.settled && !d.cancelled && block.timestamp <= d.expiresAt;
     }
 
     // ---------------------------------------------------------------------
     // Internal
     // ---------------------------------------------------------------------
 
-    function _evaluate(address tokenOut, uint256 amountIn) internal view returns (DenialReason) {
+    function _evaluate(Side side, address token, uint256 amountIn, uint256 quotedOut, uint256 minOut)
+        internal
+        view
+        returns (DenialReason)
+    {
         Mandate memory m = mandate;
         if (!m.active) return DenialReason.MandateInactive;
         if (block.timestamp > m.expiry) return DenialReason.MandateExpired;
-        if (!allowedTokens[tokenOut]) return DenialReason.TokenNotAllowed;
-        if (amountIn > m.maxNotionalPerTrade) return DenialReason.NotionalExceeded;
+
+        TokenConfig memory cfg = tokenConfig[token];
+        if (!cfg.allowed) return DenialReason.TokenNotAllowed;
+
+        // One trade in flight at a time. Without this, several buys could
+        // each pass the position check against the same pre-trade balance.
+        if (hasOpenDecision()) return DenialReason.DecisionOpen;
+
+        OracleStatus memory o = oracleStatus[token];
+        if (o.updatedAt == 0 || block.timestamp - o.updatedAt > stalenessBound) return DenialReason.OracleStale;
+        if (o.halted) return DenialReason.OracleHalted;
+
+        uint256 notional = side == Side.Buy ? amountIn : (amountIn * o.priceUsd) / 1e18;
+        if (notional > m.maxNotionalPerTradeUsd) return DenialReason.NotionalExceeded;
         if (tradesUsedToday() >= m.maxTradesPerDay) return DenialReason.DailyLimitExceeded;
 
-        OracleStatus memory status = oracleStatus[tokenOut];
-        if (status.updatedAt == 0 || block.timestamp - status.updatedAt > stalenessBound) {
-            return DenialReason.OracleStale;
+        // The minimum must be close to the agent's own quote AND to the
+        // oracle price. The oracle leg means an understated quote can't be
+        // used to smuggle in a loose minimum (red-team finding H5).
+        uint256 oracleOut = side == Side.Buy ? (amountIn * 1e18) / o.priceUsd : (amountIn * o.priceUsd) / 1e18;
+        uint256 floorBps = 10_000 - cfg.maxSlippageBps;
+        if (quotedOut == 0 || minOut * 10_000 < quotedOut * floorBps || minOut * 10_000 < oracleOut * floorBps) {
+            return DenialReason.SlippageTooLoose;
         }
-        if (status.halted) return DenialReason.OracleHalted;
+
+        // Feature 3: the position cap, read from the wallet's real on-chain
+        // balance, not from anything the agent reports.
+        if (side == Side.Buy) {
+            uint256 held = IERC20Balance(token).balanceOf(agent);
+            uint256 received = quotedOut > oracleOut ? quotedOut : oracleOut;
+            if (((held + received) * o.priceUsd) / 1e18 > cfg.maxPositionUsd) return DenialReason.PositionLimit;
+        }
 
         return DenialReason.None;
+    }
+
+    function _existing(uint256 id) internal view returns (Decision storage) {
+        if (id == 0 || id >= nextDecisionId) revert DecisionDoesNotExist();
+        return _decisions[id];
     }
 
     function _recordTrade() internal {

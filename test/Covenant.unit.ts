@@ -3,19 +3,17 @@ import { network } from "hardhat";
 
 const { ethers, networkHelpers } = await network.getOrCreate();
 
-// Real addresses from docs/research/verified-facts.md, verified there by
-// reading name()/symbol()/decimals() live off BSC mainnet. Using the real
-// pair here (not placeholder addresses) is what actually proves the
-// allowlist tells NVDAB apart from its impersonator - a synthetic pair of
-// addresses would only prove the mapping lookup works, not that it draws
-// the right line between the two addresses that matter in practice.
-const NVDAB = "0x02fca66c1d1afb4e2a7884261eb00f63598a7436";
+// The real impersonator from docs/research/verified-facts.md: symbol
+// "bStocks", 1e27 supply, not a real stock token. Allowlisting is by exact
+// address, so it must be denied even while a real stock is allowed.
 const IMPERSONATOR_BSTOCKS = "0x2F701b108a9aF5558960325A0239D0a13c2C4444";
 
-const STALENESS_BOUND_SECONDS = 15 * 60;
-const ONE_DAY_SECONDS = 24 * 60 * 60;
+const STALENESS_BOUND = 15 * 60;
+const DECISION_TTL = 10 * 60;
+const ONE_DAY = 24 * 60 * 60;
+const E18 = 10n ** 18n;
 
-// Mirrors the Covenant.DenialReason enum order exactly - see contracts/Covenant.sol.
+// Mirrors Covenant.DenialReason exactly - see contracts/Covenant.sol.
 const Reason = {
   None: 0n,
   MandateInactive: 1n,
@@ -25,648 +23,436 @@ const Reason = {
   DailyLimitExceeded: 5n,
   OracleStale: 6n,
   OracleHalted: 7n,
+  SlippageTooLoose: 8n,
+  PositionLimit: 9n,
+  DecisionOpen: 10n,
 };
+const Side = { Buy: 0, Sell: 1 };
+const Mode = { Unknown: 0, Pool: 1, Rfq: 2, Aggregator: 3 };
 
-async function deployCovenantFixture() {
-  const [owner, oracleUpdater, trader, other] = await ethers.getSigners();
+const QUOTE_REF = ethers.keccak256(ethers.toUtf8Bytes("baw market-order quote response"));
+const RESEARCH_REF = ethers.keccak256(ethers.toUtf8Bytes("x402 research response"));
+const SWAP_TX = ethers.keccak256(ethers.toUtf8Bytes("a real swap tx hash"));
 
-  const quoteToken = await ethers.deployContract("MockERC20", ["Mock USDT", "mUSDT"]);
-  const router = await ethers.deployContract("MockRouter");
-  const tokenOut = await ethers.deployContract("MockERC20", ["Mock NVDAB", "mNVDAB"]);
-
+async function deployFixture() {
+  const [owner, updater, agent, other, stranger] = await ethers.getSigners();
+  const quote = await ethers.deployContract("MockERC20", ["Mock USDT", "mUSDT"]);
+  const stock = await ethers.deployContract("MockERC20", ["Mock NVDAB", "mNVDAB"]);
   const covenant = await ethers.deployContract("Covenant", [
-    await quoteToken.getAddress(),
-    await router.getAddress(),
-    oracleUpdater.address,
-    STALENESS_BOUND_SECONDS,
+    await quote.getAddress(),
+    updater.address,
+    agent.address,
+    STALENESS_BOUND,
+    DECISION_TTL,
   ]);
-
-  return { owner, oracleUpdater, trader, other, quoteToken, router, tokenOut, covenant };
+  return { owner, updater, agent, other, stranger, quote, stock, covenant, stockAddress: await stock.getAddress() };
 }
 
-/** Allowlists tokenOut, sets a permissive mandate, and pushes a fresh non-halted oracle update. */
+/** Mandate active, token allowed, oracle fresh. Every limit is overridable. */
 async function makeTradeable(
-  covenant: Awaited<ReturnType<typeof deployCovenantFixture>>["covenant"],
-  oracleUpdater: Awaited<ReturnType<typeof deployCovenantFixture>>["oracleUpdater"],
-  tokenOutAddress: string,
-  { maxNotionalPerTrade = ethers.parseUnits("1000", 18), maxTradesPerDay = 10n } = {},
+  f: Awaited<ReturnType<typeof deployFixture>>,
+  {
+    maxNotional = 10n * E18,
+    maxTrades = 5n,
+    slippageBps = 100,
+    maxPositionUsd = 50n * E18,
+    price = 200n * E18,
+  } = {},
 ) {
-  await covenant.setAllowedToken(tokenOutAddress, true);
   const latest = await networkHelpers.time.latest();
-  await covenant.setMandate(maxNotionalPerTrade, maxTradesPerDay, latest + ONE_DAY_SECONDS * 30);
-  await covenant.connect(oracleUpdater).updateOracle(tokenOutAddress, false);
+  await f.covenant.setMandate(maxNotional, maxTrades, latest + 30 * ONE_DAY);
+  await f.covenant.configureToken(f.stockAddress, true, slippageBps, maxPositionUsd);
+  await f.covenant.connect(f.updater).updateOracle(f.stockAddress, false, price);
 }
 
-async function fundAndApprove(quoteToken: any, covenant: any, trader: any, amount: bigint) {
-  await quoteToken.mint(trader.address, amount);
-  await quoteToken.connect(trader).approve(await covenant.getAddress(), amount);
+/** A buy of `usd` quote units at the oracle price, minimum 0.5% below. */
+function buyArgs(usd: bigint, price = 200n * E18) {
+  const quotedOut = (usd * E18) / price;
+  const minOut = (quotedOut * 995n) / 1000n;
+  return { amountIn: usd, quotedOut, minOut };
 }
 
-describe("Covenant (unit, mocked token/router)", function () {
+/** A sell of `tokens` stock units at the oracle price, minimum 0.5% below. */
+function sellArgs(tokens: bigint, price = 200n * E18) {
+  const quotedOut = (tokens * price) / E18;
+  const minOut = (quotedOut * 995n) / 1000n;
+  return { amountIn: tokens, quotedOut, minOut };
+}
+
+async function commit(
+  f: Awaited<ReturnType<typeof deployFixture>>,
+  side: number,
+  a: { amountIn: bigint; quotedOut: bigint; minOut: bigint },
+  token = f.stockAddress,
+  signer = f.agent,
+) {
+  const tx = await f.covenant.connect(signer).commit(side, token, a.amountIn, a.quotedOut, a.minOut, QUOTE_REF, RESEARCH_REF);
+  const receipt = await tx.wait();
+  for (const log of receipt!.logs) {
+    const parsed = f.covenant.interface.parseLog(log as any);
+    // toObject(), not a spread: an ethers Result's named keys don't survive `...`.
+    if (parsed?.name === "DecisionCommitted") return { ...parsed.args.toObject(), block: receipt!.blockNumber } as any;
+  }
+  throw new Error("no DecisionCommitted event in receipt");
+}
+
+describe("Covenant v2 (unit, mocked tokens)", function () {
   describe("deployment", function () {
-    it("rejects a zero address for quoteToken, swapRouter, or oracleUpdater", async function () {
-      const [oracleUpdater] = await ethers.getSigners();
-      const router = await ethers.deployContract("MockRouter");
-      const quoteToken = await ethers.deployContract("MockERC20", ["Mock USDT", "mUSDT"]);
-      const CovenantFactory = await ethers.getContractFactory("Covenant");
-
-      await expect(
-        CovenantFactory.deploy(ethers.ZeroAddress, await router.getAddress(), oracleUpdater.address, STALENESS_BOUND_SECONDS),
-      ).to.be.revertedWithCustomError(CovenantFactory, "ZeroAddress");
-
-      await expect(
-        CovenantFactory.deploy(await quoteToken.getAddress(), ethers.ZeroAddress, oracleUpdater.address, STALENESS_BOUND_SECONDS),
-      ).to.be.revertedWithCustomError(CovenantFactory, "ZeroAddress");
-
-      await expect(
-        CovenantFactory.deploy(await quoteToken.getAddress(), await router.getAddress(), ethers.ZeroAddress, STALENESS_BOUND_SECONDS),
-      ).to.be.revertedWithCustomError(CovenantFactory, "ZeroAddress");
+    it("rejects zero addresses", async function () {
+      const [, updater, agent] = await ethers.getSigners();
+      const Factory = await ethers.getContractFactory("Covenant");
+      const q = updater.address; // any non-zero address works as the quote token here
+      await expect(Factory.deploy(ethers.ZeroAddress, updater.address, agent.address, STALENESS_BOUND, DECISION_TTL)).to.be
+        .revertedWithCustomError(Factory, "ZeroAddress");
+      await expect(Factory.deploy(q, ethers.ZeroAddress, agent.address, STALENESS_BOUND, DECISION_TTL)).to.be
+        .revertedWithCustomError(Factory, "ZeroAddress");
+      await expect(Factory.deploy(q, updater.address, ethers.ZeroAddress, STALENESS_BOUND, DECISION_TTL)).to.be
+        .revertedWithCustomError(Factory, "ZeroAddress");
     });
 
-    it("sets the deployer as owner", async function () {
-      const { owner, covenant } = await networkHelpers.loadFixture(deployCovenantFixture);
-      expect(await covenant.owner()).to.equal(owner.address);
-    });
-  });
-
-  describe("mandate administration", function () {
-    it("only the owner can set a mandate", async function () {
-      const { covenant, other } = await networkHelpers.loadFixture(deployCovenantFixture);
-      const latest = await networkHelpers.time.latest();
-      await expect(
-        covenant.connect(other).setMandate(1n, 1n, latest + ONE_DAY_SECONDS),
-      ).to.be.revertedWithCustomError(covenant, "NotOwner");
+    it("rejects any two roles sharing a key: owner, oracle updater and agent must all differ", async function () {
+      const [owner, updater, agent, quote] = await ethers.getSigners();
+      const Factory = await ethers.getContractFactory("Covenant");
+      await expect(Factory.deploy(quote.address, owner.address, agent.address, STALENESS_BOUND, DECISION_TTL)).to.be
+        .revertedWithCustomError(Factory, "RolesNotDistinct");
+      await expect(Factory.deploy(quote.address, updater.address, owner.address, STALENESS_BOUND, DECISION_TTL)).to.be
+        .revertedWithCustomError(Factory, "RolesNotDistinct");
+      await expect(Factory.deploy(quote.address, updater.address, updater.address, STALENESS_BOUND, DECISION_TTL)).to.be
+        .revertedWithCustomError(Factory, "RolesNotDistinct");
     });
 
-    it("rejects a mandate whose expiry is already in the past", async function () {
-      const { covenant } = await networkHelpers.loadFixture(deployCovenantFixture);
-      const latest = await networkHelpers.time.latest();
-      await expect(covenant.setMandate(1n, 1n, latest - 1)).to.be.revertedWithCustomError(covenant, "ExpiryInPast");
+    it("rejects a staleness bound or decision TTL outside sane ranges", async function () {
+      const [, updater, agent, quote] = await ethers.getSigners();
+      const Factory = await ethers.getContractFactory("Covenant");
+      await expect(Factory.deploy(quote.address, updater.address, agent.address, 59, DECISION_TTL)).to.be.revertedWithCustomError(Factory, "InvalidBound");
+      await expect(Factory.deploy(quote.address, updater.address, agent.address, ONE_DAY + 1, DECISION_TTL)).to.be.revertedWithCustomError(Factory, "InvalidBound");
+      await expect(Factory.deploy(quote.address, updater.address, agent.address, STALENESS_BOUND, 59)).to.be.revertedWithCustomError(Factory, "InvalidBound");
+      await expect(Factory.deploy(quote.address, updater.address, agent.address, STALENESS_BOUND, 3601)).to.be.revertedWithCustomError(Factory, "InvalidBound");
     });
 
-    it("activates the mandate and emits MandateSet", async function () {
-      const { covenant } = await networkHelpers.loadFixture(deployCovenantFixture);
-      const latest = await networkHelpers.time.latest();
-      const expiry = latest + ONE_DAY_SECONDS;
-
-      await expect(covenant.setMandate(100n, 5n, expiry)).to.emit(covenant, "MandateSet").withArgs(100n, 5n, expiry);
-
-      const mandate = await covenant.mandate();
-      expect(mandate.active).to.equal(true);
-      expect(mandate.maxNotionalPerTrade).to.equal(100n);
-      expect(mandate.maxTradesPerDay).to.equal(5n);
-      expect(mandate.expiry).to.equal(BigInt(expiry));
-    });
-
-    it("revokeMandate deactivates immediately and is owner-only", async function () {
-      const { covenant, other } = await networkHelpers.loadFixture(deployCovenantFixture);
-      const latest = await networkHelpers.time.latest();
-      await covenant.setMandate(100n, 5n, latest + ONE_DAY_SECONDS);
-
-      await expect(covenant.connect(other).revokeMandate()).to.be.revertedWithCustomError(covenant, "NotOwner");
-
-      await expect(covenant.revokeMandate()).to.emit(covenant, "MandateRevoked");
-      expect((await covenant.mandate()).active).to.equal(false);
+    it("records the three roles", async function () {
+      const f = await networkHelpers.loadFixture(deployFixture);
+      expect(await f.covenant.owner()).to.equal(f.owner.address);
+      expect(await f.covenant.oracleUpdater()).to.equal(f.updater.address);
+      expect(await f.covenant.agent()).to.equal(f.agent.address);
     });
   });
 
-  describe("token allowlist (provider pinning)", function () {
-    it("is owner-only and pins the exact address, not a ticker", async function () {
-      const { covenant, other } = await networkHelpers.loadFixture(deployCovenantFixture);
-
-      await expect(covenant.connect(other).setAllowedToken(NVDAB, true)).to.be.revertedWithCustomError(
-        covenant,
-        "NotOwner",
-      );
-
-      await expect(covenant.setAllowedToken(NVDAB, true)).to.emit(covenant, "TokenAllowlisted").withArgs(
-        ethers.getAddress(NVDAB),
-        true,
-      );
-
-      expect(await covenant.allowedTokens(NVDAB)).to.equal(true);
-      expect(await covenant.allowedTokens(IMPERSONATOR_BSTOCKS)).to.equal(false);
+  describe("owner administration", function () {
+    it("setMandate is owner-only and rejects an expiry in the past", async function () {
+      const f = await networkHelpers.loadFixture(deployFixture);
+      const latest = await networkHelpers.time.latest();
+      await expect(f.covenant.connect(f.agent).setMandate(1n, 1n, latest + ONE_DAY)).to.be.revertedWithCustomError(f.covenant, "NotOwner");
+      await expect(f.covenant.setMandate(1n, 1n, latest)).to.be.revertedWithCustomError(f.covenant, "ExpiryInPast");
+      await expect(f.covenant.setMandate(5n, 3n, latest + ONE_DAY)).to.emit(f.covenant, "MandateSet").withArgs(5n, 3n, latest + ONE_DAY);
     });
 
-    it("denies the real impersonator address from docs/research/verified-facts.md even once NVDAB is allowlisted", async function () {
-      const { covenant, oracleUpdater } = await networkHelpers.loadFixture(deployCovenantFixture);
-      await makeTradeable(covenant, oracleUpdater, NVDAB);
+    it("configureToken is owner-only and rejects a slippage bound over 100%", async function () {
+      const f = await networkHelpers.loadFixture(deployFixture);
+      await expect(f.covenant.connect(f.agent).configureToken(f.stockAddress, true, 100, 1n)).to.be.revertedWithCustomError(f.covenant, "NotOwner");
+      await expect(f.covenant.configureToken(f.stockAddress, true, 10_001, 1n)).to.be.revertedWithCustomError(f.covenant, "InvalidBound");
+      await expect(f.covenant.configureToken(ethers.ZeroAddress, true, 100, 1n)).to.be.revertedWithCustomError(f.covenant, "ZeroAddress");
+      await expect(f.covenant.configureToken(f.stockAddress, true, 100, 7n)).to.emit(f.covenant, "TokenConfigured").withArgs(f.stockAddress, true, 100, 7n);
+    });
 
-      // The impersonator was never allowlisted - only the real NVDAB address was.
-      expect(await covenant.previewDecision(IMPERSONATOR_BSTOCKS, 1n)).to.equal(Reason.TokenNotAllowed);
-      expect(await covenant.previewDecision(NVDAB, 1n)).to.equal(Reason.None);
+    it("setAgent and setOracleUpdater are owner-only and keep all three roles distinct", async function () {
+      const f = await networkHelpers.loadFixture(deployFixture);
+      await expect(f.covenant.connect(f.agent).setAgent(f.other.address)).to.be.revertedWithCustomError(f.covenant, "NotOwner");
+      await expect(f.covenant.setAgent(f.owner.address)).to.be.revertedWithCustomError(f.covenant, "RolesNotDistinct");
+      await expect(f.covenant.setAgent(f.updater.address)).to.be.revertedWithCustomError(f.covenant, "RolesNotDistinct");
+      await expect(f.covenant.setOracleUpdater(f.owner.address)).to.be.revertedWithCustomError(f.covenant, "RolesNotDistinct");
+      await expect(f.covenant.setOracleUpdater(f.agent.address)).to.be.revertedWithCustomError(f.covenant, "RolesNotDistinct");
+      await f.covenant.setAgent(f.other.address);
+      expect(await f.covenant.agent()).to.equal(f.other.address);
     });
   });
 
   describe("oracle", function () {
-    it("updateOracle is restricted to the configured updater", async function () {
-      const { covenant, other, tokenOut } = await networkHelpers.loadFixture(deployCovenantFixture);
-      await expect(
-        covenant.connect(other).updateOracle(await tokenOut.getAddress(), false),
-      ).to.be.revertedWithCustomError(covenant, "NotOracleUpdater");
-    });
-
-    it("setOracleUpdater is owner-only and takes effect immediately", async function () {
-      const { covenant, other, oracleUpdater, tokenOut } = await networkHelpers.loadFixture(deployCovenantFixture);
-      await expect(covenant.connect(other).setOracleUpdater(other.address)).to.be.revertedWithCustomError(
-        covenant,
-        "NotOwner",
-      );
-
-      await covenant.setOracleUpdater(other.address);
-      const tokenOutAddress = await tokenOut.getAddress();
-      // The old updater can no longer push updates.
-      await expect(covenant.connect(oracleUpdater).updateOracle(tokenOutAddress, false)).to.be.revertedWithCustomError(
-        covenant,
-        "NotOracleUpdater",
-      );
-      // The new one can.
-      await expect(covenant.connect(other).updateOracle(tokenOutAddress, false)).to.emit(covenant, "OracleUpdated");
+    it("updateOracle is updater-only, rejects a zero price, and records price and halt", async function () {
+      const f = await networkHelpers.loadFixture(deployFixture);
+      await expect(f.covenant.connect(f.agent).updateOracle(f.stockAddress, false, E18)).to.be.revertedWithCustomError(f.covenant, "NotOracleUpdater");
+      await expect(f.covenant.connect(f.owner).updateOracle(f.stockAddress, false, E18)).to.be.revertedWithCustomError(f.covenant, "NotOracleUpdater");
+      await expect(f.covenant.connect(f.updater).updateOracle(f.stockAddress, false, 0n)).to.be.revertedWithCustomError(f.covenant, "ZeroPrice");
+      await f.covenant.connect(f.updater).updateOracle(f.stockAddress, true, 221n * E18);
+      const status = await f.covenant.oracleStatus(f.stockAddress);
+      expect(status.halted).to.equal(true);
+      expect(status.priceUsd).to.equal(221n * E18);
     });
   });
 
-  describe("guardedSwap - denial paths (no revert, Attestation only, no funds move)", function () {
-    it("denies with MandateInactive when no mandate has ever been set", async function () {
-      const { covenant, tokenOut, trader, quoteToken } = await networkHelpers.loadFixture(deployCovenantFixture);
-      const tokenOutAddress = await tokenOut.getAddress();
-      await covenant.setAllowedToken(tokenOutAddress, true);
-
-      expect(await covenant.previewDecision(tokenOutAddress, 1n)).to.equal(Reason.MandateInactive);
-
-      await expect(covenant.connect(trader).guardedSwap(tokenOutAddress, 2500, 1n, 0n))
-        .to.emit(covenant, "Attestation")
-        .withArgs(trader.address, tokenOutAddress, 1n, 0n, false, Reason.MandateInactive);
-
-      expect(await quoteToken.balanceOf(trader.address)).to.equal(0n);
-    });
-
-    it("denies with MandateExpired once the mandate's expiry passes", async function () {
-      const { covenant, oracleUpdater, tokenOut, trader } = await networkHelpers.loadFixture(deployCovenantFixture);
-      const tokenOutAddress = await tokenOut.getAddress();
-      await covenant.setAllowedToken(tokenOutAddress, true);
-      await covenant.connect(oracleUpdater).updateOracle(tokenOutAddress, false);
-
-      const latest = await networkHelpers.time.latest();
-      const shortExpiry = latest + 60;
-      await covenant.setMandate(ethers.parseUnits("1000", 18), 10n, shortExpiry);
-
-      // Still valid right up to expiry.
-      expect(await covenant.previewDecision(tokenOutAddress, 1n)).to.equal(Reason.None);
-
-      await networkHelpers.time.increaseTo(shortExpiry + 1);
-
-      expect(await covenant.previewDecision(tokenOutAddress, 1n)).to.equal(Reason.MandateExpired);
-      await expect(covenant.connect(trader).guardedSwap(tokenOutAddress, 2500, 1n, 0n))
-        .to.emit(covenant, "Attestation")
-        .withArgs(trader.address, tokenOutAddress, 1n, 0n, false, Reason.MandateExpired);
-    });
-
-    it("denies with TokenNotAllowed for a token never allowlisted", async function () {
-      const { covenant, tokenOut } = await networkHelpers.loadFixture(deployCovenantFixture);
-      const latest = await networkHelpers.time.latest();
-      await covenant.setMandate(ethers.parseUnits("1000", 18), 10n, latest + ONE_DAY_SECONDS);
-      expect(await covenant.previewDecision(await tokenOut.getAddress(), 1n)).to.equal(Reason.TokenNotAllowed);
-    });
-
-    it("denies with NotionalExceeded above the per-trade cap", async function () {
-      const { covenant, oracleUpdater, tokenOut } = await networkHelpers.loadFixture(deployCovenantFixture);
-      const tokenOutAddress = await tokenOut.getAddress();
-      await makeTradeable(covenant, oracleUpdater, tokenOutAddress, { maxNotionalPerTrade: 100n });
-
-      expect(await covenant.previewDecision(tokenOutAddress, 100n)).to.equal(Reason.None);
-      expect(await covenant.previewDecision(tokenOutAddress, 101n)).to.equal(Reason.NotionalExceeded);
-    });
-
-    it("denies with OracleStale when the oracle has never been updated for that token", async function () {
-      const { covenant, tokenOut } = await networkHelpers.loadFixture(deployCovenantFixture);
-      const tokenOutAddress = await tokenOut.getAddress();
-      await covenant.setAllowedToken(tokenOutAddress, true);
-      const latest = await networkHelpers.time.latest();
-      await covenant.setMandate(ethers.parseUnits("1000", 18), 10n, latest + ONE_DAY_SECONDS);
-      // Deliberately no updateOracle call.
-
-      expect(await covenant.previewDecision(tokenOutAddress, 1n)).to.equal(Reason.OracleStale);
-    });
-
-    it("denies with OracleStale once an update ages past the staleness bound", async function () {
-      const { covenant, oracleUpdater, tokenOut } = await networkHelpers.loadFixture(deployCovenantFixture);
-      const tokenOutAddress = await tokenOut.getAddress();
-      await makeTradeable(covenant, oracleUpdater, tokenOutAddress);
-
-      expect(await covenant.previewDecision(tokenOutAddress, 1n)).to.equal(Reason.None);
-
-      await networkHelpers.time.increase(STALENESS_BOUND_SECONDS + 1);
-
-      expect(await covenant.previewDecision(tokenOutAddress, 1n)).to.equal(Reason.OracleStale);
-    });
-
-    it("denies with OracleHalted when the oracle reports a halt", async function () {
-      const { covenant, oracleUpdater, tokenOut } = await networkHelpers.loadFixture(deployCovenantFixture);
-      const tokenOutAddress = await tokenOut.getAddress();
-      await makeTradeable(covenant, oracleUpdater, tokenOutAddress);
-      expect(await covenant.previewDecision(tokenOutAddress, 1n)).to.equal(Reason.None);
-
-      // Halt flips between preview and (what would be) execute - re-checked fresh every call, not cached.
-      await covenant.connect(oracleUpdater).updateOracle(tokenOutAddress, true);
-      expect(await covenant.previewDecision(tokenOutAddress, 1n)).to.equal(Reason.OracleHalted);
-    });
-
-    it("off-by-one: denies the (N+1)th trade in a day, then allows again once the day rolls over", async function () {
-      const { covenant, oracleUpdater, tokenOut, quoteToken, trader } = await networkHelpers.loadFixture(
-        deployCovenantFixture,
-      );
-      const tokenOutAddress = await tokenOut.getAddress();
-      await makeTradeable(covenant, oracleUpdater, tokenOutAddress, { maxTradesPerDay: 1n });
-
-      await fundAndApprove(quoteToken, covenant, trader, 10n);
-      await expect(covenant.connect(trader).guardedSwap(tokenOutAddress, 2500, 1n, 0n))
-        .to.emit(covenant, "Attestation")
-        .withArgs(trader.address, tokenOutAddress, 1n, 1n, true, Reason.None);
-      expect(await covenant.tradesUsedToday()).to.equal(1n);
-
-      // The 2nd trade the same day is the (N+1)th - must deny, not revert, and pull nothing.
-      const balanceBeforeDenial = await quoteToken.balanceOf(trader.address);
-      await expect(covenant.connect(trader).guardedSwap(tokenOutAddress, 2500, 1n, 0n))
-        .to.emit(covenant, "Attestation")
-        .withArgs(trader.address, tokenOutAddress, 1n, 0n, false, Reason.DailyLimitExceeded);
-      expect(await quoteToken.balanceOf(trader.address)).to.equal(balanceBeforeDenial);
-
-      // Roll into the next UTC day: the counter resets and the trade succeeds again.
-      // (The oracle update from makeTradeable() is now stale on its own terms -
-      // STALENESS_BOUND_SECONDS is 15 minutes, we just warped a full day - so it
-      // has to be refreshed here too, independently of the daily-limit reset.)
-      await networkHelpers.time.increase(ONE_DAY_SECONDS);
-      await covenant.connect(oracleUpdater).updateOracle(tokenOutAddress, false);
-      await expect(covenant.connect(trader).guardedSwap(tokenOutAddress, 2500, 1n, 0n))
-        .to.emit(covenant, "Attestation")
-        .withArgs(trader.address, tokenOutAddress, 1n, 1n, true, Reason.None);
-      expect(await covenant.tradesUsedToday()).to.equal(1n);
-    });
-  });
-
-  describe("preview/execute agreement - same code path, no drift possible by construction", function () {
-    // cross-hackathon-lessons.md #4 / noyeet's design principle: simulate
-    // and execute should share one code path so they can't silently drift
-    // apart. Covenant already does this structurally - previewDecision and
-    // guardedSwap both call the same internal _evaluate (see Covenant.sol) -
-    // but that was never directly exercised in one test: call previewDecision
-    // immediately before guardedSwap on the identical inputs and assert the
-    // real Attestation reports exactly what was previewed, for both a deny
-    // and an allow. If someone ever splits the two checks apart, this is the
-    // test that would catch it.
-    it("previewDecision's answer matches the real Attestation reason for a denial", async function () {
-      const { covenant, tokenOut, trader } = await networkHelpers.loadFixture(deployCovenantFixture);
-      const tokenOutAddress = await tokenOut.getAddress();
-      // Deliberately untradeable: no mandate, no allowlist, no oracle update.
-      const previewed = await covenant.previewDecision(tokenOutAddress, 1n);
-      expect(previewed).to.equal(Reason.MandateInactive);
-
-      await expect(covenant.connect(trader).guardedSwap(tokenOutAddress, 2500, 1n, 0n))
-        .to.emit(covenant, "Attestation")
-        .withArgs(trader.address, tokenOutAddress, 1n, 0n, false, previewed);
-    });
-
-    it("previewDecision's answer matches the real Attestation reason for an allow", async function () {
-      const { covenant, oracleUpdater, tokenOut, quoteToken, trader } = await networkHelpers.loadFixture(
-        deployCovenantFixture,
-      );
-      const tokenOutAddress = await tokenOut.getAddress();
-      await makeTradeable(covenant, oracleUpdater, tokenOutAddress);
-      await fundAndApprove(quoteToken, covenant, trader, 1n);
-
-      const previewed = await covenant.previewDecision(tokenOutAddress, 1n);
-      expect(previewed).to.equal(Reason.None);
-
-      await expect(covenant.connect(trader).guardedSwap(tokenOutAddress, 2500, 1n, 0n))
-        .to.emit(covenant, "Attestation")
-        .withArgs(trader.address, tokenOutAddress, 1n, 1n, true, previewed);
-    });
-  });
-
-  describe("guardedSwap - allow path", function () {
-    it("pulls exactly amountIn, delivers amountOut to the caller, and records the trade", async function () {
-      const { covenant, oracleUpdater, tokenOut, quoteToken, trader } = await networkHelpers.loadFixture(
-        deployCovenantFixture,
-      );
-      const tokenOutAddress = await tokenOut.getAddress();
-      await makeTradeable(covenant, oracleUpdater, tokenOutAddress);
-
-      const amountIn = ethers.parseUnits("5", 18);
-      await fundAndApprove(quoteToken, covenant, trader, amountIn);
-
-      const traderQuoteBefore = await quoteToken.balanceOf(trader.address);
-
-      await expect(covenant.connect(trader).guardedSwap(tokenOutAddress, 2500, amountIn, 0n))
-        .to.emit(covenant, "Attestation")
-        .withArgs(trader.address, tokenOutAddress, amountIn, amountIn, true, Reason.None);
-
-      expect(await quoteToken.balanceOf(trader.address)).to.equal(traderQuoteBefore - amountIn);
-      expect(await tokenOut.balanceOf(trader.address)).to.equal(amountIn); // MockRouter's fixed 1:1 rate
-      expect(await covenant.tradesUsedToday()).to.equal(1n);
-      // Non-custodial: Covenant itself holds nothing once the call completes.
-      expect(await quoteToken.balanceOf(await covenant.getAddress())).to.equal(0n);
-    });
-
-    it("reverts for real (not a soft denial) when the swap itself fails downstream, e.g. slippage", async function () {
-      const { covenant, oracleUpdater, tokenOut, quoteToken, trader } = await networkHelpers.loadFixture(
-        deployCovenantFixture,
-      );
-      const tokenOutAddress = await tokenOut.getAddress();
-      await makeTradeable(covenant, oracleUpdater, tokenOutAddress);
-
-      const amountIn = ethers.parseUnits("5", 18);
-      await fundAndApprove(quoteToken, covenant, trader, amountIn);
-
-      // MockRouter is a fixed 1:1 rate, so demanding more out than in is unsatisfiable -
-      // this must be a real Solidity revert, not an Attestation(false, ...), because it's
-      // a DEX-level failure that happens after Covenant's own guard already said yes.
-      await expect(
-        covenant.connect(trader).guardedSwap(tokenOutAddress, 2500, amountIn, amountIn + 1n),
-      ).to.be.revertedWith("MockRouter: amountOutMinimum");
-    });
-  });
-
-  describe("reentrancy", function () {
-    it("blocks a token whose transferFrom tries to reenter guardedSwap", async function () {
-      const [owner, oracleUpdater, trader] = await ethers.getSigners();
-      const maliciousToken = await ethers.deployContract("MaliciousReentrantToken");
-      const router = await ethers.deployContract("MockRouter");
-      const tokenOut = await ethers.deployContract("MockERC20", ["Mock NVDAB", "mNVDAB"]);
-      const tokenOutAddress = await tokenOut.getAddress();
-
-      const covenant = await ethers.deployContract("Covenant", [
-        await maliciousToken.getAddress(),
-        await router.getAddress(),
-        oracleUpdater.address,
-        STALENESS_BOUND_SECONDS,
-      ]);
-      const covenantAddress = await covenant.getAddress();
-
-      await makeTradeable(covenant, oracleUpdater, tokenOutAddress);
-      await maliciousToken.setAttack(covenantAddress, tokenOutAddress);
-
-      await expect(
-        covenant.connect(trader).guardedSwap(tokenOutAddress, 2500, 1n, 0n),
-      ).to.be.revertedWithCustomError(covenant, "Reentrant");
-    });
-  });
-
-  describe("rescueToken", function () {
-    it("is owner-only and moves out a balance stuck by direct transfer", async function () {
-      const { covenant, other, quoteToken } = await networkHelpers.loadFixture(deployCovenantFixture);
-      const covenantAddress = await covenant.getAddress();
-      await quoteToken.mint(covenantAddress, 50n);
-
-      await expect(covenant.connect(other).rescueToken(await quoteToken.getAddress(), 50n, other.address)).to.be
-        .revertedWithCustomError(covenant, "NotOwner");
-
-      await covenant.rescueToken(await quoteToken.getAddress(), 50n, other.address);
-      expect(await quoteToken.balanceOf(other.address)).to.equal(50n);
-    });
-  });
-
-  describe("slashable guard (Phase 2.5, bond/challenge/slash)", function () {
-    const CHALLENGE_WINDOW_SECONDS = 60 * 60;
-    const BOND_COOLDOWN_SECONDS = 60 * 60;
-    const EVIDENCE_HASH = ethers.keccak256(ethers.toUtf8Bytes("real RWA status response, fetched at challenge time"));
-
-    async function postBond(covenant: any, oracleUpdater: any, amount = ethers.parseEther("0.01")) {
-      await covenant.connect(oracleUpdater).postBond({ value: amount });
-    }
-
-    describe("postBond / withdrawBond", function () {
-      it("is oracle-updater-only, accumulates, and emits real balances", async function () {
-        const { covenant, oracleUpdater, other } = await networkHelpers.loadFixture(deployCovenantFixture);
-        const amount1 = ethers.parseEther("0.01");
-        const amount2 = ethers.parseEther("0.02");
-
-        await expect(covenant.connect(other).postBond({ value: amount1 })).to.be.revertedWithCustomError(
-          covenant,
-          "NotOracleUpdater",
-        );
-
-        await expect(covenant.connect(oracleUpdater).postBond({ value: amount1 }))
-          .to.emit(covenant, "BondPosted")
-          .withArgs(oracleUpdater.address, amount1, amount1);
-        expect(await covenant.updaterBond()).to.equal(amount1);
-
-        await expect(covenant.connect(oracleUpdater).postBond({ value: amount2 }))
-          .to.emit(covenant, "BondPosted")
-          .withArgs(oracleUpdater.address, amount2, amount1 + amount2);
-        expect(await covenant.updaterBond()).to.equal(amount1 + amount2);
-      });
-
-      it("blocks withdrawal during the cooldown, then allows it and moves a real balance", async function () {
-        const { covenant, oracleUpdater } = await networkHelpers.loadFixture(deployCovenantFixture);
-        const amount = ethers.parseEther("0.01");
-        await postBond(covenant, oracleUpdater, amount);
-
-        await expect(covenant.connect(oracleUpdater).withdrawBond()).to.be.revertedWithCustomError(
-          covenant,
-          "BondCooldownActive",
-        );
-
-        await networkHelpers.time.increase(BOND_COOLDOWN_SECONDS + 1);
-
-        const before = await ethers.provider.getBalance(oracleUpdater.address);
-        const tx = await covenant.connect(oracleUpdater).withdrawBond();
-        const receipt = await tx.wait();
-        const gasCost = receipt!.gasUsed * receipt!.gasPrice;
-        const after = await ethers.provider.getBalance(oracleUpdater.address);
-
-        expect(after - before + gasCost).to.equal(amount);
-        expect(await covenant.updaterBond()).to.equal(0n);
-      });
-
-      it("edge case: blocks withdrawal while an unresolved challenge is open", async function () {
-        const { covenant, oracleUpdater, tokenOut, other } = await networkHelpers.loadFixture(deployCovenantFixture);
-        const tokenOutAddress = await tokenOut.getAddress();
-        await postBond(covenant, oracleUpdater);
-        await networkHelpers.time.increase(BOND_COOLDOWN_SECONDS + 1);
-
-        const updateTimestamp = await networkHelpers.time.latest();
-        await covenant.connect(other).challengeUpdate(tokenOutAddress, updateTimestamp, EVIDENCE_HASH);
-
-        await expect(covenant.connect(oracleUpdater).withdrawBond()).to.be.revertedWithCustomError(
-          covenant,
-          "OpenChallengesExist",
-        );
-      });
-
-      it("posting more bond restarts the cooldown - a top-up can't be withdrawn early", async function () {
-        const { covenant, oracleUpdater } = await networkHelpers.loadFixture(deployCovenantFixture);
-        await postBond(covenant, oracleUpdater);
-        await networkHelpers.time.increase(BOND_COOLDOWN_SECONDS + 1);
-
-        // Would be withdrawable now, but a fresh deposit resets the clock.
-        await postBond(covenant, oracleUpdater, ethers.parseEther("0.005"));
-        await expect(covenant.connect(oracleUpdater).withdrawBond()).to.be.revertedWithCustomError(
-          covenant,
-          "BondCooldownActive",
-        );
-      });
-    });
-
-    describe("challengeUpdate", function () {
-      it("anyone can challenge, and emits the real evidence hash referenced", async function () {
-        const { covenant, tokenOut, other } = await networkHelpers.loadFixture(deployCovenantFixture);
-        const tokenOutAddress = await tokenOut.getAddress();
-        const updateTimestamp = await networkHelpers.time.latest();
-
-        await expect(covenant.connect(other).challengeUpdate(tokenOutAddress, updateTimestamp, EVIDENCE_HASH))
-          .to.emit(covenant, "ChallengeSubmitted")
-          .withArgs(1n, other.address, tokenOutAddress, updateTimestamp, EVIDENCE_HASH);
-        expect(await covenant.openChallengeCount()).to.equal(1n);
-      });
-
-      it("edge case: rejects a challenge submitted after the window has closed", async function () {
-        const { covenant, tokenOut, other } = await networkHelpers.loadFixture(deployCovenantFixture);
-        const tokenOutAddress = await tokenOut.getAddress();
-        const updateTimestamp = await networkHelpers.time.latest();
-
-        await networkHelpers.time.increase(CHALLENGE_WINDOW_SECONDS + 1);
-
+  describe("access: only the agent can commit, settle or cancel (red-team H2, griefing)", function () {
+    it("a stranger, the owner and the oracle updater all revert on commit, and the day's counter is untouched", async function () {
+      const f = await networkHelpers.loadFixture(deployFixture);
+      await makeTradeable(f);
+      const a = buyArgs(E18);
+      for (const s of [f.stranger, f.owner, f.updater]) {
         await expect(
-          covenant.connect(other).challengeUpdate(tokenOutAddress, updateTimestamp, EVIDENCE_HASH),
-        ).to.be.revertedWithCustomError(covenant, "ChallengeWindowClosed");
-      });
+          f.covenant.connect(s).commit(Side.Buy, f.stockAddress, a.amountIn, a.quotedOut, a.minOut, QUOTE_REF, RESEARCH_REF),
+        ).to.be.revertedWithCustomError(f.covenant, "NotAgent");
+      }
+      expect(await f.covenant.tradesUsedToday()).to.equal(0n);
+      expect(await f.covenant.nextDecisionId()).to.equal(1n);
+    });
+  });
 
-      it("edge case: a second challenge on the same (token, timestamp) is rejected while the first is unresolved", async function () {
-        const { covenant, tokenOut, other, trader } = await networkHelpers.loadFixture(deployCovenantFixture);
-        const tokenOutAddress = await tokenOut.getAddress();
-        const updateTimestamp = await networkHelpers.time.latest();
-
-        await covenant.connect(other).challengeUpdate(tokenOutAddress, updateTimestamp, EVIDENCE_HASH);
-        await expect(
-          covenant.connect(trader).challengeUpdate(tokenOutAddress, updateTimestamp, EVIDENCE_HASH),
-        ).to.be.revertedWithCustomError(covenant, "UpdateAlreadyChallenged");
-      });
-
-      it("edge case: the same update CAN be re-challenged once the first challenge resolves", async function () {
-        const { covenant, oracleUpdater, tokenOut, other, trader } = await networkHelpers.loadFixture(
-          deployCovenantFixture,
-        );
-        const tokenOutAddress = await tokenOut.getAddress();
-        const updateTimestamp = await networkHelpers.time.latest();
-
-        await covenant.connect(other).challengeUpdate(tokenOutAddress, updateTimestamp, EVIDENCE_HASH);
-        await covenant.resolveChallenge(1n, false); // dismissed, not upheld
-
-        await expect(covenant.connect(trader).challengeUpdate(tokenOutAddress, updateTimestamp, EVIDENCE_HASH))
-          .to.emit(covenant, "ChallengeSubmitted")
-          .withArgs(2n, trader.address, tokenOutAddress, updateTimestamp, EVIDENCE_HASH);
-      });
+  describe("denials (never revert, always recorded)", function () {
+    it("MandateInactive before any mandate, and after revokeMandate", async function () {
+      const f = await networkHelpers.loadFixture(deployFixture);
+      expect((await commit(f, Side.Buy, buyArgs(E18))).reason).to.equal(Reason.MandateInactive);
+      await makeTradeable(f);
+      await f.covenant.revokeMandate();
+      expect((await commit(f, Side.Buy, buyArgs(E18))).reason).to.equal(Reason.MandateInactive);
     });
 
-    describe("resolveChallenge", function () {
-      it("is owner-only", async function () {
-        const { covenant, tokenOut, other, trader } = await networkHelpers.loadFixture(deployCovenantFixture);
-        const tokenOutAddress = await tokenOut.getAddress();
-        const updateTimestamp = await networkHelpers.time.latest();
-        await covenant.connect(other).challengeUpdate(tokenOutAddress, updateTimestamp, EVIDENCE_HASH);
+    it("MandateExpired once the expiry passes", async function () {
+      const f = await networkHelpers.loadFixture(deployFixture);
+      await makeTradeable(f);
+      const latest = await networkHelpers.time.latest();
+      await f.covenant.setMandate(10n * E18, 5n, latest + 100);
+      await networkHelpers.time.increase(101);
+      expect((await commit(f, Side.Buy, buyArgs(E18))).reason).to.equal(Reason.MandateExpired);
+    });
 
-        await expect(covenant.connect(trader).resolveChallenge(1n, true)).to.be.revertedWithCustomError(
-          covenant,
-          "NotOwner",
-        );
-      });
+    it("TokenNotAllowed for an unconfigured token and for the real impersonator address", async function () {
+      const f = await networkHelpers.loadFixture(deployFixture);
+      await makeTradeable(f);
+      expect((await commit(f, Side.Buy, buyArgs(E18), IMPERSONATOR_BSTOCKS)).reason).to.equal(Reason.TokenNotAllowed);
+      await f.covenant.configureToken(f.stockAddress, false, 100, 50n * E18);
+      expect((await commit(f, Side.Buy, buyArgs(E18))).reason).to.equal(Reason.TokenNotAllowed);
+    });
 
-      it("rejects an unknown challenge id and a double-resolve", async function () {
-        const { covenant, tokenOut, other } = await networkHelpers.loadFixture(deployCovenantFixture);
-        const tokenOutAddress = await tokenOut.getAddress();
-        const updateTimestamp = await networkHelpers.time.latest();
+    it("OracleStale when never updated, and once an update ages past the bound", async function () {
+      const f = await networkHelpers.loadFixture(deployFixture);
+      const latest = await networkHelpers.time.latest();
+      await f.covenant.setMandate(10n * E18, 5n, latest + 30 * ONE_DAY);
+      await f.covenant.configureToken(f.stockAddress, true, 100, 50n * E18);
+      expect((await commit(f, Side.Buy, buyArgs(E18))).reason).to.equal(Reason.OracleStale);
+      await f.covenant.connect(f.updater).updateOracle(f.stockAddress, false, 200n * E18);
+      await networkHelpers.time.increase(STALENESS_BOUND + 1);
+      expect((await commit(f, Side.Buy, buyArgs(E18))).reason).to.equal(Reason.OracleStale);
+    });
 
-        await expect(covenant.resolveChallenge(1n, true)).to.be.revertedWithCustomError(
-          covenant,
-          "ChallengeDoesNotExist",
-        );
-        await expect(covenant.resolveChallenge(0n, true)).to.be.revertedWithCustomError(
-          covenant,
-          "ChallengeDoesNotExist",
-        );
+    it("OracleHalted while the oracle reports a halt", async function () {
+      const f = await networkHelpers.loadFixture(deployFixture);
+      await makeTradeable(f);
+      await f.covenant.connect(f.updater).updateOracle(f.stockAddress, true, 200n * E18);
+      expect((await commit(f, Side.Buy, buyArgs(E18))).reason).to.equal(Reason.OracleHalted);
+    });
 
-        await covenant.connect(other).challengeUpdate(tokenOutAddress, updateTimestamp, EVIDENCE_HASH);
-        await covenant.resolveChallenge(1n, false);
-        await expect(covenant.resolveChallenge(1n, true)).to.be.revertedWithCustomError(
-          covenant,
-          "ChallengeAlreadyResolved",
-        );
-      });
+    it("NotionalExceeded: a buy is measured in quote units, a sell through the oracle price", async function () {
+      const f = await networkHelpers.loadFixture(deployFixture);
+      await makeTradeable(f, { maxNotional: 10n * E18 });
+      expect((await commit(f, Side.Buy, buyArgs(11n * E18))).reason).to.equal(Reason.NotionalExceeded);
+      // 0.06 tokens at $200 = $12 of notional, over the $10 cap.
+      expect((await commit(f, Side.Sell, sellArgs((6n * E18) / 100n))).reason).to.equal(Reason.NotionalExceeded);
+      // 0.04 tokens = $8, under the cap.
+      expect((await commit(f, Side.Sell, sellArgs((4n * E18) / 100n))).reason).to.equal(Reason.None);
+    });
 
-      it("dismissed: no funds move, but the challenge slot frees up (openChallengeCount drops)", async function () {
-        const { covenant, tokenOut, other } = await networkHelpers.loadFixture(deployCovenantFixture);
-        const tokenOutAddress = await tokenOut.getAddress();
-        const updateTimestamp = await networkHelpers.time.latest();
-        await covenant.connect(other).challengeUpdate(tokenOutAddress, updateTimestamp, EVIDENCE_HASH);
+    it("SlippageTooLoose: a zero quote, and a minimum below the slippage bound", async function () {
+      const f = await networkHelpers.loadFixture(deployFixture);
+      await makeTradeable(f, { slippageBps: 100 });
+      const a = buyArgs(E18);
+      expect((await commit(f, Side.Buy, { ...a, quotedOut: 0n, minOut: 0n })).reason).to.equal(Reason.SlippageTooLoose);
+      // 2% below the quote with a 1% bound.
+      expect((await commit(f, Side.Buy, { ...a, minOut: (a.quotedOut * 98n) / 100n })).reason).to.equal(Reason.SlippageTooLoose);
+    });
 
-        const bondBefore = await covenant.updaterBond();
-        await expect(covenant.resolveChallenge(1n, false)).to.emit(covenant, "ChallengeResolved").withArgs(1n, false, 0n);
-        expect(await covenant.updaterBond()).to.equal(bondBefore);
-        expect(await covenant.openChallengeCount()).to.equal(0n);
-      });
+    it("SlippageTooLoose: an understated quote can't smuggle in a loose minimum (red-team H5)", async function () {
+      // The attack: report a quote 10x too low, so a minimum "within 1% of
+      // the quote" is really 90% below the market. The oracle leg of the
+      // check catches it.
+      const f = await networkHelpers.loadFixture(deployFixture);
+      await makeTradeable(f, { slippageBps: 100 });
+      const honest = buyArgs(E18);
+      const fakeQuote = honest.quotedOut / 10n;
+      const looseMin = (fakeQuote * 995n) / 1000n;
+      expect((await commit(f, Side.Buy, { amountIn: E18, quotedOut: fakeQuote, minOut: looseMin })).reason).to.equal(
+        Reason.SlippageTooLoose,
+      );
+    });
 
-      it("upheld: slashes exactly SLASH_BPS of the current bond to the real challenger", async function () {
-        const { covenant, oracleUpdater, tokenOut, other } = await networkHelpers.loadFixture(deployCovenantFixture);
-        const tokenOutAddress = await tokenOut.getAddress();
-        const bondAmount = ethers.parseEther("0.1");
-        await postBond(covenant, oracleUpdater, bondAmount);
+    it("DailyLimitExceeded on the (N+1)th allowed trade, then clear the next UTC day", async function () {
+      const f = await networkHelpers.loadFixture(deployFixture);
+      await makeTradeable(f, { maxTrades: 1n });
+      const first = await commit(f, Side.Buy, buyArgs(E18));
+      expect(first.reason).to.equal(Reason.None);
+      await f.covenant.connect(f.agent).settle(first.id, SWAP_TX, buyArgs(E18).quotedOut, Mode.Rfq);
+      expect((await commit(f, Side.Buy, buyArgs(E18))).reason).to.equal(Reason.DailyLimitExceeded);
 
-        const updateTimestamp = await networkHelpers.time.latest();
-        await covenant.connect(other).challengeUpdate(tokenOutAddress, updateTimestamp, EVIDENCE_HASH);
+      await networkHelpers.time.increase(ONE_DAY);
+      await f.covenant.connect(f.updater).updateOracle(f.stockAddress, false, 200n * E18);
+      expect((await commit(f, Side.Buy, buyArgs(E18))).reason).to.equal(Reason.None);
+    });
 
-        const expectedSlash = (bondAmount * 2000n) / 10000n; // SLASH_BPS = 20%
-        const before = await ethers.provider.getBalance(other.address);
-        await expect(covenant.resolveChallenge(1n, true))
-          .to.emit(covenant, "ChallengeResolved")
-          .withArgs(1n, true, expectedSlash);
-        const after = await ethers.provider.getBalance(other.address);
+    it("DecisionOpen while an approved decision is still in flight, then clear once it expires", async function () {
+      const f = await networkHelpers.loadFixture(deployFixture);
+      await makeTradeable(f);
+      expect((await commit(f, Side.Buy, buyArgs(E18))).reason).to.equal(Reason.None);
+      expect((await commit(f, Side.Buy, buyArgs(E18))).reason).to.equal(Reason.DecisionOpen);
 
-        expect(after - before).to.equal(expectedSlash);
-        expect(await covenant.updaterBond()).to.equal(bondAmount - expectedSlash);
-      });
+      await networkHelpers.time.increase(DECISION_TTL + 1);
+      await f.covenant.connect(f.updater).updateOracle(f.stockAddress, false, 200n * E18);
+      expect(await f.covenant.hasOpenDecision()).to.equal(false);
+      expect((await commit(f, Side.Buy, buyArgs(E18))).reason).to.equal(Reason.None);
+    });
 
-      it("edge case: a second upheld challenge after an earlier slash never underflows, and gracefully slashes zero once the bond is fully gone", async function () {
-        const { covenant, oracleUpdater, tokenOut, other, trader } = await networkHelpers.loadFixture(
-          deployCovenantFixture,
-        );
-        const tokenOutAddress = await tokenOut.getAddress();
-        // A tiny bond: 20% of 4 wei rounds down to 0 after enough rounds,
-        // which is exactly the "bond insufficient to cover the slash
-        // percentage" case the spec calls out - it must degrade gracefully
-        // to a real zero-value transfer, not revert or underflow.
-        await postBond(covenant, oracleUpdater, 4n);
+    it("a denial doesn't count toward the day, doesn't open a decision, and expires on the spot", async function () {
+      const f = await networkHelpers.loadFixture(deployFixture);
+      await makeTradeable(f);
+      const denied = await commit(f, Side.Buy, buyArgs(E18), IMPERSONATOR_BSTOCKS);
+      expect(denied.allowed).to.equal(false);
+      expect(await f.covenant.tradesUsedToday()).to.equal(0n);
+      expect(await f.covenant.openDecisionId()).to.equal(0n);
+      const stored = await f.covenant.getDecision(denied.id);
+      expect(stored.expiresAt).to.equal(stored.committedAt);
+    });
+  });
 
-        const t1 = await networkHelpers.time.latest();
-        await covenant.connect(other).challengeUpdate(tokenOutAddress, t1, EVIDENCE_HASH);
-        await covenant.resolveChallenge(1n, true); // slashes 0 (4*2000/10000 = 0)
+  describe("Feature 3: position limit from the wallet's real balance", function () {
+    it("denies a buy that would take the position over the cap, counting what's already held", async function () {
+      const f = await networkHelpers.loadFixture(deployFixture);
+      // Cap $5 at $200/token = 0.025 tokens.
+      await makeTradeable(f, { maxPositionUsd: 5n * E18 });
 
-        expect(await covenant.updaterBond()).to.equal(4n);
+      // $4 of buying power with nothing held: fine.
+      expect((await f.covenant.previewDecision(Side.Buy, f.stockAddress, 4n * E18, buyArgs(4n * E18).quotedOut, buyArgs(4n * E18).minOut))).to.equal(Reason.None);
 
-        const t2 = t1 + 1;
-        await covenant.connect(trader).challengeUpdate(tokenOutAddress, t2, EVIDENCE_HASH);
-        await covenant.resolveChallenge(2n, true); // would throw if it reverted or underflowed
-        expect(await covenant.updaterBond()).to.equal(4n); // still 4 - never underflowed, never reverted
-      });
+      // The wallet already holds $3 worth (0.015 tokens). $3 more = $6 > $5.
+      await f.stock.mint(f.agent.address, (15n * E18) / 1000n);
+      expect((await commit(f, Side.Buy, buyArgs(3n * E18))).reason).to.equal(Reason.PositionLimit);
 
-      it("edge case: resolution uses the challenge's original claimed timestamp, not the resolution-time clock", async function () {
-        // Submit near the edge of a real window, then let a lot of real
-        // time pass before resolving. If resolveChallenge accidentally
-        // re-checked the window against block.timestamp at resolution time
-        // instead of trusting what was recorded at submission, this would
-        // wrongly fail or behave differently long after the fact.
-        const { covenant, tokenOut, other } = await networkHelpers.loadFixture(deployCovenantFixture);
-        const tokenOutAddress = await tokenOut.getAddress();
-        const updateTimestamp = await networkHelpers.time.latest();
+      // $2 more lands exactly on the $5 cap, which is allowed.
+      expect((await commit(f, Side.Buy, buyArgs(2n * E18))).reason).to.equal(Reason.None);
+    });
 
-        await networkHelpers.time.increase(CHALLENGE_WINDOW_SECONDS - 5);
-        await covenant.connect(other).challengeUpdate(tokenOutAddress, updateTimestamp, EVIDENCE_HASH);
+    it("reads the balance at decision time, so tokens arriving after an allowed decision count against the next one", async function () {
+      const f = await networkHelpers.loadFixture(deployFixture);
+      await makeTradeable(f, { maxPositionUsd: 5n * E18 });
+      const first = await commit(f, Side.Buy, buyArgs(4n * E18));
+      expect(first.reason).to.equal(Reason.None);
+      // The real swap lands 0.02 tokens ($4) in the wallet, then settles.
+      await f.stock.mint(f.agent.address, (2n * E18) / 100n);
+      await f.covenant.connect(f.agent).settle(first.id, SWAP_TX, (2n * E18) / 100n, Mode.Rfq);
+      expect((await commit(f, Side.Buy, buyArgs(2n * E18))).reason).to.equal(Reason.PositionLimit);
+    });
 
-        await networkHelpers.time.increase(30 * 24 * 60 * 60); // a month later
-        const stored = await covenant.challenges(1n);
-        expect(stored.updateTimestamp).to.equal(updateTimestamp);
+    it("an understated quote can't slip past the cap: the larger of quote and oracle output is used", async function () {
+      const f = await networkHelpers.loadFixture(deployFixture);
+      await makeTradeable(f, { maxPositionUsd: 5n * E18, slippageBps: 10_000 });
+      // With a 100% slippage bound the slippage check passes anything, so
+      // this isolates the position check: a $6 buy reported as a tiny quote.
+      expect((await commit(f, Side.Buy, { amountIn: 6n * E18, quotedOut: 1n, minOut: 0n })).reason).to.equal(Reason.PositionLimit);
+    });
 
-        await covenant.resolveChallenge(1n, false); // would throw if this wrongly re-checked the window at resolve time
-      });
+    it("doesn't apply to sells: reducing a position is never blocked by the cap", async function () {
+      const f = await networkHelpers.loadFixture(deployFixture);
+      await makeTradeable(f, { maxPositionUsd: 1n * E18 });
+      await f.stock.mint(f.agent.address, 10n * E18); // far over the cap already
+      expect((await commit(f, Side.Sell, sellArgs((2n * E18) / 100n))).reason).to.equal(Reason.None);
+    });
+  });
+
+  describe("the allowed path: commit -> settle", function () {
+    it("an allowed commit records the decision, opens it, counts it, and sets expiry to now + TTL", async function () {
+      const f = await networkHelpers.loadFixture(deployFixture);
+      await makeTradeable(f);
+      const a = buyArgs(E18);
+      const ev = await commit(f, Side.Buy, a);
+      expect(ev.allowed).to.equal(true);
+      expect(ev.reason).to.equal(Reason.None);
+      expect(ev.quoteRef).to.equal(QUOTE_REF);
+      expect(ev.researchRef).to.equal(RESEARCH_REF);
+      const stored = await f.covenant.getDecision(ev.id);
+      expect(stored.expiresAt - stored.committedAt).to.equal(BigInt(DECISION_TTL));
+      expect(stored.amountIn).to.equal(a.amountIn);
+      expect(await f.covenant.openDecisionId()).to.equal(ev.id);
+      expect(await f.covenant.tradesUsedToday()).to.equal(1n);
+    });
+
+    it("settle records the real fill, closes the decision, and flags a fill below the minimum", async function () {
+      const f = await networkHelpers.loadFixture(deployFixture);
+      await makeTradeable(f);
+      const a = buyArgs(E18);
+      const ev = await commit(f, Side.Buy, a);
+
+      await expect(f.covenant.connect(f.agent).settle(ev.id, SWAP_TX, a.minOut - 1n, Mode.Rfq))
+        .to.emit(f.covenant, "DecisionSettled")
+        .withArgs(ev.id, SWAP_TX, a.minOut - 1n, Mode.Rfq, true);
+
+      const stored = await f.covenant.getDecision(ev.id);
+      expect(stored.settled).to.equal(true);
+      expect(stored.swapTxHash).to.equal(SWAP_TX);
+      expect(stored.executionMode).to.equal(BigInt(Mode.Rfq));
+      expect(await f.covenant.openDecisionId()).to.equal(0n);
+
+      const next = await commit(f, Side.Buy, a);
+      await expect(f.covenant.connect(f.agent).settle(next.id, SWAP_TX, a.quotedOut, Mode.Pool))
+        .to.emit(f.covenant, "DecisionSettled")
+        .withArgs(next.id, SWAP_TX, a.quotedOut, Mode.Pool, false);
+    });
+
+    it("settle rejects: a stranger, an unknown id, a denied decision, a double settle, and a zero tx hash", async function () {
+      const f = await networkHelpers.loadFixture(deployFixture);
+      await makeTradeable(f);
+      const denied = await commit(f, Side.Buy, buyArgs(E18), IMPERSONATOR_BSTOCKS);
+      const ok = await commit(f, Side.Buy, buyArgs(E18));
+
+      await expect(f.covenant.connect(f.stranger).settle(ok.id, SWAP_TX, 1n, Mode.Rfq)).to.be.revertedWithCustomError(f.covenant, "NotAgent");
+      await expect(f.covenant.connect(f.agent).settle(0n, SWAP_TX, 1n, Mode.Rfq)).to.be.revertedWithCustomError(f.covenant, "DecisionDoesNotExist");
+      await expect(f.covenant.connect(f.agent).settle(99n, SWAP_TX, 1n, Mode.Rfq)).to.be.revertedWithCustomError(f.covenant, "DecisionDoesNotExist");
+      await expect(f.covenant.connect(f.agent).settle(denied.id, SWAP_TX, 1n, Mode.Rfq)).to.be.revertedWithCustomError(f.covenant, "DecisionNotAllowed");
+      await expect(f.covenant.connect(f.agent).settle(ok.id, ethers.ZeroHash, 1n, Mode.Rfq)).to.be.revertedWithCustomError(f.covenant, "ZeroTxHash");
+      await f.covenant.connect(f.agent).settle(ok.id, SWAP_TX, 1n, Mode.Rfq);
+      await expect(f.covenant.connect(f.agent).settle(ok.id, SWAP_TX, 1n, Mode.Rfq)).to.be.revertedWithCustomError(f.covenant, "DecisionClosed");
+    });
+
+    it("settle is still accepted after the decision's expiry - verify.ts, not the contract, judges swap timing", async function () {
+      const f = await networkHelpers.loadFixture(deployFixture);
+      await makeTradeable(f);
+      const ev = await commit(f, Side.Buy, buyArgs(E18));
+      await networkHelpers.time.increase(DECISION_TTL + 60);
+      await f.covenant.connect(f.agent).settle(ev.id, SWAP_TX, 1n, Mode.Rfq);
+      expect((await f.covenant.getDecision(ev.id)).settled).to.equal(true);
+    });
+
+    it("cancel closes an approved decision without trading; it still counts toward the day", async function () {
+      const f = await networkHelpers.loadFixture(deployFixture);
+      await makeTradeable(f, { maxTrades: 1n });
+      const ev = await commit(f, Side.Buy, buyArgs(E18));
+      await expect(f.covenant.connect(f.stranger).cancel(ev.id)).to.be.revertedWithCustomError(f.covenant, "NotAgent");
+      await expect(f.covenant.connect(f.agent).cancel(ev.id)).to.emit(f.covenant, "DecisionCancelled").withArgs(ev.id);
+      expect(await f.covenant.openDecisionId()).to.equal(0n);
+      await expect(f.covenant.connect(f.agent).cancel(ev.id)).to.be.revertedWithCustomError(f.covenant, "DecisionClosed");
+      await expect(f.covenant.connect(f.agent).settle(ev.id, SWAP_TX, 1n, Mode.Rfq)).to.be.revertedWithCustomError(f.covenant, "DecisionClosed");
+      expect((await commit(f, Side.Buy, buyArgs(E18))).reason).to.equal(Reason.DailyLimitExceeded);
+    });
+
+    it("rotating the agent clears the old agent's open decision", async function () {
+      const f = await networkHelpers.loadFixture(deployFixture);
+      await makeTradeable(f);
+      await commit(f, Side.Buy, buyArgs(E18));
+      await f.covenant.setAgent(f.other.address);
+      expect(await f.covenant.openDecisionId()).to.equal(0n);
+      await expect(
+        f.covenant.connect(f.agent).commit(Side.Buy, f.stockAddress, E18, 1n, 1n, QUOTE_REF, RESEARCH_REF),
+      ).to.be.revertedWithCustomError(f.covenant, "NotAgent");
+    });
+  });
+
+  describe("preview/commit agreement - one _evaluate, no drift possible", function () {
+    it("previewDecision matches the real commit for a denial and for an allow", async function () {
+      const f = await networkHelpers.loadFixture(deployFixture);
+      await makeTradeable(f);
+      const a = buyArgs(E18);
+
+      const deniedPreview = await f.covenant.previewDecision(Side.Buy, IMPERSONATOR_BSTOCKS, a.amountIn, a.quotedOut, a.minOut);
+      expect(deniedPreview).to.equal(Reason.TokenNotAllowed);
+      expect((await commit(f, Side.Buy, a, IMPERSONATOR_BSTOCKS)).reason).to.equal(deniedPreview);
+
+      const allowedPreview = await f.covenant.previewDecision(Side.Buy, f.stockAddress, a.amountIn, a.quotedOut, a.minOut);
+      expect(allowedPreview).to.equal(Reason.None);
+      expect((await commit(f, Side.Buy, a)).reason).to.equal(allowedPreview);
     });
   });
 });
