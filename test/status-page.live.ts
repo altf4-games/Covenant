@@ -1,7 +1,7 @@
 import { expect } from "chai";
 import { ethers } from "ethers";
 import covenantArtifact from "../artifacts/contracts/Covenant.sol/Covenant.json" with { type: "json" };
-import { ABI, fetchDecisionEvents, joinDecisions, resolveFromBlock, DEFAULT_LOOKBACK_BLOCKS, describeDecision, tokenName } from "../status-page/lib.mjs";
+import { ABI, fetchDecisionEvents, joinDecisions, resolveFromBlock, DEFAULT_LOOKBACK_BLOCKS, describeDecision, tokenName, bossFor, DENIAL_REASONS, guardedVsUnguarded } from "../status-page/lib.mjs";
 import { startForkNode, setupCovenant, buyAt } from "../scripts/lib/local-fork.js";
 
 // This suite exists because the bug it guards against was found by actually
@@ -95,12 +95,33 @@ describe("status page: real decision reads and the fork-boundary hang", function
     expect(tokenName(NVDAB)).to.equal("NVIDIA (NVDAB)");
     expect(tokenName(IMPERSONATOR_BSTOCKS)).to.equal(IMPERSONATOR_BSTOCKS.slice(0, 6) + "…" + IMPERSONATOR_BSTOCKS.slice(-4));
 
-    expect(describeDecision(denied, fmt)).to.match(/^Buy order: spend [\d.]+ USDT for .+ — denied: TokenNotAllowed\.$/);
+    expect(describeDecision(denied, fmt)).to.match(/^Buy order: spend [\d.]+ USDT for .+ — denied by 🚫 Forbidden Territory \(TokenNotAllowed\)\.$/);
     expect(describeDecision(denied, fmt)).to.not.include(IMPERSONATOR_BSTOCKS);
 
     expect(describeDecision(settled, fmt)).to.match(/^Buy order: spend [\d.]+ USDT for NVIDIA \(NVDAB\) — filled, received [\d.]+ NVIDIA \(NVDAB\) via aggregator\.$/);
 
     expect(describeDecision(cancelled, fmt)).to.match(/^Buy order: spend [\d.]+ USDT for .+ — allowed, then abandoned without trading\.$/);
+
+    // Guarded vs. Unguarded Twin: only meaningful for the real denial - an
+    // allowed/settled/cancelled decision has no "unguarded" counterfactual.
+    expect(guardedVsUnguarded(denied, fmt)).to.match(/^Guarded: refused by 🚫 Forbidden Territory, spent \$0\. Unguarded: a wallet with no mandate would have spent [\d.]+ USDT on this trade anyway\.$/);
+    expect(guardedVsUnguarded(settled, fmt)).to.equal(null);
+    expect(guardedVsUnguarded(cancelled, fmt)).to.equal(null);
+  });
+
+  it("bossFor (boss battles) names every real DenialReason except None, with ClosedMarketDrift flagged as the flagship", function () {
+    for (const reason of DENIAL_REASONS) {
+      if (reason === "None") {
+        expect(bossFor(reason)).to.equal(null);
+        continue;
+      }
+      const boss = bossFor(reason);
+      expect(boss, `expected a boss for ${reason}`).to.not.equal(null);
+      expect(boss!.name).to.be.a("string").with.length.greaterThan(0);
+      expect(boss!.icon).to.be.a("string").with.length.greaterThan(0);
+    }
+    expect(bossFor("ClosedMarketDrift")!.flagship).to.equal(true);
+    expect(bossFor("NotUnknownReason" as any)).to.equal(null);
   });
 
   it("resolveFromBlock defaults to a window that would itself cross the fork boundary on a fresh fork", function () {

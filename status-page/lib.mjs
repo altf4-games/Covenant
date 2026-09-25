@@ -32,6 +32,35 @@ export const EXECUTION_MODES = ["unknown", "pool", "rfq", "aggregator"];
 export const DEFAULT_LOOKBACK_BLOCKS = 500;
 export const DEFAULT_LOGS_TIMEOUT_MS = 8_000;
 
+// "Boss battles" (GAMIFICATION-PLAN-2026-09-25.md item 1): a name and icon
+// per real DenialReason, so a denial reads as "the mandate held" rather
+// than a bare enum value. Purely presentational - the raw reason string is
+// always shown too (in a title attribute), never hidden behind the name.
+// NotionalExceeded, PositionLimit and DailyNotionalExceeded (red-team H7's
+// cumulative cap) share one boss - they're the same underlying idea (a
+// dollar cap) at three different moments (per trade, per position, per
+// day). ClosedMarketDrift (Feature 1's flagship denial, the hackathon's own
+// opening problem) is flagged for the most visual weight in the CSS.
+export const BOSSES = {
+  MandateInactive: { name: "The Contract Expired", icon: "📜" },
+  MandateExpired: { name: "The Contract Expired", icon: "📜" },
+  TokenNotAllowed: { name: "Forbidden Territory", icon: "🚫" },
+  NotionalExceeded: { name: "The Spending Cap", icon: "💰" },
+  DailyLimitExceeded: { name: "Out of Moves for Today", icon: "🌙" },
+  OracleStale: { name: "The Oracle Went Quiet", icon: "🔮" },
+  OracleHalted: { name: "Market Closed Boss", icon: "🏛️" },
+  SlippageTooLoose: { name: "The Slippage Trap", icon: "🎯" },
+  PositionLimit: { name: "The Spending Cap", icon: "💰" },
+  DecisionOpen: { name: "One Battle at a Time", icon: "⚔️" },
+  ClosedMarketDrift: { name: "Weekend Gap Boss", icon: "🌉", flagship: true },
+  DailyNotionalExceeded: { name: "The Spending Cap", icon: "💰" },
+};
+
+/** `{ name, icon }` for a denial reason, or null for "None" / an unknown value. */
+export function bossFor(reason) {
+  return BOSSES[reason] ?? null;
+}
+
 // Real bStock names, for the plain-English decision feed - the same 14
 // tickers curated in skills/covenant-mandate/scripts/theme-map.json (real
 // BSC addresses, verified live against Binance's RWA token list,
@@ -75,7 +104,10 @@ export function describeDecision(d, fmtAmount) {
   const verb = c.side === "buy" ? "Buy" : "Sell";
   const base = `${verb} order: spend ${fmtAmount(c.amountIn)} ${spendLabel} for ${name}`;
 
-  if (!c.allowed) return `${base} — denied: ${c.reason}.`;
+  if (!c.allowed) {
+    const boss = bossFor(c.reason);
+    return boss ? `${base} — denied by ${boss.icon} ${boss.name} (${c.reason}).` : `${base} — denied: ${c.reason}.`;
+  }
   if (d.cancelled) return `${base} — allowed, then abandoned without trading.`;
   if (d.settle) {
     const receiveLabel = c.side === "buy" ? name : "USDT";
@@ -83,6 +115,26 @@ export function describeDecision(d, fmtAmount) {
     return `${base} — filled, received ${fmtAmount(d.settle.amountOut)} ${receiveLabel} via ${d.settle.executionMode}${belowNote}.`;
   }
   return `${base} — allowed, awaiting settlement.`;
+}
+
+/**
+ * "Guarded vs. Unguarded Twin" (GAMIFICATION-PLAN-2026-09-25.md item 2,
+ * "calculated, not duplicated"): dramatizes what a denial actually
+ * prevented, using only the same real `amountIn` Covenant already
+ * evaluated at commit time - not a second real trade, and not an invented
+ * number. Only meaningful for a real denial: an allowed trade has no
+ * "unguarded" counterfactual to show, since nothing was stopped.
+ */
+export function guardedVsUnguarded(d, fmtAmount) {
+  const c = d.commit;
+  if (!c || c.allowed) return null;
+  const spendLabel = c.side === "buy" ? "USDT" : tokenName(c.token);
+  const boss = bossFor(c.reason);
+  const bossLabel = boss ? `${boss.icon} ${boss.name}` : c.reason;
+  return (
+    `Guarded: refused by ${bossLabel}, spent $0. ` +
+    `Unguarded: a wallet with no mandate would have spent ${fmtAmount(c.amountIn)} ${spendLabel} on this trade anyway.`
+  );
 }
 
 /**

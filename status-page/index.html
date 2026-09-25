@@ -70,6 +70,9 @@
   .empty { color: var(--muted); font-style: italic; }
   a { color: var(--accent); }
   .plain-row td { border-bottom: 1px solid var(--border); padding: 2px 8px 8px; white-space: normal; color: var(--muted); font-style: italic; }
+  .boss { font-weight: 600; }
+  .boss-flagship { color: var(--deny); text-shadow: 0 0 8px rgba(229,72,77,.35); }
+  .twin-row td { font-style: normal; color: var(--allow); background: rgba(62,207,142,.06); }
 </style>
 </head>
 <body>
@@ -103,7 +106,7 @@
 
 <script type="module">
 import { ethers } from "https://cdn.jsdelivr.net/npm/ethers@6/+esm";
-import { ABI, fetchDecisionEvents, joinDecisions, resolveFromBlock, describeDecision } from "./lib.mjs";
+import { ABI, fetchDecisionEvents, joinDecisions, resolveFromBlock, describeDecision, bossFor, guardedVsUnguarded } from "./lib.mjs";
 
 const MAX_DECISIONS = 50;
 
@@ -192,6 +195,19 @@ function renderMandate(mandate, tradesUsedToday, stalenessBound, decisionTtl, ag
   `;
 }
 
+// "Boss battles" (GAMIFICATION-PLAN-2026-09-25.md item 1). The raw reason
+// string is always still there, in the title attribute - the name/icon is
+// decoration over it, never a replacement for the technical value.
+function reasonOrModeCell(c, d) {
+  if (c && !c.allowed) {
+    const boss = bossFor(c.reason);
+    if (!boss) return c.reason;
+    const flagshipClass = boss.flagship ? " boss-flagship" : "";
+    return `<span class="boss${flagshipClass}" title="${c.reason}">${boss.icon} ${boss.name}</span>`;
+  }
+  return d.settle ? d.settle.executionMode : "";
+}
+
 function statusBadge(d) {
   if (!d.commit) return `<span class="badge">SETTLED</span>`;
   if (!d.commit.allowed) return `<span class="badge deny">DENIED</span>`;
@@ -214,7 +230,11 @@ function renderDecisions(decisions) {
     // Plain-English feed: stock names and USD, not a hex reason index and a
     // truncated address - the technical row underneath still has the raw
     // fields for anyone who wants them.
-    const plain = describeDecision(d, (wei) => ethers.formatUnits(wei, 18));
+    const fmtWei = (wei) => ethers.formatUnits(wei, 18);
+    const plain = describeDecision(d, fmtWei);
+    // Guarded vs. Unguarded Twin: only real denials get a counterfactual row.
+    const twin = guardedVsUnguarded(d, fmtWei);
+    const twinRow = twin ? `<tr class="plain-row twin-row"><td colspan="9">${twin}</td></tr>` : "";
     return `
       <tr>
         <td>#${d.id}</td>
@@ -224,10 +244,11 @@ function renderDecisions(decisions) {
         <td>${c ? fmtAmount(c.amountIn) : "-"}</td>
         <td>${d.settle ? fmtAmount(d.settle.amountOut) : "-"}</td>
         <td>${statusBadge(d)}</td>
-        <td>${c && !c.allowed ? c.reason : d.settle ? d.settle.executionMode : ""}</td>
+        <td>${reasonOrModeCell(c, d)}</td>
         <td><span title="${c ? c.txHash : ""}">${c ? fmtAddr(c.txHash) : "-"}</span></td>
       </tr>
-      <tr class="plain-row"><td colspan="9">${plain}</td></tr>`;
+      <tr class="plain-row"><td colspan="9">${plain}</td></tr>
+      ${twinRow}`;
   }).join("");
 
   el.innerHTML = `
