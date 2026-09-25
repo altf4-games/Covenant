@@ -477,6 +477,15 @@ The CLI reference lists the command, but no page documents the policy format or 
 ### D11. `[DOCS]` Hosting trial duration is inconsistently stated
 The hackathon page says credits last "between 72 and 24h depending on the hosting you choose." The docs describe **one 48h trial**. The 24/72 split across hosting options is unreconciled anywhere.
 
+### D12. `[DOCS][PITFALL]` Mainnet ERC-8004 gas sponsorship is real infrastructure but explicitly not guaranteed - resolved from primary source, 2026-09-25
+Resolves open item #5 below. Cloned `bnb-chain/bnbagent-sdk` (the official Python/TS agent SDK) to check its config directly rather than trust the secondhand "Config says `use_paymaster=True`" note this project's own earlier research left unsourced.
+
+Confirmed real: `python/bnbagent/config.py`'s `bsc-mainnet` preset sets `use_paymaster=True` with a real MegaFuel mainnet endpoint (`https://bsc-megafuel.nodereal.io/`) and the real Identity Registry address (`0x8004A169FB4a3325136EB29fA0ceB6D2e539a432`, matching what `verified-facts.md` already independently confirmed on chain). So the wiring exists and isn't fabricated.
+
+But the SDK's own README is deliberately narrower than the config: "Registration is gas-free on BSC Testnet via MegaFuel paymaster sponsorship" - **testnet only, by name**, with no equivalent mainnet claim anywhere in the README or architecture docs, despite the config flag being identically `true` for both networks. `docs/twak.md` explains why the silence is warranted, not an oversight: "The paymaster still decides eligibility per sender, target, and method; rejection or RPC failure falls back to self-paid gas" - sponsorship is a per-request policy decision on MegaFuel's side, not something the config flag alone guarantees, and the SDK is written to fail over to a real paid transaction rather than fail outright when sponsorship is refused. The SDK's own test suite goes further for the neighboring ERC-8183 module, explicitly asserting mainnet sponsorship is **never** attempted there regardless of config (`"never wires a paymaster on bsc-mainnet (56), even with usePaymaster+paymasterUrl set"`, `ERC8183_PAYMASTER_CHAIN_IDS` containing only testnet's `97`) - a deliberate override the SDK authors added for a different module, which reads as a real signal that mainnet MegaFuel sponsorship wasn't trusted enough to leave unguarded even where the config says it's on. The ERC-8004 module itself carries no such override, so a real mainnet registration call would genuinely attempt sponsorship - it just isn't promised to succeed.
+**Practical answer for this project:** budget mainnet ERC-8004 registration as a real, if small, self-paid gas cost (a single registry write, well under $0.01 at current BSC gas prices per this project's own cost model) rather than assuming it is free. If MegaFuel does sponsor it, that's a bonus, not something to plan around.
+**Redesign suggestion:** state the mainnet sponsorship guarantee (or the lack of one) explicitly in the README's feature-bullet line, the same sentence that already names testnet - a reader currently has to cross-reference a fallback-error string and a different module's test suite to learn this.
+
 ---
 
 ## Open items to verify during the build
@@ -489,7 +498,7 @@ These are unknowns, not yet friction — resolve them and log the outcome.
 | 2 | Does `contract-call preview/execute` work against a self-deployed BSC contract? | Documented but untested. The deep-build strategy rests on it. |
 | 3 | Can you create an Agentic Wallet + enable developer mode in your jurisdiction? | Hard go/no-go for the primary plan. |
 | 4 | Web3 API key issuance — instant or manually reviewed? | Schedule risk. Apply day 1. |
-| 5 | Is mainnet ERC-8004 registration actually paymaster-sponsored? | Config says `use_paymaster=True`; sponsorship only *stated* for testnet. |
+| ~~5~~ | ~~Is mainnet ERC-8004 registration actually paymaster-sponsored?~~ | **Resolved 2026-09-25, see friction D12.** Real infrastructure, not fabricated, but not guaranteed - the SDK's own README only promises testnet, and the paymaster can reject per-request and fall back to self-paid gas. Budget it as a real small gas cost. |
 | 6 | AWS Bedrock AgentCore $/day for a persistent agent | The single unquantified cost. Not documented by BNB. |
 | 7 | Authoritative bStocks redemption-hours policy | Resolves B5. Check the prospectus/FAQ. |
 | 8 | Can the bStocks beacon admin add transfer restrictions later? | Centralisation risk (B11). |
