@@ -96,6 +96,16 @@ A real run from 2026-09-25, with a mandate of NVDAB only, $2 per trade, a $3 pos
 
 `test/chaos-fork.live.ts` runs this exact command as a subprocess and asserts on its real output.
 
+## Try-to-break-it live demo
+
+`scripts/try-to-break-it-demo.ts` (`npm run try-to-break-it`) is the "no trade happens unseen" claim, narrated: one honest commit → swap → settle for contrast, then a real swap with **no commit at all** - exactly what a compromised or careless agent would do - followed by `verify.ts`'s real `reconcile()` catching it live. Pure framing over already fork-tested plumbing (`setupCovenant`, `reconcile`), not new mechanism, so the same script is meant to run unchanged against the real mainnet deploy once that happens.
+
+```bash
+npm run try-to-break-it
+```
+
+`test/try-to-break-it-demo.live.ts` runs this exact command as a subprocess and asserts on its real output, the same pattern as the chaos-fork test above.
+
 ## Off-hours logging
 
 `scripts/off-hours-logger.ts` polls real NVDA across all three providers (halt/market status, on-chain price, and reference price where one exists) and appends one real JSON line to [`data/off-hours-log.jsonl`](data/off-hours-log.jsonl). Run it once:
@@ -292,3 +302,7 @@ Adding four fields to `DecisionCommitted` (H11's fix, so a decision is provable 
 ### A day-of check with a stopwatch problem: the H7 midnight-burst test denied everything until the timestamps had real headroom
 
 The first version of the H7 double-burst test tried to land a trade at 23:59:58 UTC and a second one four seconds after midnight. Both got denied. The reason: every transaction mines its own block, and Hardhat's default automining timestamp only guarantees strictly increasing, not real-clock-paced - two transactions after the first "23:59:58" jump had already pushed the chain to 00:00:00 before the deliberately-`23:59:58`-timed trade even landed, so both commits ended up in the *same* UTC day and the cumulative cap correctly (but confusingly) denied the second one. Fixed by giving the pre-midnight side fifteen seconds of headroom and the post-midnight side twenty, rather than shaving the gap to the literal minimum the scenario describes.
+
+### The try-to-break-it demo settled its own honest trade with the quote, not the real fill
+
+The first version of `try-to-break-it-demo.ts` (the live "no trade happens unseen" narration) passed the quote's `quotedOut` to `settle`, instead of the real ERC-20 Transfer amount from the swap receipt - the exact mistake friction-log C17 documents and the rest of this codebase is careful to avoid. `scripts/verify.ts`'s own `reconcile()`, run inside the same script as the demo's punchline, caught it immediately: the honest trade came back with 0 matched decisions instead of 1, because the settled amount didn't match what the wallet really received. Fixed by reading the real `Transfer` log off the swap receipt, the same pattern already used in `test/verify.live.ts` and `test/Covenant.fork.ts`. A script whose whole point is proving nothing slips past unnoticed almost shipped with exactly that kind of unnoticed error in itself.
