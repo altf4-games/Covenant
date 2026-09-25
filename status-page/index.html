@@ -95,16 +95,16 @@
   </div>
 
   <div class="panel">
-    <h2>Attestations (most recent first)</h2>
+    <h2>Decisions (most recent first)</h2>
     <div id="attestations" class="empty">Not loaded yet.</div>
   </div>
 </main>
 
 <script type="module">
 import { ethers } from "https://cdn.jsdelivr.net/npm/ethers@6/+esm";
-import { ABI, DENIAL_REASONS, fetchAttestations, resolveFromBlock } from "./lib.mjs";
+import { ABI, fetchDecisionEvents, joinDecisions, resolveFromBlock } from "./lib.mjs";
 
-const MAX_ATTESTATIONS = 50;
+const MAX_DECISIONS = 50;
 
 const $ = (id) => document.getElementById(id);
 
@@ -151,26 +151,23 @@ async function load() {
     const provider = new ethers.JsonRpcProvider(rpcUrl);
     const covenant = new ethers.Contract(contractAddress, ABI, provider);
 
-    const [mandate, tradesUsedToday, stalenessBound, latestBlock] = await Promise.all([
+    const [mandate, tradesUsedToday, stalenessBound, decisionTtl, agent, latestBlock] = await Promise.all([
       covenant.mandate(),
       covenant.tradesUsedToday(),
       covenant.stalenessBound(),
+      covenant.decisionTtl(),
+      covenant.agent(),
       provider.getBlockNumber(),
     ]);
 
-    renderMandate(mandate, tradesUsedToday, stalenessBound);
+    renderMandate(mandate, tradesUsedToday, stalenessBound, decisionTtl, agent);
 
-    // fetchAttestations (status-page/lib.mjs) wraps this in a real timeout -
-    // see its own doc comment for why that's not optional. Against a forked
-    // RPC, a fromBlock before the fork's own starting block hangs
-    // Hardhat's eth_getLogs forever with no error at all (confirmed live,
-    // exact boundary pinned down - docs/partner-feedback/friction-log.md
-    // B16); this is what turns that into a bounded, explained failure
-    // instead of a UI that spins forever with zero feedback.
-    const explicitFromBlock = $("fromBlock").value.trim();
-    const fromBlock = resolveFromBlock(explicitFromBlock, latestBlock);
-    const events = await fetchAttestations(covenant, { fromBlock });
-    renderAttestations(events.slice(-MAX_ATTESTATIONS).reverse());
+    // fetchDecisionEvents (lib.mjs) races eth_getLogs against a timeout:
+    // against a forked RPC, a fromBlock before the fork point hangs forever
+    // with no error (friction-log.md B16).
+    const fromBlock = resolveFromBlock($("fromBlock").value.trim(), latestBlock);
+    const events = await fetchDecisionEvents(covenant, { fromBlock });
+    renderDecisions(joinDecisions(events).slice(-MAX_DECISIONS).reverse());
   } catch (err) {
     console.error(err);
     setError(err?.message ?? String(err));
@@ -179,48 +176,58 @@ async function load() {
   }
 }
 
-function renderMandate(mandate, tradesUsedToday, stalenessBound) {
+function renderMandate(mandate, tradesUsedToday, stalenessBound, decisionTtl, agent) {
   const el = $("mandate");
   el.classList.remove("empty");
-  const [active, maxNotionalPerTrade, maxTradesPerDay, expiry] = mandate;
+  const [active, maxNotionalPerTradeUsd, maxTradesPerDay, expiry] = mandate;
   el.innerHTML = `
     <div class="stat"><div class="label">Active</div><div class="value">${active ? "yes" : "no"}</div></div>
-    <div class="stat"><div class="label">Max notional / trade</div><div class="value">${fmtAmount(maxNotionalPerTrade)}</div></div>
+    <div class="stat"><div class="label">Max per trade</div><div class="value">$${fmtAmount(maxNotionalPerTradeUsd)}</div></div>
     <div class="stat"><div class="label">Trades today</div><div class="value">${tradesUsedToday} / ${maxTradesPerDay}</div></div>
     <div class="stat"><div class="label">Expires</div><div class="value">${fmtTime(expiry)}</div></div>
     <div class="stat"><div class="label">Oracle staleness bound</div><div class="value">${stalenessBound}s</div></div>
+    <div class="stat"><div class="label">Decision valid for</div><div class="value">${decisionTtl}s</div></div>
+    <div class="stat"><div class="label">Agent</div><div class="value addr" title="${agent}">${fmtAddr(agent)}</div></div>
   `;
 }
 
-function renderAttestations(events) {
+function statusBadge(d) {
+  if (!d.commit) return `<span class="badge">SETTLED</span>`;
+  if (!d.commit.allowed) return `<span class="badge deny">DENIED</span>`;
+  if (d.cancelled) return `<span class="badge">CANCELLED</span>`;
+  if (d.settle) return `<span class="badge allow">${d.settle.belowMin ? "SETTLED, BELOW MIN" : "SETTLED"}</span>`;
+  return `<span class="badge allow">ALLOWED</span>`;
+}
+
+function renderDecisions(decisions) {
   const el = $("attestations");
-  if (events.length === 0) {
+  if (decisions.length === 0) {
     el.classList.add("empty");
-    el.textContent = "No Attestation events found in the scanned block range.";
+    el.textContent = "No decisions found in the scanned block range.";
     return;
   }
   el.classList.remove("empty");
 
-  const rows = events.map((e) => {
-    const { caller, tokenOut, amountIn, amountOut, allowed, reason } = e.args;
-    const reasonLabel = DENIAL_REASONS[Number(reason)] ?? `unknown(${reason})`;
+  const rows = decisions.map((d) => {
+    const c = d.commit;
     return `
       <tr>
-        <td>${e.blockNumber}</td>
-        <td class="addr" title="${caller}">${fmtAddr(caller)}</td>
-        <td class="addr" title="${tokenOut}">${fmtAddr(tokenOut)}</td>
-        <td>${fmtAmount(amountIn)}</td>
-        <td>${allowed ? fmtAmount(amountOut) : "-"}</td>
-        <td><span class="badge ${allowed ? "allow" : "deny"}">${allowed ? "ALLOW" : "DENY"}</span></td>
-        <td>${reasonLabel}</td>
-        <td><a href="#" onclick="return false;" title="${e.transactionHash}">${fmtAddr(e.transactionHash)}</a></td>
+        <td>#${d.id}</td>
+        <td>${c ? c.blockNumber : "-"}</td>
+        <td>${c ? c.side : "-"}</td>
+        <td class="addr" title="${c ? c.token : ""}">${c ? fmtAddr(c.token) : "-"}</td>
+        <td>${c ? fmtAmount(c.amountIn) : "-"}</td>
+        <td>${d.settle ? fmtAmount(d.settle.amountOut) : "-"}</td>
+        <td>${statusBadge(d)}</td>
+        <td>${c && !c.allowed ? c.reason : d.settle ? d.settle.executionMode : ""}</td>
+        <td><span title="${c ? c.txHash : ""}">${c ? fmtAddr(c.txHash) : "-"}</span></td>
       </tr>`;
   }).join("");
 
   el.innerHTML = `
     <table>
       <thead>
-        <tr><th>Block</th><th>Caller</th><th>Token</th><th>Amount in</th><th>Amount out</th><th>Result</th><th>Reason</th><th>Tx</th></tr>
+        <tr><th>Decision</th><th>Block</th><th>Side</th><th>Token</th><th>Amount in</th><th>Filled</th><th>Status</th><th>Reason / mode</th><th>Commit tx</th></tr>
       </thead>
       <tbody>${rows}</tbody>
     </table>`;

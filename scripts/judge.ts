@@ -1,174 +1,143 @@
 /**
- * Judge-runnable demo (Phase 2 addendum #2 / Phase 4,
- * docs/research/competitor-derived-features.md).
+ * Judge-runnable verification: given a deployed Covenant and a list of
+ * transaction hashes, re-fetch each real receipt from chain, find
+ * Covenant's own event in it, and decode it - without trusting anything
+ * this project says about the transaction.
  *
  * A judge doesn't have this project's Agentic Wallet, developer mode, or
- * bStock jurisdiction clearance - they can't reproduce a live trade
- * themselves. What they *can* do is verify, independently, that the real
- * transactions this project claims happened, actually happened, and
- * decoded to what the README says they decoded to. This script does that:
- * read the current on-chain mandate state, then re-fetch each listed
- * transaction's real receipt from chain, find its Attestation event, and
- * decode it - allow/deny and the exact typed reason - without trusting
- * anything this project says about it.
- *
- * This is the plumbing only (Phase 2 addendum): built and tested now
- * against the fork, with real transactions this session generates itself.
- * data/judge-tx-hashes.json stays empty until Phase 3 provides real BSC
- * mainnet tx hashes - pointing this at mainnet then is a config change
- * (RPC URL + contract address + that file), not new development.
+ * bStock jurisdiction clearance, so they can't reproduce a trade. They can
+ * check that each claimed decision really happened and really decoded to
+ * what the README says. For the stronger check - that every real trade in
+ * the wallet maps to a decision - see scripts/verify.ts, which builds on
+ * the decoders here.
  *
  * Usage:
- *   COVENANT_ADDRESS=0x... npx tsx scripts/judge.ts
- *   (optionally BSC_RPC_URL=..., and data/judge-tx-hashes.json populated)
+ *   COVENANT_ADDRESS=0x... npm run judge
+ *   (tx hashes from JUDGE_TX_HASHES, comma-separated, or data/judge-tx-hashes.json)
  *
- * RPC failover: a judge running this has no reason to trust that one
- * free-tier RPC is up the moment they try it - the project's own friction
- * log (B12-B14) documents real flakiness on exactly this class of endpoint.
- * BSC_RPC_URL, if set, is tried first; otherwise this falls back through
- * cli.mjs's own DEFAULT_BSC_RPCS list (the same one `survey` already
- * depends on) rather than hardcoding a single endpoint.
+ * RPC failover: BSC_RPC_URL, if set, is tried first, then cli.mjs's
+ * DEFAULT_BSC_RPCS. A judge shouldn't depend on one free endpoint staying
+ * up (friction-log.md B12-B14).
  */
 import { readFile } from "node:fs/promises";
 import { SELECTORS, DENIAL_REASONS, jsonRpcWithFailover, ethCallWithFailover, DEFAULT_BSC_RPCS } from "../skills/covenant-mandate/scripts/cli.mjs";
 
-// cli.mjs keeps its own asBool/asUint private - small enough to duplicate
-// here rather than widen that file's export surface for two one-liners.
 const slot = (data: string, i: number) => "0x" + data.replace(/^0x/, "").slice(i * 64, i * 64 + 64);
 const asBool = (data: string, i: number) => BigInt(slot(data, i)) !== 0n;
 const asUint = (data: string, i: number) => BigInt(slot(data, i));
 
-// keccak256("Attestation(address,address,uint256,uint256,bool,uint8)") -
-// computed once with ethers and cross-checked against a real Attestation
-// log from this project's own fork test transactions (same verification
-// discipline as the function selectors in cli.mjs - see that file's
-// comment for why this isn't computed at runtime).
-const ATTESTATION_TOPIC = "0xacd51d375387877499961a137980c39a84aa7985463fa41e068cb224c98838fe";
+// Event topic hashes, taken from the compiled ABI (ethers' Interface
+// getEvent().topicHash) rather than typed by hand, and cross-checked
+// against real logs in test/judge.live.ts.
+export const TOPICS = {
+  DecisionCommitted: "0xb149ce5777ae975b7ac2254c0af8468715185b45df1aa8c2312e7f7505e3bed1",
+  DecisionSettled: "0x5f5f16943bfa53515eb2d5089225b2c96b0e1a906fe47635ec6da118af7992b9",
+  DecisionCancelled: "0xf825ba484bb648876e5bc189a2b67360ce0c51019c4f271f406cf58ddcc4961d",
+};
 
-// keccak256("ChallengeResolved(uint256,bool,uint256)") - Phase 2.5's
-// slashable guard. Computed once with ethers, same verification discipline
-// as ATTESTATION_TOPIC above; cross-checked against a real ChallengeResolved
-// log from test/Covenant.fork.ts's slashable-guard fork test.
-const CHALLENGE_RESOLVED_TOPIC = "0x37b4c820a08cf4a6b36e86c12f351c8de017e389247b2c8c5151cde2f37f85ee";
+export const SIDE_NAMES = ["buy", "sell"];
+export const EXECUTION_MODE_NAMES = ["unknown", "pool", "rfq", "aggregator"];
 
 const TX_HASHES_FILE = new URL("../data/judge-tx-hashes.json", import.meta.url).pathname;
-const CHALLENGE_TX_HASHES_FILE = new URL("../data/judge-challenge-tx-hashes.json", import.meta.url).pathname;
 
-interface VerifiedAttestation {
+export type RpcTarget = string | string[];
+export const asRpcList = (target: RpcTarget): string[] => (Array.isArray(target) ? target : [target]);
+
+type Log = { address: string; topics: string[]; data: string };
+
+export interface CommittedDecision {
+  kind: "commit";
+  id: string;
+  token: string;
+  side: string;
+  allowed: boolean;
+  reason: string;
+  amountIn: string;
+  quotedOut: string;
+  minOut: string;
+  quoteRef: string;
+  researchRef: string;
+  expiresAt: number;
+}
+
+export interface SettledDecision {
+  kind: "settle";
+  id: string;
+  swapTxHash: string;
+  amountOut: string;
+  executionMode: string;
+  belowMin: boolean;
+}
+
+export interface CancelledDecision {
+  kind: "cancel";
+  id: string;
+}
+
+export type DecodedEvent = CommittedDecision | SettledDecision | CancelledDecision;
+
+/** Decodes one of Covenant's decision events from a raw log, or null. */
+export function decodeCovenantLog(log: Log): DecodedEvent | null {
+  const topic = log.topics[0]?.toLowerCase();
+  const data = log.data;
+  if (topic === TOPICS.DecisionCommitted) {
+    const reasonIndex = Number(asUint(data, 2));
+    return {
+      kind: "commit",
+      id: BigInt(log.topics[1]).toString(),
+      token: "0x" + log.topics[2].slice(-40),
+      side: SIDE_NAMES[Number(asUint(data, 0))] ?? "unknown",
+      allowed: asBool(data, 1),
+      reason: DENIAL_REASONS[reasonIndex] ?? `UNKNOWN(${reasonIndex})`,
+      amountIn: asUint(data, 3).toString(),
+      quotedOut: asUint(data, 4).toString(),
+      minOut: asUint(data, 5).toString(),
+      quoteRef: slot(data, 6),
+      researchRef: slot(data, 7),
+      expiresAt: Number(asUint(data, 8)),
+    };
+  }
+  if (topic === TOPICS.DecisionSettled) {
+    return {
+      kind: "settle",
+      id: BigInt(log.topics[1]).toString(),
+      swapTxHash: log.topics[2],
+      amountOut: asUint(data, 0).toString(),
+      executionMode: EXECUTION_MODE_NAMES[Number(asUint(data, 1))] ?? "unknown",
+      belowMin: asBool(data, 2),
+    };
+  }
+  if (topic === TOPICS.DecisionCancelled) {
+    return { kind: "cancel", id: BigInt(log.topics[1]).toString() };
+  }
+  return null;
+}
+
+export interface VerifiedTx {
   txHash: string;
   ok: boolean;
   detail: string;
   blockNumber?: string;
-  caller?: string;
-  tokenOut?: string;
-  amountIn?: string;
-  amountOut?: string;
-  allowed?: boolean;
-  reason?: string;
-}
-
-// Accepts a single RPC (tests pin this to one local forked node - no
-// failover needed or wanted there) or a list (the real judge-facing path,
-// where depending on exactly one free-tier endpoint being up is the risk
-// this exists to avoid - see the module doc comment). Reuses cli.mjs's own
-// failover helpers - the same ones `survey` depends on - rather than a
-// second, separate implementation of the same try-each-RPC loop.
-type RpcTarget = string | string[];
-const asRpcList = (target: RpcTarget): string[] => (Array.isArray(target) ? target : [target]);
-
-/**
- * Re-fetches a transaction's real receipt and independently decodes its
- * Attestation log. Does not trust anything about the transaction except
- * what's actually in the receipt returned by the RPC.
- */
-export async function verifyAttestationTx(rpcTarget: RpcTarget, covenantAddress: string, txHash: string): Promise<VerifiedAttestation> {
-  const { result: receipt } = await jsonRpcWithFailover("eth_getTransactionReceipt", [txHash], { rpcUrls: asRpcList(rpcTarget) });
-  if (!receipt) {
-    return { txHash, ok: false, detail: "no receipt found - transaction does not exist on this chain" };
-  }
-  if (receipt.status !== "0x1") {
-    return { txHash, ok: false, detail: `transaction reverted (status=${receipt.status})` };
-  }
-
-  const log = (receipt.logs as Array<{ address: string; topics: string[]; data: string }>).find(
-    (l) => l.address.toLowerCase() === covenantAddress.toLowerCase() && l.topics[0]?.toLowerCase() === ATTESTATION_TOPIC,
-  );
-  if (!log) {
-    return { txHash, ok: false, detail: "no Attestation event found from this contract in this transaction's receipt", blockNumber: receipt.blockNumber };
-  }
-
-  const caller = "0x" + log.topics[1].slice(-40);
-  const tokenOut = "0x" + log.topics[2].slice(-40);
-  const data = log.data.replace(/^0x/, "");
-  const amountIn = BigInt("0x" + data.slice(0, 64));
-  const amountOut = BigInt("0x" + data.slice(64, 128));
-  const allowed = BigInt("0x" + data.slice(128, 192)) !== 0n;
-  const reasonIndex = Number(BigInt("0x" + data.slice(192, 256)));
-
-  return {
-    txHash,
-    ok: true,
-    detail: "verified",
-    blockNumber: receipt.blockNumber,
-    caller,
-    tokenOut,
-    amountIn: amountIn.toString(),
-    amountOut: amountOut.toString(),
-    allowed,
-    reason: DENIAL_REASONS[reasonIndex] ?? `UNKNOWN(${reasonIndex})`,
-  };
-}
-
-interface VerifiedChallengeResolution {
-  txHash: string;
-  ok: boolean;
-  detail: string;
-  blockNumber?: string;
-  challengeId?: string;
-  upheld?: boolean;
-  slashedAmount?: string;
+  events?: DecodedEvent[];
 }
 
 /**
- * Re-fetches a challenge-resolution transaction's real receipt and
- * independently decodes its ChallengeResolved log - same discipline as
- * verifyAttestationTx: nothing here is trusted except what's actually in
- * the receipt the RPC returns.
+ * Re-fetches a transaction's real receipt and decodes every Covenant
+ * decision event in it. Trusts nothing but the receipt the RPC returns.
  */
-export async function verifyChallengeResolutionTx(
-  rpcTarget: RpcTarget,
-  covenantAddress: string,
-  txHash: string,
-): Promise<VerifiedChallengeResolution> {
+export async function verifyTx(rpcTarget: RpcTarget, covenantAddress: string, txHash: string): Promise<VerifiedTx> {
   const { result: receipt } = await jsonRpcWithFailover("eth_getTransactionReceipt", [txHash], { rpcUrls: asRpcList(rpcTarget) });
-  if (!receipt) {
-    return { txHash, ok: false, detail: "no receipt found - transaction does not exist on this chain" };
-  }
-  if (receipt.status !== "0x1") {
-    return { txHash, ok: false, detail: `transaction reverted (status=${receipt.status})` };
-  }
+  if (!receipt) return { txHash, ok: false, detail: "no receipt found - transaction does not exist on this chain" };
+  if (receipt.status !== "0x1") return { txHash, ok: false, detail: `transaction reverted (status=${receipt.status})` };
 
-  const log = (receipt.logs as Array<{ address: string; topics: string[]; data: string }>).find(
-    (l) => l.address.toLowerCase() === covenantAddress.toLowerCase() && l.topics[0]?.toLowerCase() === CHALLENGE_RESOLVED_TOPIC,
-  );
-  if (!log) {
-    return { txHash, ok: false, detail: "no ChallengeResolved event found from this contract in this transaction's receipt", blockNumber: receipt.blockNumber };
+  const events = (receipt.logs as Log[])
+    .filter((l) => l.address.toLowerCase() === covenantAddress.toLowerCase())
+    .map(decodeCovenantLog)
+    .filter((e): e is DecodedEvent => e !== null);
+  if (events.length === 0) {
+    return { txHash, ok: false, detail: "no Covenant decision event from this contract in this receipt", blockNumber: receipt.blockNumber };
   }
-
-  const challengeId = BigInt(log.topics[1]);
-  const data = log.data.replace(/^0x/, "");
-  const upheld = BigInt("0x" + data.slice(0, 64)) !== 0n;
-  const slashedAmount = BigInt("0x" + data.slice(64, 128));
-
-  return {
-    txHash,
-    ok: true,
-    detail: "verified",
-    blockNumber: receipt.blockNumber,
-    challengeId: challengeId.toString(),
-    upheld,
-    slashedAmount: slashedAmount.toString(),
-  };
+  return { txHash, ok: true, detail: "verified", blockNumber: receipt.blockNumber, events };
 }
 
 export async function readTxHashList(): Promise<string[]> {
@@ -176,63 +145,43 @@ export async function readTxHashList(): Promise<string[]> {
     return process.env.JUDGE_TX_HASHES.split(",").map((h) => h.trim()).filter(Boolean);
   }
   try {
-    const raw = await readFile(TX_HASHES_FILE, "utf8");
-    const parsed = JSON.parse(raw);
+    const parsed = JSON.parse(await readFile(TX_HASHES_FILE, "utf8"));
     return Array.isArray(parsed) ? parsed : [];
   } catch {
     return [];
   }
 }
 
-export async function readChallengeTxHashList(): Promise<string[]> {
-  if (process.env.JUDGE_CHALLENGE_TX_HASHES) {
-    return process.env.JUDGE_CHALLENGE_TX_HASHES.split(",").map((h) => h.trim()).filter(Boolean);
-  }
-  try {
-    const raw = await readFile(CHALLENGE_TX_HASHES_FILE, "utf8");
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
-
-export async function runJudge(
-  rpcTarget: RpcTarget,
-  covenantAddress: string,
-  txHashes: string[],
-  challengeTxHashes: string[] = [],
-) {
+export async function readMandate(rpcTarget: RpcTarget, covenantAddress: string) {
   const rpcUrls = asRpcList(rpcTarget);
-  const { result: mandateRaw } = await ethCallWithFailover(covenantAddress, SELECTORS.mandate, { rpcUrls });
-  const mandate = {
-    active: asBool(mandateRaw, 0),
-    maxNotionalPerTrade: asUint(mandateRaw, 1).toString(),
-    maxTradesPerDay: asUint(mandateRaw, 2).toString(),
-    expiry: asUint(mandateRaw, 3).toString(),
-  };
-
-  const results = await Promise.all(txHashes.map((h) => verifyAttestationTx(rpcUrls, covenantAddress, h)));
-  const challengeResults = await Promise.all(
-    challengeTxHashes.map((h) => verifyChallengeResolutionTx(rpcUrls, covenantAddress, h)),
-  );
-
+  const { result: raw } = await ethCallWithFailover(covenantAddress, SELECTORS.mandate, { rpcUrls });
   return {
-    mandate,
-    results,
-    challengeResults,
-    allVerified:
-      results.length + challengeResults.length > 0 &&
-      results.every((r) => r.ok) &&
-      challengeResults.every((r) => r.ok),
+    active: asBool(raw, 0),
+    maxNotionalPerTradeUsd: asUint(raw, 1).toString(),
+    maxTradesPerDay: asUint(raw, 2).toString(),
+    expiry: asUint(raw, 3).toString(),
   };
+}
+
+export async function runJudge(rpcTarget: RpcTarget, covenantAddress: string, txHashes: string[]) {
+  const rpcUrls = asRpcList(rpcTarget);
+  const mandate = await readMandate(rpcUrls, covenantAddress);
+  const results = await Promise.all(txHashes.map((h) => verifyTx(rpcUrls, covenantAddress, h)));
+  return { mandate, results, allVerified: results.length > 0 && results.every((r) => r.ok) };
+}
+
+function describeEvent(e: DecodedEvent): string {
+  if (e.kind === "commit") {
+    return `commit #${e.id} ${e.side} ${e.token} -> ${e.allowed ? "ALLOWED" : `DENIED (${e.reason})`} amountIn=${e.amountIn} minOut=${e.minOut}`;
+  }
+  if (e.kind === "settle") {
+    return `settle #${e.id} swap=${e.swapTxHash} amountOut=${e.amountOut} mode=${e.executionMode}${e.belowMin ? " BELOW MINIMUM" : ""}`;
+  }
+  return `cancel #${e.id}`;
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   (async () => {
-    // BSC_RPC_URL, if set, is tried first; DEFAULT_BSC_RPCS (publicnode,
-    // defibit, binance dataseed - the same list `survey` already relies on)
-    // backs it up, so a judge isn't betting the whole run on one endpoint.
     const rpcUrls = [process.env.BSC_RPC_URL, ...DEFAULT_BSC_RPCS].filter((u): u is string => Boolean(u));
     const covenantAddress = process.env.COVENANT_ADDRESS;
     if (!covenantAddress) {
@@ -246,54 +195,23 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     console.log(`  rpc candidates: ${rpcUrls.join(", ")}\n`);
 
     const txHashes = await readTxHashList();
-    const challengeTxHashes = await readChallengeTxHashList();
-    if (txHashes.length === 0 && challengeTxHashes.length === 0) {
-      console.log("No transactions listed in data/judge-tx-hashes.json, data/judge-challenge-tx-hashes.json, JUDGE_TX_HASHES, or JUDGE_CHALLENGE_TX_HASHES - showing mandate state only.\n");
-    }
+    if (txHashes.length === 0) console.log("No transactions listed in data/judge-tx-hashes.json or JUDGE_TX_HASHES - showing mandate state only.\n");
 
-    const { mandate, results, challengeResults, allVerified } = await runJudge(
-      rpcUrls,
-      covenantAddress,
-      txHashes,
-      challengeTxHashes,
-    );
-
+    const { mandate, results, allVerified } = await runJudge(rpcUrls, covenantAddress, txHashes);
     console.log("Mandate (read live from chain):");
-    console.log(`  active:              ${mandate.active}`);
-    console.log(`  maxNotionalPerTrade: ${mandate.maxNotionalPerTrade}`);
-    console.log(`  maxTradesPerDay:     ${mandate.maxTradesPerDay}`);
-    console.log(`  expiry:              ${mandate.expiry}\n`);
+    console.log(`  active:                 ${mandate.active}`);
+    console.log(`  maxNotionalPerTradeUsd: ${mandate.maxNotionalPerTradeUsd}`);
+    console.log(`  maxTradesPerDay:        ${mandate.maxTradesPerDay}`);
+    console.log(`  expiry:                 ${mandate.expiry}\n`);
 
     for (const r of results) {
-      const status = r.ok ? "PASS" : "FAIL";
-      console.log(`[${status}] ${r.txHash}`);
-      if (r.ok) {
-        console.log(`    block=${r.blockNumber} allowed=${r.allowed} reason=${r.reason} amountIn=${r.amountIn} amountOut=${r.amountOut}`);
-      } else {
-        console.log(`    ${r.detail}`);
-      }
+      console.log(`[${r.ok ? "PASS" : "FAIL"}] ${r.txHash}`);
+      if (r.ok) for (const e of r.events!) console.log(`    block=${r.blockNumber} ${describeEvent(e)}`);
+      else console.log(`    ${r.detail}`);
     }
+    if (results.length > 0) console.log(`\n${results.filter((r) => r.ok).length}/${results.length} transactions independently verified.`);
 
-    if (results.length > 0) {
-      console.log(`\n${results.filter((r) => r.ok).length}/${results.length} attestation transactions independently verified.`);
-    }
-
-    if (challengeResults.length > 0) {
-      console.log("\nSlashable-guard challenge resolutions:");
-      for (const r of challengeResults) {
-        const status = r.ok ? "PASS" : "FAIL";
-        console.log(`[${status}] ${r.txHash}`);
-        if (r.ok) {
-          console.log(`    block=${r.blockNumber} challengeId=${r.challengeId} upheld=${r.upheld} slashedAmount=${r.slashedAmount}`);
-        } else {
-          console.log(`    ${r.detail}`);
-        }
-      }
-      console.log(`\n${challengeResults.filter((r) => r.ok).length}/${challengeResults.length} challenge resolutions independently verified.`);
-    }
-
-    const nothingToVerify = txHashes.length === 0 && challengeTxHashes.length === 0;
-    process.exitCode = allVerified || nothingToVerify ? 0 : 1;
+    process.exitCode = allVerified || txHashes.length === 0 ? 0 : 1;
   })().catch((error) => {
     console.error(error);
     process.exitCode = 1;

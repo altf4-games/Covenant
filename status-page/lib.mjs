@@ -1,43 +1,46 @@
 // Shared logic between status-page/index.html and its live test
-// (test/status-page.live.ts) - deliberately has no DOM dependency so it can
-// be imported and exercised directly in Node, the same pattern already used
-// for skills/covenant-mandate/scripts/cli.mjs and test/skill-cli.live.ts.
+// (test/status-page.live.ts). No DOM dependency, so it runs in Node too.
 
 export const ABI = [
-  "function mandate() view returns (bool active, uint256 maxNotionalPerTrade, uint256 maxTradesPerDay, uint256 expiry)",
+  "function mandate() view returns (bool active, uint256 maxNotionalPerTradeUsd, uint256 maxTradesPerDay, uint256 expiry)",
   "function tradesUsedToday() view returns (uint256)",
   "function stalenessBound() view returns (uint256)",
-  "event Attestation(address indexed caller, address indexed tokenOut, uint256 amountIn, uint256 amountOut, bool allowed, uint8 reason)",
+  "function decisionTtl() view returns (uint256)",
+  "function agent() view returns (address)",
+  "function hasOpenDecision() view returns (bool)",
+  "event DecisionCommitted(uint256 indexed id, address indexed token, uint8 side, bool allowed, uint8 reason, uint256 amountIn, uint256 quotedOut, uint256 minOut, bytes32 quoteRef, bytes32 researchRef, uint64 expiresAt)",
+  "event DecisionSettled(uint256 indexed id, bytes32 indexed swapTxHash, uint256 amountOut, uint8 executionMode, bool belowMin)",
+  "event DecisionCancelled(uint256 indexed id)",
 ];
 
+// Mirrors Covenant.DenialReason, in order.
 export const DENIAL_REASONS = [
   "None", "MandateInactive", "MandateExpired", "TokenNotAllowed",
   "NotionalExceeded", "DailyLimitExceeded", "OracleStale", "OracleHalted",
+  "SlippageTooLoose", "PositionLimit", "DecisionOpen",
 ];
+export const SIDES = ["buy", "sell"];
+export const EXECUTION_MODES = ["unknown", "pool", "rfq", "aggregator"];
 
 export const DEFAULT_LOOKBACK_BLOCKS = 500;
 export const DEFAULT_LOGS_TIMEOUT_MS = 8_000;
 
 /**
- * Reads Attestation events, bounded by a real client-side timeout.
+ * Reads all of Covenant's decision events in one eth_getLogs call, bounded
+ * by a client-side timeout.
  *
- * This exists because of a genuine Hardhat bug, not a hypothetical one:
- * against a *forked* RPC (`hardhat node --fork`), `eth_getLogs` hangs
- * indefinitely - no error, no timeout - the instant the queried range
- * includes even one block from before the fork point (confirmed live,
- * millisecond-precise boundary, docs/partner-feedback/friction-log.md B16).
- * ethers/ethers.js has no built-in per-call timeout for this, and we can't
- * fix Hardhat's fork provider from here, so the only real fix available is
- * to race the call against our own timeout and fail loudly with a message
- * that actually explains what's going on, instead of a UI that just spins
- * forever with zero feedback - which is what this page did before this was
- * added, confirmed by getting stuck on it live.
+ * The timeout exists because of a real Hardhat bug: against a forked RPC
+ * (`hardhat node --fork`), eth_getLogs hangs forever, with no error, as
+ * soon as the range includes a block from before the fork point
+ * (docs/partner-feedback/friction-log.md B16). ethers has no per-call
+ * timeout, so the call is raced against one that fails with an explanation
+ * instead of leaving the page spinning.
  *
  * @param {import("ethers").Contract} covenant
  * @param {{fromBlock: number, toBlock?: number | "latest", timeoutMs?: number}} options
  * @returns {Promise<import("ethers").EventLog[]>}
  */
-export async function fetchAttestations(covenant, { fromBlock, toBlock = "latest", timeoutMs = DEFAULT_LOGS_TIMEOUT_MS }) {
+export async function fetchDecisionEvents(covenant, { fromBlock, toBlock = "latest", timeoutMs = DEFAULT_LOGS_TIMEOUT_MS }) {
   let timer;
   const timeout = new Promise((_, reject) => {
     timer = setTimeout(() => {
@@ -54,10 +57,55 @@ export async function fetchAttestations(covenant, { fromBlock, toBlock = "latest
   });
 
   try {
-    return await Promise.race([covenant.queryFilter(covenant.filters.Attestation(), fromBlock, toBlock), timeout]);
+    const events = await Promise.race([covenant.queryFilter("*", fromBlock, toBlock), timeout]);
+    const wanted = new Set(["DecisionCommitted", "DecisionSettled", "DecisionCancelled"]);
+    return events.filter((e) => wanted.has(e.fragment?.name ?? e.eventName));
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * Joins commit, settle and cancel events into one record per decision id,
+ * oldest first. A decision whose commit falls outside the scanned range but
+ * whose settle falls inside it is kept, with `commit: null`.
+ */
+export function joinDecisions(events) {
+  const byId = new Map();
+  const get = (id) => {
+    const key = id.toString();
+    if (!byId.has(key)) byId.set(key, { id: key, commit: null, settle: null, cancelled: false });
+    return byId.get(key);
+  };
+  for (const e of events) {
+    const name = e.fragment?.name ?? e.eventName;
+    const args = e.args;
+    if (name === "DecisionCommitted") {
+      get(args.id).commit = {
+        token: args.token,
+        side: SIDES[Number(args.side)] ?? "unknown",
+        allowed: args.allowed,
+        reason: DENIAL_REASONS[Number(args.reason)] ?? `unknown(${args.reason})`,
+        amountIn: args.amountIn,
+        quotedOut: args.quotedOut,
+        minOut: args.minOut,
+        expiresAt: Number(args.expiresAt),
+        blockNumber: e.blockNumber,
+        txHash: e.transactionHash,
+      };
+    } else if (name === "DecisionSettled") {
+      get(args.id).settle = {
+        swapTxHash: args.swapTxHash,
+        amountOut: args.amountOut,
+        executionMode: EXECUTION_MODES[Number(args.executionMode)] ?? "unknown",
+        belowMin: args.belowMin,
+        txHash: e.transactionHash,
+      };
+    } else if (name === "DecisionCancelled") {
+      get(args.id).cancelled = true;
+    }
+  }
+  return [...byId.values()].sort((x, y) => Number(BigInt(x.id) - BigInt(y.id)));
 }
 
 export function resolveFromBlock(explicitFromBlock, latestBlock) {

@@ -1,8 +1,8 @@
 import { expect } from "chai";
-import { spawn, ChildProcess } from "node:child_process";
 import { ethers } from "ethers";
 import covenantArtifact from "../artifacts/contracts/Covenant.sol/Covenant.json" with { type: "json" };
-import { ABI, fetchAttestations, resolveFromBlock, DEFAULT_LOOKBACK_BLOCKS } from "../status-page/lib.mjs";
+import { ABI, fetchDecisionEvents, joinDecisions, resolveFromBlock, DEFAULT_LOOKBACK_BLOCKS } from "../status-page/lib.mjs";
+import { startForkNode, setupCovenant, buyAt } from "../scripts/lib/local-fork.js";
 
 // This suite exists because the bug it guards against was found by actually
 // driving the status page in a real browser, not by writing a test first -
@@ -11,7 +11,7 @@ import { ABI, fetchAttestations, resolveFromBlock, DEFAULT_LOOKBACK_BLOCKS } fro
 // queried range includes even the fork's own pinned starting block - only
 // blocks mined *after* that point, locally, are safe. We can't fix
 // Hardhat's fork provider from here, so what's actually under test is our
-// own defense: status-page/lib.mjs's fetchAttestations wraps the call in a
+// own defense: status-page/lib.mjs's fetchDecisionEvents wraps the call in a
 // real timeout. This suite proves two things with real data and a real
 // spawned node, not mocks: the safe path returns real events correctly and
 // fast, and the unsafe path fails fast and explains why instead of hanging
@@ -25,130 +25,96 @@ import { ABI, fetchAttestations, resolveFromBlock, DEFAULT_LOOKBACK_BLOCKS } fro
 // on a call that had worked moments earlier). The boundary-crossing test
 // below runs last for exactly that reason.
 const RPC_PORT = 8990;
-const RPC_URL = `http://127.0.0.1:${RPC_PORT}`;
-const BSC_FORK_URL = "https://bsc-mainnet.public.blastapi.io";
-const FUNDED_PRIVATE_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"; // hardhat node's well-known account #0
-
-const USDT = "0x55d398326f99059fF775485246999027B3197955";
 const NVDAB = "0x02fca66c1d1afb4e2a7884261eb00f63598a7436";
 const IMPERSONATOR_BSTOCKS = "0x2F701b108a9aF5558960325A0239D0a13c2C4444";
-const PANCAKE_V3_SWAP_ROUTER = "0x1b81D678ffb9C0263b24A97847620C99d213eB14";
+const SWAP_TX = ethers.keccak256(ethers.toUtf8Bytes("stand-in swap hash"));
 
-async function waitForRpc(url: string, timeoutMs: number): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      const res = await fetch(url, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ jsonrpc: "2.0", method: "eth_chainId", params: [], id: 1 }),
-      });
-      if (res.ok) return;
-    } catch {
-      // not up yet
-    }
-    await new Promise((r) => setTimeout(r, 300));
-  }
-  throw new Error(`RPC at ${url} did not become ready within ${timeoutMs}ms`);
-}
+describe("status page: real decision reads and the fork-boundary hang", function () {
+  this.timeout(180_000);
 
-describe("status page: real attestation reads and the fork-boundary hang", function () {
-  this.timeout(120_000);
-
-  let nodeProcess: ChildProcess;
-  let provider: ethers.JsonRpcProvider;
+  let node: Awaited<ReturnType<typeof startForkNode>>;
   let covenant: ethers.Contract;
   let forkStartBlock: number;
   let latestBlockAfterSeed: number;
 
   before(async function () {
-    nodeProcess = spawn(
-      "npx",
-      ["hardhat", "node", "--fork", BSC_FORK_URL, "--chain-id", "56", "--port", String(RPC_PORT)],
-      { cwd: new URL("..", import.meta.url).pathname, stdio: "ignore" },
-    );
-    await waitForRpc(RPC_URL, 60_000);
-
-    provider = new ethers.JsonRpcProvider(RPC_URL);
+    node = await startForkNode(RPC_PORT);
+    const provider = new ethers.JsonRpcProvider(node.rpcUrl);
     forkStartBlock = await provider.getBlockNumber();
 
-    const signer = new ethers.Wallet(FUNDED_PRIVATE_KEY, provider);
-    const factory = new ethers.ContractFactory(covenantArtifact.abi, covenantArtifact.bytecode, signer);
-    const deployed = await factory.deploy(USDT, PANCAKE_V3_SWAP_ROUTER, signer.address, 900);
-    await deployed.waitForDeployment();
-    const covenantAddress = await deployed.getAddress();
-    covenant = new ethers.Contract(covenantAddress, ABI, provider);
-    const covenantAsSigner = new ethers.Contract(covenantAddress, ABI.concat(["function guardedSwap(address,uint24,uint256,uint256) returns (uint256)"]), signer);
+    const env = await setupCovenant(node.rpcUrl);
+    covenant = new ethers.Contract(env.covenantAddress, ABI, provider);
+    const asAgent = new ethers.Contract(env.covenantAddress, covenantArtifact.abi, env.agent);
+    const a = buyAt(env.livePrice, 10n ** 18n);
 
-    // Two real, locally-mined events: both deny (neither token was ever
-    // allowlisted), so no approval or funding is needed - the deny path
-    // never touches a balance.
-    await (await covenantAsSigner.guardedSwap(IMPERSONATOR_BSTOCKS, 2500, 1n, 0n)).wait();
-    await (await covenantAsSigner.guardedSwap(NVDAB, 2500, 1n, 0n)).wait();
+    // Three real decisions, all mined locally after the fork point: a
+    // denial, an allowed trade that settles, and one that's cancelled.
+    await (await asAgent.commit(0, IMPERSONATOR_BSTOCKS, a.amountIn, a.quotedOut, a.minOut, ethers.ZeroHash, ethers.ZeroHash)).wait();
+    await (await asAgent.commit(0, NVDAB, a.amountIn, a.quotedOut, a.minOut, ethers.ZeroHash, ethers.ZeroHash)).wait();
+    await (await asAgent.settle(2n, SWAP_TX, a.quotedOut, 3)).wait();
+    await (await asAgent.commit(0, NVDAB, a.amountIn, a.quotedOut, a.minOut, ethers.ZeroHash, ethers.ZeroHash)).wait();
+    await (await asAgent.cancel(3n)).wait();
 
     latestBlockAfterSeed = await provider.getBlockNumber();
   });
 
   after(function () {
-    nodeProcess?.kill();
+    node?.stop();
   });
 
-  it("returns real events fast when the range stays within locally-mined, post-fork blocks", async function () {
-    // forkStartBlock itself needs the same remote lookup as any pre-fork
-    // block (confirmed live - it is the fork's pinned upstream block, not
-    // something EDR already has as "local" state); only the deployment and
-    // the two guardedSwap calls above, all mined after it, are safe.
+  it("returns real events fast when the range stays within locally-mined, post-fork blocks, joined per decision", async function () {
+    // forkStartBlock itself still needs the remote lookup (it's the fork's
+    // pinned upstream block); only blocks mined after it are safe.
     const fromBlock = forkStartBlock + 1;
 
     const start = Date.now();
-    const events = await fetchAttestations(covenant, { fromBlock, timeoutMs: 5_000 });
+    const events = await fetchDecisionEvents(covenant, { fromBlock, timeoutMs: 5_000 });
     const elapsedMs = Date.now() - start;
+    expect(elapsedMs).to.be.lessThan(2_000);
+    expect(events).to.have.length(5); // 3 commits, 1 settle, 1 cancel
 
-    expect(events).to.have.length(2);
-    expect(elapsedMs).to.be.lessThan(2_000); // real assertion: this must be fast, not just "eventually work"
+    const decisions = joinDecisions(events);
+    expect(decisions.map((d: any) => d.id)).to.deep.equal(["1", "2", "3"]);
 
-    const [first, second] = events;
-    expect((first as any).args.tokenOut.toLowerCase()).to.equal(IMPERSONATOR_BSTOCKS.toLowerCase());
-    expect((first as any).args.allowed).to.equal(false);
-    expect((second as any).args.tokenOut.toLowerCase()).to.equal(NVDAB.toLowerCase());
-    expect((second as any).args.allowed).to.equal(false);
+    const [denied, settled, cancelled] = decisions as any[];
+    expect(denied.commit.allowed).to.equal(false);
+    expect(denied.commit.reason).to.equal("TokenNotAllowed");
+    expect(denied.commit.token.toLowerCase()).to.equal(IMPERSONATOR_BSTOCKS.toLowerCase());
+
+    expect(settled.commit.allowed).to.equal(true);
+    expect(settled.settle.swapTxHash).to.equal(SWAP_TX);
+    expect(settled.settle.executionMode).to.equal("aggregator");
+
+    expect(cancelled.commit.allowed).to.equal(true);
+    expect(cancelled.cancelled).to.equal(true);
+    expect(cancelled.settle).to.equal(null);
   });
 
   it("resolveFromBlock defaults to a window that would itself cross the fork boundary on a fresh fork", function () {
-    // Documents *why* the default needs the timeout at all: on a chain this
-    // young (a handful of blocks past the fork point), even the page's own
-    // DEFAULT_LOOKBACK_BLOCKS default reaches back past where the fork
-    // started. This isn't a bug in resolveFromBlock - a 500-block default is
-    // reasonable for a real, long-lived mainnet deployment - it's exactly the
-    // scenario the timeout in fetchAttestations exists to handle gracefully.
+    // Why the default needs the timeout: on a chain this young, even the
+    // page's own DEFAULT_LOOKBACK_BLOCKS reaches past the fork point. That's
+    // reasonable for a long-lived mainnet deployment; the timeout is what
+    // makes it safe here.
     const defaultFromBlock = resolveFromBlock(undefined, latestBlockAfterSeed);
     expect(latestBlockAfterSeed - forkStartBlock).to.be.lessThan(DEFAULT_LOOKBACK_BLOCKS);
     expect(defaultFromBlock).to.be.lessThanOrEqual(forkStartBlock);
   });
 
   it("fails fast with a clear, actionable error when the range crosses the fork boundary, instead of hanging forever", async function () {
-    // Runs last deliberately - see the describe-level comment above. The
-    // exact bug this test exists for: querying from at-or-before
-    // forkStartBlock makes Hardhat's EDR fork provider proxy to the real
-    // upstream RPC for that portion, which hangs indefinitely. A short
-    // timeoutMs here keeps this test itself fast; the default in production
-    // (status-page/lib.mjs's DEFAULT_LOGS_TIMEOUT_MS) is longer.
+    // Runs last deliberately - see the comment at the top.
     const fromBlock = Math.max(0, forkStartBlock - 5);
-
     const start = Date.now();
     let caught: Error | undefined;
     try {
-      await fetchAttestations(covenant, { fromBlock, timeoutMs: 3_000 });
+      await fetchDecisionEvents(covenant, { fromBlock, timeoutMs: 3_000 });
     } catch (error) {
       caught = error as Error;
     }
     const elapsedMs = Date.now() - start;
 
-    expect(caught, "expected fetchAttestations to reject instead of hanging or resolving").to.not.equal(undefined);
+    expect(caught, "expected fetchDecisionEvents to reject instead of hanging or resolving").to.not.equal(undefined);
     expect(caught!.message).to.include("eth_getLogs timed out");
     expect(caught!.message).to.include("friction-log.md B16");
-    // The real point of this assertion: bounded by our own timeout, not by
-    // however long Hardhat's hang would otherwise take (which is: forever).
     expect(elapsedMs).to.be.lessThan(4_000);
   });
 });

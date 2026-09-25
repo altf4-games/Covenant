@@ -1,74 +1,35 @@
 import { expect } from "chai";
-import { spawn, ChildProcess } from "node:child_process";
 import { ethers } from "ethers";
 import covenantArtifact from "../artifacts/contracts/Covenant.sol/Covenant.json" with { type: "json" };
 import { COMMANDS } from "../skills/covenant-mandate/scripts/cli.mjs";
+import { startForkNode, setupCovenant, buyAt } from "../scripts/lib/local-fork.js";
 
 // The skill's cli.mjs is a standalone, zero-dep script meant to run against
 // a real HTTP RPC endpoint exactly like it would in production - not against
 // Hardhat's in-process EDR provider, which isn't reachable over HTTP from
 // another process. So this suite spawns a real `hardhat node --fork ...`
-// child process, deploys a real Covenant to it, and drives the skill's own
-// exported command functions against that real JSON-RPC server. This is
-// slower than an in-process test, but it's the only way to test the script
-// the way it's actually invoked.
+// child process, deploys a real Covenant to it with the real deploy script,
+// and drives the skill's own exported command functions against it.
 const RPC_PORT = 8989;
-const RPC_URL = `http://127.0.0.1:${RPC_PORT}`;
-const BSC_FORK_URL = "https://bsc-mainnet.public.blastapi.io";
-const FUNDED_PRIVATE_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"; // hardhat node's well-known account #0
-
-const USDT = "0x55d398326f99059fF775485246999027B3197955";
 const NVDAB = "0x02fca66c1d1afb4e2a7884261eb00f63598a7436";
-const PANCAKE_V3_SWAP_ROUTER = "0x1b81D678ffb9C0263b24A97847620C99d213eB14";
 const IMPERSONATOR_BSTOCKS = "0x2F701b108a9aF5558960325A0239D0a13c2C4444";
-
-async function waitForRpc(url: string, timeoutMs: number): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      const res = await fetch(url, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ jsonrpc: "2.0", method: "eth_chainId", params: [], id: 1 }),
-      });
-      if (res.ok) return;
-    } catch {
-      // not up yet
-    }
-    await new Promise((r) => setTimeout(r, 300));
-  }
-  throw new Error(`RPC at ${url} did not become ready within ${timeoutMs}ms`);
-}
+const E18 = 10n ** 18n;
 
 describe("covenant-mandate skill CLI (live, against a real spawned JSON-RPC node)", function () {
-  this.timeout(120_000);
+  this.timeout(180_000);
 
-  let nodeProcess: ChildProcess;
-  let covenantAddress: string;
+  let node: Awaited<ReturnType<typeof startForkNode>>;
+  let env: Awaited<ReturnType<typeof setupCovenant>>;
+  let rpcUrl: string;
 
   before(async function () {
-    nodeProcess = spawn(
-      "npx",
-      ["hardhat", "node", "--fork", BSC_FORK_URL, "--chain-id", "56", "--port", String(RPC_PORT)],
-      { cwd: new URL("..", import.meta.url).pathname, stdio: "ignore" },
-    );
-    await waitForRpc(RPC_URL, 60_000);
-
-    const provider = new ethers.JsonRpcProvider(RPC_URL);
-    const signer = new ethers.Wallet(FUNDED_PRIVATE_KEY, provider);
-    const factory = new ethers.ContractFactory(covenantArtifact.abi, covenantArtifact.bytecode, signer);
-    const covenant = await factory.deploy(USDT, PANCAKE_V3_SWAP_ROUTER, signer.address, 900);
-    await covenant.waitForDeployment();
-    covenantAddress = await covenant.getAddress();
-
-    await (await (covenant as any).setAllowedToken(NVDAB, true)).wait();
-    const latest = (await provider.getBlock("latest"))!.timestamp;
-    await (await (covenant as any).setMandate(ethers.parseUnits("50", 18), 10n, latest + 30 * 24 * 60 * 60)).wait();
-    await (await (covenant as any).updateOracle(NVDAB, false)).wait();
+    node = await startForkNode(RPC_PORT);
+    rpcUrl = node.rpcUrl;
+    env = await setupCovenant(rpcUrl, { maxNotionalUsd: "50" });
   });
 
   after(function () {
-    nodeProcess?.kill();
+    node?.stop();
   });
 
   describe("resolve (real, live ticker data)", function () {
@@ -152,53 +113,111 @@ describe("covenant-mandate skill CLI (live, against a real spawned JSON-RPC node
   });
 
   describe("check (real read calls against a real deployed Covenant)", function () {
-    it("reports the real allowed decision for real NVDAB within mandate limits", async function () {
+    it("reports the real allowed decision for a $1 NVDAB buy at the live price", async function () {
+      const a = buyAt(env.livePrice, E18);
       const result = await COMMANDS.check({
-        rpcUrl: RPC_URL,
-        covenantAddress,
+        rpcUrl,
+        covenantAddress: env.covenantAddress,
+        side: "buy",
         tokenAddress: NVDAB,
-        amountIn: "1000000000000000000",
+        amountIn: a.amountIn.toString(),
+        quotedOut: a.quotedOut.toString(),
+        minOut: a.minOut.toString(),
       });
-      expect(result.allowlisted).to.equal(true);
+      expect(result.token.allowed).to.equal(true);
+      expect(result.oracle.priceUsd).to.equal(env.livePrice.toString());
+      expect(result.mandate.decisionOpen).to.equal(false);
       expect(result.decision.allowed).to.equal(true);
       expect(result.decision.reason).to.equal("None");
     });
 
     it("reports NotionalExceeded for a real amount above the real mandate cap", async function () {
-      const result = await COMMANDS.check({
-        rpcUrl: RPC_URL,
-        covenantAddress,
-        tokenAddress: NVDAB,
-        amountIn: "999000000000000000000",
-      });
-      expect(result.decision.allowed).to.equal(false);
+      const a = buyAt(env.livePrice, 999n * E18);
+      const result = await COMMANDS.check({ rpcUrl, covenantAddress: env.covenantAddress, side: "buy", tokenAddress: NVDAB, amountIn: a.amountIn.toString(), quotedOut: a.quotedOut.toString(), minOut: a.minOut.toString() });
       expect(result.decision.reason).to.equal("NotionalExceeded");
     });
 
+    it("reports SlippageTooLoose for the amountOutMinimum=\"1\" pattern the old skill docs used (red-team H5)", async function () {
+      const a = buyAt(env.livePrice, E18);
+      const result = await COMMANDS.check({ rpcUrl, covenantAddress: env.covenantAddress, side: "buy", tokenAddress: NVDAB, amountIn: a.amountIn.toString(), quotedOut: a.quotedOut.toString(), minOut: "1" });
+      expect(result.decision.reason).to.equal("SlippageTooLoose");
+    });
+
     it("reports TokenNotAllowed for the real verified impersonator address", async function () {
-      const result = await COMMANDS.check({
-        rpcUrl: RPC_URL,
-        covenantAddress,
-        tokenAddress: IMPERSONATOR_BSTOCKS,
-        amountIn: "1",
-      });
-      expect(result.allowlisted).to.equal(false);
-      expect(result.decision.allowed).to.equal(false);
+      const result = await COMMANDS.check({ rpcUrl, covenantAddress: env.covenantAddress, side: "buy", tokenAddress: IMPERSONATOR_BSTOCKS, amountIn: "1", quotedOut: "1", minOut: "1" });
+      expect(result.token.allowed).to.equal(false);
       expect(result.decision.reason).to.equal("TokenNotAllowed");
+    });
+
+    it("rejects a side that isn't buy or sell instead of guessing", async function () {
+      try {
+        await COMMANDS.check({ rpcUrl, covenantAddress: env.covenantAddress, side: "short", tokenAddress: NVDAB, amountIn: "1", quotedOut: "1", minOut: "1" });
+        expect.fail("expected check to reject an unknown side");
+      } catch (err: any) {
+        expect(err.message).to.include("buy");
+      }
     });
   });
 
-  describe("build-swap-calldata", function () {
-    it("produces byte-identical calldata to ethers' own ABI encoder", async function () {
-      const { calldata } = await COMMANDS.buildSwapCalldata({
-        tokenOut: NVDAB,
-        fee: 2500,
-        amountIn: "1000000000000000000",
-        amountOutMinimum: "1",
+  describe("calldata builders: byte-identical to ethers, and accepted by the real contract", function () {
+    const iface = new ethers.Interface(covenantArtifact.abi);
+    const quoteRef = ethers.keccak256(ethers.toUtf8Bytes("real quote json"));
+
+    it("build-commit-calldata matches ethers' own encoder", async function () {
+      const a = buyAt(env.livePrice, E18);
+      const { calldata } = await COMMANDS.buildCommitCalldata({
+        side: "buy",
+        tokenAddress: NVDAB,
+        amountIn: a.amountIn.toString(),
+        quotedOut: a.quotedOut.toString(),
+        minOut: a.minOut.toString(),
+        quoteRef,
       });
-      const iface = new ethers.Interface(["function guardedSwap(address,uint24,uint256,uint256) returns (uint256)"]);
-      const expected = iface.encodeFunctionData("guardedSwap", [NVDAB, 2500, 1000000000000000000n, 1n]);
-      expect(calldata).to.equal(expected);
+      expect(calldata).to.equal(iface.encodeFunctionData("commit", [0, NVDAB, a.amountIn, a.quotedOut, a.minOut, quoteRef, ethers.ZeroHash]));
+    });
+
+    it("the skill's own commit, settle and cancel calldata drive the real contract end to end", async function () {
+      // The same bytes `baw contract-call --inputData` would carry on
+      // mainnet, sent here as real transactions from the agent key.
+      const covenant = new ethers.Contract(env.covenantAddress, covenantArtifact.abi, env.provider);
+      const a = buyAt(env.livePrice, E18);
+
+      const commitData = (await COMMANDS.buildCommitCalldata({ side: "buy", tokenAddress: NVDAB, amountIn: a.amountIn.toString(), quotedOut: a.quotedOut.toString(), minOut: a.minOut.toString(), quoteRef })).calldata;
+      const commitReceipt = await (await env.agent.sendTransaction({ to: env.covenantAddress, data: commitData })).wait();
+      const committed = commitReceipt!.logs.map((l) => covenant.interface.parseLog(l)).find((p) => p?.name === "DecisionCommitted")!;
+      expect(committed.args.allowed).to.equal(true);
+      const id = committed.args.id;
+
+      const swapTxHash = ethers.keccak256(ethers.toUtf8Bytes("stand-in swap hash for this calldata test"));
+      const settleData = (await COMMANDS.buildSettleCalldata({ decisionId: id.toString(), swapTxHash, amountOut: a.quotedOut.toString(), executionMode: "rfq" })).calldata;
+      expect(settleData).to.equal(iface.encodeFunctionData("settle", [id, swapTxHash, a.quotedOut, 2]));
+      await (await env.agent.sendTransaction({ to: env.covenantAddress, data: settleData })).wait();
+      const stored = await covenant.getDecision(id);
+      expect(stored.settled).to.equal(true);
+      expect(stored.executionMode).to.equal(2n);
+
+      // A second decision, then abandoned with the skill's cancel calldata.
+      const second = await (await env.agent.sendTransaction({ to: env.covenantAddress, data: commitData })).wait();
+      const secondId = second!.logs.map((l) => covenant.interface.parseLog(l)).find((p) => p?.name === "DecisionCommitted")!.args.id;
+      const cancelData = (await COMMANDS.buildCancelCalldata({ decisionId: secondId.toString() })).calldata;
+      await (await env.agent.sendTransaction({ to: env.covenantAddress, data: cancelData })).wait();
+      expect((await covenant.getDecision(secondId)).cancelled).to.equal(true);
+      expect(await covenant.openDecisionId()).to.equal(0n);
+    });
+
+    it("rejects a malformed 32-byte reference and an unknown execution mode", async function () {
+      try {
+        await COMMANDS.buildCommitCalldata({ side: "buy", tokenAddress: NVDAB, amountIn: "1", quotedOut: "1", minOut: "1", quoteRef: "0x1234" });
+        expect.fail("expected a short quoteRef to be rejected");
+      } catch (err: any) {
+        expect(err.message).to.include("quoteRef");
+      }
+      try {
+        await COMMANDS.buildSettleCalldata({ decisionId: "1", swapTxHash: ethers.ZeroHash, amountOut: "1", executionMode: "darkpool" });
+        expect.fail("expected an unknown execution mode to be rejected");
+      } catch (err: any) {
+        expect(err.message).to.include("executionMode");
+      }
     });
   });
 });

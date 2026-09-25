@@ -23,7 +23,7 @@ import { z } from "zod";
 import { COMMANDS, ethCall, SELECTORS } from "../skills/covenant-mandate/scripts/cli.mjs";
 import { fetchAssetMarketStatus, isHalted } from "../scripts/lib/rwa-status.js";
 
-const server = new McpServer({ name: "covenant-mandate", version: "0.1.0" });
+const server = new McpServer({ name: "covenant-mandate", version: "0.2.0" });
 
 const slot = (data: string, i: number) => "0x" + data.replace(/^0x/, "").slice(i * 64, i * 64 + 64);
 const asBool = (data: string, i: number) => BigInt(slot(data, i)) !== 0n;
@@ -73,19 +73,27 @@ server.registerTool(
   {
     title: "Read a Covenant contract's current mandate",
     description:
-      "Reads the mandate (active, max notional per trade, max trades per day, expiry) directly from a deployed Covenant contract via eth_call. Read-only, no gas, no signing.",
+      "Reads the mandate (active, max USD per trade, max trades per day, expiry), today's trade count, and whether an approved decision is still in flight, directly from a deployed Covenant contract via eth_call. Read-only, no gas, no signing.",
     inputSchema: {
       rpcUrl: z.string().describe("BSC JSON-RPC endpoint"),
       covenantAddress: z.string().describe("Deployed Covenant contract address"),
     },
   },
   async ({ rpcUrl, covenantAddress }) => {
-    const raw = await ethCall(rpcUrl, covenantAddress, SELECTORS.mandate);
+    const [raw, usedRaw, openRaw, agentRaw] = await Promise.all([
+      ethCall(rpcUrl, covenantAddress, SELECTORS.mandate),
+      ethCall(rpcUrl, covenantAddress, SELECTORS.tradesUsedToday),
+      ethCall(rpcUrl, covenantAddress, SELECTORS.hasOpenDecision),
+      ethCall(rpcUrl, covenantAddress, SELECTORS.agent),
+    ]);
     const result = {
       active: asBool(raw, 0),
-      maxNotionalPerTrade: asUint(raw, 1).toString(),
+      maxNotionalPerTradeUsd: asUint(raw, 1).toString(),
       maxTradesPerDay: asUint(raw, 2).toString(),
       expiry: asUint(raw, 3).toString(),
+      tradesUsedToday: asUint(usedRaw, 0).toString(),
+      decisionOpen: asBool(openRaw, 0),
+      agent: "0x" + slot(agentRaw, 0).slice(-40),
     };
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   },
@@ -114,16 +122,19 @@ server.registerTool(
   {
     title: "Preview whether Covenant would allow a proposed trade",
     description:
-      "Reads Covenant's actual on-chain decision for a proposed trade - allowed or denied, and the exact typed reason - before spending a transaction on it. This is necessary, not redundant with contract-call preview: Covenant's guardedSwap never reverts on a denial (it soft-declines and emits an Attestation event instead, see contracts/Covenant.sol), so a wallet-level simulation alone cannot tell allow from deny. Read-only, no gas, no signing.",
+      "Reads the decision Covenant's commit would make right now for a proposed trade - allowed or denied, and the exact typed reason - before spending a transaction on it. Necessary, not redundant with contract-call preview: commit never reverts on a denial (it records the refusal as an event, see contracts/Covenant.sol), so a wallet-level simulation can't tell allow from deny. Read-only, no gas, no signing.",
     inputSchema: {
       rpcUrl: z.string().describe("BSC JSON-RPC endpoint"),
       covenantAddress: z.string().describe("Deployed Covenant contract address"),
-      tokenAddress: z.string().describe("Exact token address to trade (from resolve_ticker)"),
-      amountIn: z.union([z.string(), z.number()]).describe("Proposed trade size, in the quote token's smallest unit (wei)"),
+      side: z.enum(["buy", "sell"]).describe("buy spends USDT for the stock; sell spends the stock for USDT"),
+      tokenAddress: z.string().describe("Exact stock token address (from resolve_ticker)"),
+      amountIn: z.union([z.string(), z.number()]).describe("What you spend, in 18-decimal base units"),
+      quotedOut: z.union([z.string(), z.number()]).describe("What baw market-order quote says you receive, in 18-decimal base units"),
+      minOut: z.union([z.string(), z.number()]).describe("The least you'll accept, in 18-decimal base units - must sit within the token's slippage bound"),
     },
   },
-  async ({ rpcUrl, covenantAddress, tokenAddress, amountIn }) => {
-    const result = await COMMANDS.check({ rpcUrl, covenantAddress, tokenAddress, amountIn });
+  async ({ rpcUrl, covenantAddress, side, tokenAddress, amountIn, quotedOut, minOut }) => {
+    const result = await COMMANDS.check({ rpcUrl, covenantAddress, side, tokenAddress, amountIn, quotedOut, minOut });
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   },
 );

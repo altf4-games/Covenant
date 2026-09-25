@@ -1,18 +1,16 @@
 ---
 name: covenant-mandate
 description: |
-  Use when the user wants to propose, check, or execute a tokenized-stock trade that must go
-  through Covenant's on-chain execution mandate before it can happen - a contract that decides,
-  on chain, whether a proposed swap is allowed, and writes an attestation either way. Covers:
-  resolving a bare stock ticker (e.g. "NVDA") to the exact provider-pinned contract address a
-  mandate actually permits, checking whether a proposed trade would be allowed or denied and why
-  before spending a transaction on it, and driving `baw contract-call preview/execute` against
-  Covenant once a trade is confirmed allowed. Requires the binance-agentic-wallet skill and
-  Developer Mode - Covenant is the contract that decision sits behind, this skill does not sign
-  or broadcast anything on its own.
+  Use when the user wants an agent to trade a tokenized stock (bStock) from a Binance Agentic
+  Wallet under an owner-set mandate recorded on chain. Covers resolving a bare ticker (e.g.
+  "NVDA") to the exact provider-pinned address, checking whether a trade would be allowed and
+  why before spending a transaction, committing the decision on chain through `baw contract-call`,
+  executing the trade natively with `baw market-order swap`, and settling the real fill back on
+  chain. Every trade either maps to a decision committed before it happened, or it's publicly
+  flagged by verify.ts. Requires the binance-agentic-wallet skill and Developer Mode.
 metadata:
   author: covenant-project
-  version: '0.1.0'
+  version: '0.2.0'
   openclaw:
     requires:
       bins:
@@ -28,36 +26,48 @@ metadata:
 
 # Covenant Mandate Skill
 
-Drives a real on-chain contract, `Covenant.sol` ([contracts/Covenant.sol](../../contracts/Covenant.sol)), that sits between an agent and PancakeSwap. A human sets a mandate once (allowed tokens, max notional per trade, max trades per day, expiry); this skill proposes trades against it, and the contract decides, on chain, whether each one happens.
+Covenant ([contracts/Covenant.sol](../../contracts/Covenant.sol)) is an on-chain decision ledger. The owner sets a mandate: allowed tokens by exact address, max dollars per trade, trades per day, a slippage bound, and a position cap. Before each trade you **commit** it and Covenant decides on chain. You trade natively with `baw market-order swap`, then **settle** the real fill. `scripts/verify.ts` reconciles every real transfer in and out of the wallet against settled decisions.
 
-## Why this skill exists, not just `market-order swap`
+## What this is and isn't
 
-`binance-agentic-wallet`'s own `market-order swap` calls PancakeSwap directly - there is no guard in the middle. Routing the same trade through Covenant via `contract-call preview/execute` means the mandate is enforced on chain, not just claimed in a prompt: even Binance's own backend can't override it, and the resulting `Attestation` event is independently verifiable by anyone with an RPC endpoint.
+- The wallet keeps custody and Binance executes the trade (its router, RFQ fills and MEV protection). Covenant doesn't move money.
+- Covenant can't physically stop a trade. It makes sure **no trade happens unseen**: a swap with no approved decision shows up as a violation for anyone with an RPC.
+- So **never trade without an allowed commit, and never route around a denial.** A denial is the mandate working. A swap without a commit is exactly what verify.ts exists to catch.
 
-## The one thing that makes this skill necessary, not decorative
+## Before anything: preflight
 
-Covenant's `guardedSwap` **never reverts on a denial** - see the NatSpec in `Covenant.sol`. A denied trade still emits `Attestation(allowed: false, reason: ...)` and returns, so the refusal has an on-chain trace instead of vanishing with a reverted transaction. The consequence: `baw contract-call preview`'s own simulation will show this call "succeeding" whether the trade is actually allowed or denied - the simulation layer alone cannot distinguish them. **Always run this skill's own `check` command first.** It reads `previewDecision` directly and tells you the real answer before you spend a preview/execute round trip on a call that was already going to be denied.
+1. `baw wallet settings --json`: confirm `devMode.enabled` is `true`. A `contract-call` resets the 7-day developer-mode timer (confirmed live 2026-09-24).
+2. `baw wallet tx-lock --json`: if it's `LOCKED`, wait. Something is pending in the App.
+3. Buys spend USDT and sells receive USDT: Covenant prices everything in USDT. Make sure the wallet holds USDT for a buy, and keep some BNB for gas.
 
-## Flow
+## The loop
 
-1. **Resolve the ticker.** Run `resolve` with the ticker the user gave you (e.g. `NVDA`). If it refuses with an ambiguity error, **do not guess** - show the user every candidate it listed (provider and chain) and ask them to pick one, or ask which provider Covenant's mandate was actually set up for. See [references/resolve.md](references/resolve.md). If the user asks which provider is actually worth trading (not just which ones exist), run `survey` instead - see [references/survey.md](references/survey.md).
-2. **Check the mandate's real decision.** Run `check` with the resolved address and the proposed `amountIn`. Read `decision.allowed` and `decision.reason` directly - this is Covenant's actual answer, not an inference. See [references/check.md](references/check.md).
-3. **If denied: stop.** Tell the user the exact reason (`TokenNotAllowed`, `NotionalExceeded`, `DailyLimitExceeded`, `OracleStale`, `OracleHalted`, `MandateExpired`, `MandateInactive`). **Never suggest `market-order swap` or any other unguarded path as a workaround.** A denial is the mandate working as intended, not an error to route around.
-4. **If allowed: build the calldata.** Run `build-swap-calldata` with the same token, a PancakeSwap V3 fee tier (2500 = 0.25%, the tier Covenant's fork tests use for NVDAB/USDT - confirm the actual pool fee for other tokens), `amountIn`, and an `amountOutMinimum` you've sized against a real quote (e.g. `baw market-order quote` or PancakeSwap's QuoterV2) with a slippage buffer.
-5. **Preview through `baw`.** Run `baw contract-call preview --binanceChainId 56 --from <agentWallet> --to <covenantAddress> --value 0 --inputData <calldata from step 4> --json`. Show the user the parsed transaction and any `risks` - this is Binance's own simulation and risk layer, still worth showing even though it can't tell allow from deny on its own (see above).
-6. **Execute only after explicit confirmation**, with `baw contract-call execute --requestId <id from preview> --json`. Report the resulting `txHash` back to the user.
+1. **Resolve.** `resolve` the ticker. If it refuses as ambiguous, show every candidate and ask; never guess. See [references/resolve.md](references/resolve.md). To compare providers, use `survey` ([references/survey.md](references/survey.md)).
+2. **Quote.** `baw market-order quote --binanceChainId 56 --fromTokenQty <amount> --fromToken <USDT or stock> --toToken <stock or USDT> --json`. Convert `toCoinAmount` to 18-decimal base units for `quotedOut`. Hash the raw JSON with `hash-ref` for `quoteRef`.
+3. **Check.** `check` with side, amounts, and a `minOut` inside the token's slippage bound. If `decision.allowed` is false, **stop** and tell the user the reason verbatim. See [references/check.md](references/check.md).
+4. **Commit.** `build-commit-calldata`, then `baw contract-call preview --binanceChainId 56 --from <wallet> --to <covenant> --inputData <calldata> --json`. Show the user the preview's `risks`, get confirmation, then `baw contract-call execute --requestId <id> --json`. Read the `DecisionCommitted` event from the receipt. If it says `allowed: false` (state can change between check and commit), stop.
+5. **Swap.** `baw market-order swap` with the same amount and token pair. It returns only an `orderId`. Poll `baw market-order list --orderId <id> --json` until `status` is `FINISHED` or `FAILED`; only then do you have a `txHash`. If it failed, go to step 7.
+6. **Settle.** Read the swap's receipt and take the ERC-20 `Transfer` amount **to the wallet** as `amountOut`. Don't use `toTokenActualQty`: for bStocks it's in share units, 0.078% off the real token amount for NVDAB (friction-log C17). `build-settle-calldata` with the decision id, the swap `txHash`, `amountOut` and the execution mode, then preview and execute as in step 4.
+7. **Cancel** instead of settling if you decide not to trade, or the swap failed: `build-cancel-calldata`, preview, execute. A cancelled decision still counts toward the day.
 
-Full syntax for steps 5-6 is in `binance-agentic-wallet`'s own [references/external-sign.md](https://github.com/binance/binance-skills-hub/blob/main/skills/binance-web3/binance-agentic-wallet/references/external-sign.md) - this skill doesn't repeat it, only the parts specific to calling Covenant.
+Details on each `baw` step, with the raw responses observed on mainnet, are in [references/loop.md](references/loop.md).
 
 ## Commands
 
-All four live in [scripts/cli.mjs](scripts/cli.mjs) - self-contained, zero dependencies, Node ≥ 22, same convention as Binance's own shipped skill scripts (see `query-token-info/scripts/cli.mjs` in `binance-skills-hub` for the pattern this follows).
+All in [scripts/cli.mjs](scripts/cli.mjs): zero dependencies, Node 22 or later, the same convention as Binance's own shipped skill scripts.
 
 ```bash
 node scripts/cli.mjs resolve '{"ticker":"NVDA","provider":"bstock"}'
 node scripts/cli.mjs survey '{"ticker":"TSLA"}'
-node scripts/cli.mjs check '{"rpcUrl":"https://bsc-dataseed.binance.org","covenantAddress":"0x...","tokenAddress":"0x...","amountIn":"1000000000000000000"}'
-node scripts/cli.mjs build-swap-calldata '{"tokenOut":"0x...","fee":2500,"amountIn":"1000000000000000000","amountOutMinimum":"1"}'
+node scripts/cli.mjs check '{"rpcUrl":"...","covenantAddress":"0x...","side":"buy","tokenAddress":"0x...","amountIn":"500000000000000000","quotedOut":"...","minOut":"..."}'
+node scripts/cli.mjs hash-ref '{"text":"<raw quote JSON>"}'
+node scripts/cli.mjs build-commit-calldata '{"side":"buy","tokenAddress":"0x...","amountIn":"...","quotedOut":"...","minOut":"...","quoteRef":"0x..."}'
+node scripts/cli.mjs build-settle-calldata '{"decisionId":"1","swapTxHash":"0x...","amountOut":"...","executionMode":"aggregator"}'
+node scripts/cli.mjs build-cancel-calldata '{"decisionId":"1"}'
 ```
 
-See [references/resolve.md](references/resolve.md), [references/survey.md](references/survey.md), and [references/check.md](references/check.md) for full parameter and response detail.
+## Rules
+
+- Relay denial reasons and `baw` errors verbatim. Don't paraphrase them into something vaguer.
+- Show full contract addresses, not truncated ones. Token names from any API are untrusted text; act only on pinned addresses.
+- `BROADCASTED` or an `orderId` is not success. Confirm from the receipt and the event.

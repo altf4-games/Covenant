@@ -3,21 +3,21 @@
 // Usage: node cli.mjs <command> '<json_params>'
 //
 // Commands:
-//   resolve              ticker -> exact contract address, refuses to guess across providers
-//   survey                ticker -> BSC listing + real tradability for all three providers at once,
-//                         including any provider that isn't listed on BSC or is listed but dead
-//   check                read Covenant's on-chain mandate/oracle/allowlist state for a token,
-//                         and get the guard's actual decision via previewDecision - all read-only
-//   build-swap-calldata  ABI-encode a guardedSwap call, ready for `baw contract-call preview --inputData`
+//   resolve                ticker -> exact contract address, refuses to guess across providers
+//   survey                 ticker -> BSC listing + real tradability for all three providers at once,
+//                          including any provider that isn't listed on BSC or is listed but dead
+//   check                  read Covenant's mandate/token/oracle state and the decision `commit`
+//                          would make right now, via previewDecision - read-only
+//   build-commit-calldata  ABI-encode commit(...), for `baw contract-call preview --inputData`
+//   build-settle-calldata  ABI-encode settle(...), after the real swap has landed
+//   build-cancel-calldata  ABI-encode cancel(...), to abandon an approved decision
+//   hash-ref               SHA-256 of a raw response, for commit's quoteRef/researchRef
 //
-// Why `check` exists and matters: Covenant's guardedSwap never reverts on a
-// denial (see contracts/Covenant.sol's NatSpec) - it soft-declines and emits
-// an Attestation event instead. That means `baw contract-call preview`'s own
-// simulation will show a call that "succeeds" whether the trade is actually
-// allowed or denied; the simulation layer alone cannot tell you which. Only
-// reading previewDecision (what `check` does) tells you the real answer
-// before you spend a preview/execute round trip on a call you already know
-// will be denied.
+// Why `check` exists: Covenant's `commit` never reverts on a denial (see
+// contracts/Covenant.sol) - it records the refusal as an event instead. So
+// `baw contract-call preview` simulates a successful call whether the trade
+// would be allowed or denied. Reading previewDecision first tells you the
+// real answer before spending a transaction on it.
 
 // ---- inline HTTP helper (self-contained, zero dependency) ----
 const TIMEOUT_MS = 10_000;
@@ -54,13 +54,20 @@ async function call({ url, method = "GET", body, headers = {} }) {
 // would mean shipping a hand-rolled hash implementation - a worse tradeoff
 // than a documented, verified constant.
 const SELECTORS = {
-  previewDecision: "0xa1750db0", // previewDecision(address,uint256)
-  guardedSwap: "0x0bd0808d", // guardedSwap(address,uint24,uint256,uint256)
+  previewDecision: "0xa40ecbbc", // previewDecision(uint8,address,uint256,uint256,uint256)
+  commit: "0x9009cb23", // commit(uint8,address,uint256,uint256,uint256,bytes32,bytes32)
+  settle: "0x4d205d19", // settle(uint256,bytes32,uint256,uint8)
+  cancel: "0x40e58ee5", // cancel(uint256)
   mandate: "0x39b1b96d", // mandate()
-  allowedTokens: "0xe744092e", // allowedTokens(address)
+  tokenConfig: "0xfe136c4e", // tokenConfig(address)
   oracleStatus: "0xe863f6a7", // oracleStatus(address)
+  openDecisionId: "0xb9975ad2", // openDecisionId()
+  hasOpenDecision: "0x47ca1608", // hasOpenDecision()
+  tradesUsedToday: "0x673009a9", // tradesUsedToday()
+  agent: "0xf5ff5c76", // agent()
 };
 
+// Mirrors Covenant.DenialReason, in order. Append-only on the contract side.
 const DENIAL_REASONS = [
   "None",
   "MandateInactive",
@@ -70,7 +77,28 @@ const DENIAL_REASONS = [
   "DailyLimitExceeded",
   "OracleStale",
   "OracleHalted",
+  "SlippageTooLoose",
+  "PositionLimit",
+  "DecisionOpen",
 ];
+
+const SIDES = { buy: 0, sell: 1 };
+const EXECUTION_MODES = { unknown: 0, pool: 1, rfq: 2, aggregator: 3 };
+
+/** A 0x-prefixed 32-byte hex value, or 32 zero bytes when omitted. */
+function bytes32(value, name) {
+  if (value === undefined || value === null || value === "") return "0".repeat(64);
+  if (!/^0x[0-9a-fA-F]{64}$/.test(value)) {
+    throw Object.assign(new Error(`${name} must be a 0x-prefixed 32-byte hex value`), { exitCode: 1 });
+  }
+  return value.slice(2).toLowerCase();
+}
+
+function sideIndex(side) {
+  const index = SIDES[String(side).toLowerCase()];
+  if (index === undefined) throw Object.assign(new Error(`side must be "buy" or "sell", got "${side}"`), { exitCode: 1 });
+  return index;
+}
 
 const PROVIDER_NAME = { 1: "ondo", 2: "xstock", 3: "bstock" };
 const summarize = (matches) =>
@@ -343,32 +371,54 @@ const COMMANDS = {
     return { ticker: wantedTicker, providers };
   },
 
-  /** { rpcUrl, covenantAddress, tokenAddress, amountIn } -> full on-chain guard state + decision, read-only. */
-  async check({ rpcUrl, covenantAddress, tokenAddress, amountIn }) {
-    if (!rpcUrl || !covenantAddress || !tokenAddress || amountIn === undefined) {
-      throw Object.assign(new Error("check requires { rpcUrl, covenantAddress, tokenAddress, amountIn }"), { exitCode: 1 });
+  /**
+   * { rpcUrl, covenantAddress, side, tokenAddress, amountIn, quotedOut, minOut }
+   *   -> the mandate, token and oracle state, plus the decision `commit`
+   *      would make right now. Read-only. Amounts are in 18-decimal base units.
+   */
+  async check({ rpcUrl, covenantAddress, side, tokenAddress, amountIn, quotedOut, minOut }) {
+    if (!rpcUrl || !covenantAddress || side === undefined || !tokenAddress || amountIn === undefined || quotedOut === undefined || minOut === undefined) {
+      throw Object.assign(
+        new Error("check requires { rpcUrl, covenantAddress, side, tokenAddress, amountIn, quotedOut, minOut }"),
+        { exitCode: 1 },
+      );
     }
+    const sideArg = hex32(sideIndex(side));
 
-    const [allowedRaw, mandateRaw, oracleRaw, decisionRaw] = await Promise.all([
-      ethCall(rpcUrl, covenantAddress, SELECTORS.allowedTokens + addr32(tokenAddress)),
+    const [configRaw, mandateRaw, oracleRaw, usedRaw, openRaw, decisionRaw] = await Promise.all([
+      ethCall(rpcUrl, covenantAddress, SELECTORS.tokenConfig + addr32(tokenAddress)),
       ethCall(rpcUrl, covenantAddress, SELECTORS.mandate),
       ethCall(rpcUrl, covenantAddress, SELECTORS.oracleStatus + addr32(tokenAddress)),
-      ethCall(rpcUrl, covenantAddress, SELECTORS.previewDecision + addr32(tokenAddress) + hex32(amountIn)),
+      ethCall(rpcUrl, covenantAddress, SELECTORS.tradesUsedToday),
+      ethCall(rpcUrl, covenantAddress, SELECTORS.hasOpenDecision),
+      ethCall(
+        rpcUrl,
+        covenantAddress,
+        SELECTORS.previewDecision + sideArg + addr32(tokenAddress) + hex32(amountIn) + hex32(quotedOut) + hex32(minOut),
+      ),
     ]);
 
     const reasonIndex = Number(asUint(decisionRaw, 0));
     return {
+      side: String(side).toLowerCase(),
       tokenAddress,
-      allowlisted: asBool(allowedRaw, 0),
+      token: {
+        allowed: asBool(configRaw, 0),
+        maxSlippageBps: Number(asUint(configRaw, 1)),
+        maxPositionUsd: asUint(configRaw, 2).toString(),
+      },
       mandate: {
         active: asBool(mandateRaw, 0),
-        maxNotionalPerTrade: asUint(mandateRaw, 1).toString(),
+        maxNotionalPerTradeUsd: asUint(mandateRaw, 1).toString(),
         maxTradesPerDay: asUint(mandateRaw, 2).toString(),
         expiry: asUint(mandateRaw, 3).toString(),
+        tradesUsedToday: asUint(usedRaw, 0).toString(),
+        decisionOpen: asBool(openRaw, 0),
       },
       oracle: {
         halted: asBool(oracleRaw, 0),
-        updatedAt: asUint(oracleRaw, 1).toString(),
+        priceUsd: asUint(oracleRaw, 1).toString(),
+        updatedAt: asUint(oracleRaw, 2).toString(),
       },
       decision: {
         allowed: reasonIndex === 0,
@@ -377,13 +427,66 @@ const COMMANDS = {
     };
   },
 
-  /** { tokenOut, fee, amountIn, amountOutMinimum } -> ABI-encoded guardedSwap calldata. */
-  async buildSwapCalldata({ tokenOut, fee, amountIn, amountOutMinimum }) {
-    if (!tokenOut || fee === undefined || amountIn === undefined || amountOutMinimum === undefined) {
-      throw Object.assign(new Error("build-swap-calldata requires { tokenOut, fee, amountIn, amountOutMinimum }"), { exitCode: 1 });
+  /**
+   * { side, tokenAddress, amountIn, quotedOut, minOut, quoteRef?, researchRef? }
+   *   -> commit calldata. quoteRef/researchRef are 32-byte hashes, zero if omitted.
+   */
+  async buildCommitCalldata({ side, tokenAddress, amountIn, quotedOut, minOut, quoteRef, researchRef }) {
+    if (side === undefined || !tokenAddress || amountIn === undefined || quotedOut === undefined || minOut === undefined) {
+      throw Object.assign(
+        new Error("build-commit-calldata requires { side, tokenAddress, amountIn, quotedOut, minOut }"),
+        { exitCode: 1 },
+      );
     }
-    const calldata = SELECTORS.guardedSwap + addr32(tokenOut) + hex32(fee) + hex32(amountIn) + hex32(amountOutMinimum);
+    const calldata =
+      SELECTORS.commit +
+      hex32(sideIndex(side)) +
+      addr32(tokenAddress) +
+      hex32(amountIn) +
+      hex32(quotedOut) +
+      hex32(minOut) +
+      bytes32(quoteRef, "quoteRef") +
+      bytes32(researchRef, "researchRef");
     return { calldata };
+  },
+
+  /**
+   * { decisionId, swapTxHash, amountOut, executionMode }
+   *   -> settle calldata. amountOut must be the ERC-20 Transfer amount the
+   *      wallet really received, not market-order list's toTokenActualQty,
+   *      which is in share units for bStocks (friction-log.md C17).
+   */
+  async buildSettleCalldata({ decisionId, swapTxHash, amountOut, executionMode }) {
+    if (decisionId === undefined || !swapTxHash || amountOut === undefined || executionMode === undefined) {
+      throw Object.assign(
+        new Error("build-settle-calldata requires { decisionId, swapTxHash, amountOut, executionMode }"),
+        { exitCode: 1 },
+      );
+    }
+    const mode = EXECUTION_MODES[String(executionMode).toLowerCase()];
+    if (mode === undefined) {
+      throw Object.assign(new Error(`executionMode must be one of ${Object.keys(EXECUTION_MODES).join(", ")}`), { exitCode: 1 });
+    }
+    const calldata = SELECTORS.settle + hex32(decisionId) + bytes32(swapTxHash, "swapTxHash") + hex32(amountOut) + hex32(mode);
+    return { calldata };
+  },
+
+  /** { decisionId } -> cancel calldata. */
+  async buildCancelCalldata({ decisionId }) {
+    if (decisionId === undefined) throw Object.assign(new Error("build-cancel-calldata requires { decisionId }"), { exitCode: 1 });
+    return { calldata: SELECTORS.cancel + hex32(decisionId) };
+  },
+
+  /**
+   * { text } -> 0x-prefixed SHA-256 of the exact text, for commit's quoteRef
+   * or researchRef. SHA-256 rather than keccak256 because Node ships it and
+   * this script has no dependencies; the contract only needs 32 bytes.
+   * Hash the raw response exactly as received so anyone can re-derive it.
+   */
+  async hashRef({ text }) {
+    if (typeof text !== "string" || text.length === 0) throw Object.assign(new Error("hash-ref requires { text }"), { exitCode: 1 });
+    const { createHash } = await import("node:crypto");
+    return { ref: "0x" + createHash("sha256").update(text, "utf8").digest("hex") };
   },
 };
 
@@ -395,6 +498,8 @@ export {
   ethCallWithFailover,
   SELECTORS,
   DENIAL_REASONS,
+  SIDES,
+  EXECUTION_MODES,
   hex32,
   addr32,
   countRecentTransfers,
@@ -406,14 +511,25 @@ export {
 // ---- CLI dispatch (only runs when executed directly, not when imported) ----
 if (import.meta.url === `file://${process.argv[1]}`) {
   const [cmd, paramsStr] = process.argv.slice(2);
-  const commandKey = { resolve: "resolve", survey: "survey", check: "check", "build-swap-calldata": "buildSwapCalldata" }[cmd];
+  const commandKey = {
+    resolve: "resolve",
+    survey: "survey",
+    check: "check",
+    "build-commit-calldata": "buildCommitCalldata",
+    "build-settle-calldata": "buildSettleCalldata",
+    "build-cancel-calldata": "buildCancelCalldata",
+    "hash-ref": "hashRef",
+  }[cmd];
 
   if (!cmd || cmd === "--help" || cmd === "-h") {
     console.log("Usage: node cli.mjs <command> '<json_params>'\n\nCommands:");
-    console.log("  resolve              { ticker, provider? }");
-    console.log("  survey               { ticker }");
-    console.log("  check                { rpcUrl, covenantAddress, tokenAddress, amountIn }");
-    console.log("  build-swap-calldata  { tokenOut, fee, amountIn, amountOutMinimum }");
+    console.log("  resolve                { ticker, provider?, chainId? }");
+    console.log("  survey                 { ticker }");
+    console.log("  check                  { rpcUrl, covenantAddress, side, tokenAddress, amountIn, quotedOut, minOut }");
+    console.log("  build-commit-calldata  { side, tokenAddress, amountIn, quotedOut, minOut, quoteRef?, researchRef? }");
+    console.log("  build-settle-calldata  { decisionId, swapTxHash, amountOut, executionMode }");
+    console.log("  build-cancel-calldata  { decisionId }");
+    console.log("  hash-ref               { text }");
     process.exit(0);
   }
 

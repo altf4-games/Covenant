@@ -1,52 +1,67 @@
 # check
 
-Read Covenant's real on-chain state for a token and get the guard's actual decision for a proposed trade - all read-only, no transaction, no gas.
+Read Covenant's on-chain state for a token and get the decision `commit` would make right now. Read-only: no transaction, no gas.
 
-## Why this is the step that actually matters
+## Why run this before every commit
 
-Covenant's `guardedSwap` never reverts on a denial (see the contract-level NatSpec in `contracts/Covenant.sol`); it soft-declines and emits an `Attestation(allowed: false, reason: ...)` event instead, so the refusal leaves an on-chain trace instead of vanishing with the rest of a reverted transaction's state. That design choice has a direct consequence for this skill: `baw contract-call preview`'s own simulation cannot tell you whether a proposed trade will be allowed or denied - it will report a "successful" simulation either way, because the call itself doesn't fail. **`check` is the only way to know the real answer before spending a preview/execute round trip on it.**
+Covenant's `commit` never reverts on a denial. It records the refusal as a `DecisionCommitted` event with `allowed: false`, so the refusal is on chain instead of vanishing with a reverted transaction. The side effect: `baw contract-call preview` simulates a successful call whether the trade would be allowed or denied. `check` calls `previewDecision`, which runs the same `_evaluate` as `commit`, so it tells you the real answer before you spend a transaction.
 
 ## Syntax
 
 ```bash
-node scripts/cli.mjs check '{"rpcUrl":"<RPC_URL>","covenantAddress":"<COVENANT_ADDRESS>","tokenAddress":"<TOKEN_ADDRESS>","amountIn":"<AMOUNT_WEI>"}'
+node scripts/cli.mjs check '{"rpcUrl":"<RPC_URL>","covenantAddress":"<COVENANT>","side":"buy","tokenAddress":"<TOKEN>","amountIn":"<BASE_UNITS>","quotedOut":"<BASE_UNITS>","minOut":"<BASE_UNITS>"}'
 ```
 
 | Parameter | Required | Description |
 |---|---|---|
-| `rpcUrl` | Yes | Any BSC JSON-RPC endpoint. Public endpoints work; see `docs/partner-feedback/friction-log.md` B12 for which free-tier ones actually serve current state reliably. |
+| `rpcUrl` | Yes | Any BSC JSON-RPC endpoint. See `docs/partner-feedback/friction-log.md` B12 for which free ones serve current state. |
 | `covenantAddress` | Yes | The deployed Covenant contract. |
-| `tokenAddress` | Yes | The exact token address from `resolve` - never a bare ticker. |
-| `amountIn` | Yes | Proposed trade size, in the quote token's smallest unit (USDT wei - 18 decimals on BSC). |
+| `side` | Yes | `buy` (spend USDT, receive the stock) or `sell` (spend the stock, receive USDT). |
+| `tokenAddress` | Yes | The exact stock token address from `resolve`, never a bare ticker. |
+| `amountIn` | Yes | What you spend, in 18-decimal base units: USDT for a buy, stock tokens for a sell. |
+| `quotedOut` | Yes | What `baw market-order quote` says you'll receive, in 18-decimal base units. |
+| `minOut` | Yes | The least you'll accept. Must be within the token's `maxSlippageBps` of both `quotedOut` and the oracle price. |
+
+Units: every amount is an 18-decimal integer string (BSC USDT and every bStock have 18 decimals). A human `0.5` becomes `"500000000000000000"`.
 
 ## Example
 
+Real output from a local fork of BSC mainnet, 2026-09-25: a $0.50 NVDAB buy at the live oracle price, minimum 0.5% below the quote.
+
 ```bash
-$ node scripts/cli.mjs check '{"rpcUrl":"https://bsc-dataseed.binance.org","covenantAddress":"0x...","tokenAddress":"0x02fca66c1d1afb4e2a7884261eb00f63598a7436","amountIn":"1000000000000000000"}'
+$ node scripts/cli.mjs check '{"rpcUrl":"http://127.0.0.1:8996","covenantAddress":"0x...","side":"buy","tokenAddress":"0x02fca66c1d1afb4e2a7884261eb00f63598a7436","amountIn":"500000000000000000","quotedOut":"...","minOut":"..."}'
 {
+  "side": "buy",
   "tokenAddress": "0x02fca66c1d1afb4e2a7884261eb00f63598a7436",
-  "allowlisted": true,
+  "token": { "allowed": true, "maxSlippageBps": 100, "maxPositionUsd": "2000000000000000000" },
   "mandate": {
     "active": true,
-    "maxNotionalPerTrade": "50000000000000000000",
+    "maxNotionalPerTradeUsd": "1000000000000000000",
     "maxTradesPerDay": "10",
-    "expiry": "1792571679"
+    "expiry": "1792911239",
+    "tradesUsedToday": "0",
+    "decisionOpen": false
   },
-  "oracle": {
-    "halted": false,
-    "updatedAt": "1789979683"
-  },
-  "decision": {
-    "allowed": true,
-    "reason": "None"
-  }
+  "oracle": { "halted": false, "priceUsd": "225385263771369859276", "updatedAt": "1790319246" },
+  "decision": { "allowed": true, "reason": "None" }
 }
 ```
 
+The same call with `"minOut":"1"` returns `SlippageTooLoose`.
+
 ## Reading `decision.reason`
 
-One of: `None` (allowed), `MandateInactive`, `MandateExpired`, `TokenNotAllowed`, `NotionalExceeded`, `DailyLimitExceeded`, `OracleStale`, `OracleHalted` - these mirror `Covenant.sol`'s `DenialReason` enum exactly. Surface the reason to the user in plain language; don't just say "denied."
+These mirror `Covenant.sol`'s `DenialReason`. Tell the user the reason in plain words, never just "denied".
 
-- `TokenNotAllowed` almost always means either the wrong provider's address was resolved (go back to `resolve`), or the mandate genuinely never allowlisted this token - ask the user which.
-- `OracleStale` means the on-chain oracle hasn't been refreshed recently enough to trust (see `scripts/oracle-updater.ts`) - this is an operational gap, not something the user can fix by retrying.
-- `DailyLimitExceeded` will clear on its own at the next UTC day boundary - tell the user when, using `mandate.maxTradesPerDay` and the current time, rather than just "try again later."
+| Reason | What it means | What to do |
+|---|---|---|
+| `None` | Allowed. | Commit. |
+| `MandateInactive` / `MandateExpired` | No active mandate. | Stop. Only the owner can set one. |
+| `TokenNotAllowed` | This exact address isn't allowed. | Usually the wrong provider was resolved (NVDAon vs NVDAB). Go back to `resolve`, or ask the user. |
+| `DecisionOpen` | An approved decision is still in flight. | Settle or cancel it first. |
+| `OracleStale` | The oracle hasn't been refreshed within its bound. | Operational, not fixable by retrying. The updater has to run. |
+| `OracleHalted` | The market or the asset is halted or closed. | Stop. Tell the user the market status. |
+| `NotionalExceeded` | The trade is bigger than the per-trade cap (sells are valued at the oracle price). | Offer a smaller trade. |
+| `DailyLimitExceeded` | The day's trade count is used up. | It resets at the next UTC midnight. Say when. |
+| `SlippageTooLoose` | `minOut` is too far below the quote or the oracle price, or the quote is zero. | Re-quote and set `minOut` within `token.maxSlippageBps`. |
+| `PositionLimit` | After this buy the wallet's real holding would exceed `token.maxPositionUsd`. | Offer a smaller buy, or stop. |
