@@ -66,6 +66,17 @@ This confirms the schedule-risk concern raised pre-build: GitHub issue `bnb-chai
 ### A9. `[DOCS]` b402 fee schedule undisclosed
 Gas is sponsored by Binance, but whether Binance takes a cut of settlement is stated nowhere in the b402 docs.
 
+### A10. `[DOCS][PITFALL]` The Tracks tab's advertised RWA sector filters do not exist — confirmed with real signed calls, 2026-09-25
+The BNB Chain hackathon Tracks tab lists the RWA Data API as having "sector filters (Magnificent 7, AI Chips, ETF, Buffett Portfolio)". The official dev-docs describe `GET /api/v1/dex/market/rwa/tokens` (Market API, not a separate "RWA Data API" — see A2) as: "Supports filtering by platform and sector tab", with no parameter names or enum values given anywhere in the rendered docs, the OpenAPI-derived `llms.txt`/`llms-full.txt` dumps, or the per-endpoint reference page.
+
+Called the real, HMAC-signed endpoint directly (488 live tokens returned) to find the actual contract:
+- **Platform filtering is real, but the doc's own word for it is wrong.** The plain-English param the doc implies (`platform`) is silently ignored; the real param is `platformId`. `platformId=bstock` correctly narrows 488 → 46; `platformId=ondo` narrows to 442.
+- **Sector-tab filtering does not exist.** Tried `sectorTab` (also `sector`) with 13 plausible values — `magnificent7`, `Magnificent7`, `magnificent-7`, `ai-chips`, `aiChips`, `AI_CHIPS`, `etf`, `ETF`, `buffett`, `buffett-portfolio`, `buffettPortfolio`, `hot`, `alpha`, plus a deliberately bogus value (`bogus-garbage-xyz`) as a control — every one of them returned the identical, unfiltered 488 rows. A bogus value should error if the param were validated server-side; it didn't, so the param is either not read at all or silently swallowed.
+- The only classification field that actually exists on a token object is `tags` (a string array). Across all 488 live tokens, exactly one tag value appears anywhere in the dataset: `"alpha"`, on 126 of them. There is no `sector`, `category`, `theme`, or similar field, and no token carries anything resembling "Magnificent 7", "AI Chips", "ETF", or "Buffett Portfolio".
+
+**This kills the literal premise of a sector-filter-driven feature as advertised** — a plain-English mandate compiler that resolves phrases like "AI chips" or "the Magnificent 7" via this endpoint's sector tab has nothing to call. Any such feature has to be built on a different, self-maintained classification instead (e.g. a small static ticker → theme map curated from `underlyingTicker`/`underlyingName`, not a live sector lookup), and that constraint should be stated up front rather than discovered mid-build.
+**Redesign suggestion:** document the real parameter names and their valid enum values on the endpoint's own reference page, and either implement the sector-tab filter for real or remove the claim from both the docs' "Supports filtering by platform and sector tab" line and the hackathon Tracks tab's feature list.
+
 ---
 
 ## B. Tokenized stocks — the asset class itself
