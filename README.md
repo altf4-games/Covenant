@@ -41,6 +41,15 @@ Covenant v1 was a swap router: `guardedSwap` pulled USDT from the caller, checke
 
 Phase 2.5 added a slashable bond for the oracle updater. As built it provided no security: the owner was the updater by default, `updateOracle` didn't require a bond, and the bond could be withdrawn in the same block as a false update. It's out of v2. Both designs remain in git history (`0a13c0b` and earlier), with the spec in `docs/research/slashable-guard-spec.md`.
 
+## Red-team holes closed after the v2 rebuild
+
+`docs/research/opus-2026-09-24/a-redteam.md` red-teamed v1. Four findings against v2's design were still open after the rebuild; all four are now fixed, each with a real fork test, not just a code change:
+
+- **H7 (midnight double-burst, no cumulative cap).** The only notional check was per trade, so real daily exposure was `maxNotionalPerTradeUsd x maxTradesPerDay`, doubled by trading across a UTC midnight boundary. `setMaxDailyNotionalUsd` (a separate owner setter, independent of `setMandate` so tightening it never requires re-setting the mandate) now caps cumulative same-day notional; `DailyNotionalExceeded` is a new denial reason. Kept honest: a cap keyed by the UTC calendar day doesn't by itself close the midnight-boundary gap it was added for, and `test/Covenant.unit.ts` has a test that deliberately demonstrates the residual gap still clearing the cap twice within under a minute, rather than claiming the cap fixes something it doesn't.
+- **H8 (no scheduled oracle updater).** `oracle-updater.ts` was a one-shot script with nothing to run it. `scripts/oracle-updater-cron.sh` (same self-disabling pattern as the existing off-hours cron: it removes its own crontab line once past the Oct 11 deadline) now exists to run it on a schedule. Not installed automatically - it's the one part of this project that would spend real gas on a timer rather than per deliberate action, so it's opt-in via `crontab -e`, documented in the script itself.
+- **H10 (the authenticated Web3 API sits unused).** Every price/status read went through Binance's public, unauthenticated `bapi` endpoints; the HMAC-signed Web3 API key from Phase 0 backed nothing. `scripts/lib/web3-api-client.ts` implements the documented HMAC-SHA256 signing (`authentication.md`, verified live while investigating friction-log A10/A11) and `oracle-updater.ts`'s `readLiveOracle` now cross-checks the token address against Binance's authenticated Market API before trusting a price for it - fail-closed, same as the rest of that function, if the credentials or the listing are missing.
+- **H11 (a decision wasn't provable without replaying history).** `DecisionCommitted` used to carry only the trade and the denial reason; proving a decision was evaluated correctly meant replaying `MandateSet`/`OracleUpdated` history to reconstruct what was in force. The event now also carries the mandate's per-trade cap, trade-count cap and expiry, plus the oracle's `updatedAt`, all snapshotted at commit time - a third party can check one event, no replay required.
+
 ## Judge-runnable verification
 
 A judge doesn't have this project's Agentic Wallet, developer mode or bStock jurisdiction clearance, so they can't reproduce a trade. They don't need to. Two scripts check this project's claims against chain state and trust nothing else.
@@ -112,9 +121,9 @@ npm install
 npx hardhat test
 ```
 
-Eleven suites, 95 tests:
+Eleven suites, 100 tests:
 
-- `test/Covenant.unit.ts` (38): in-memory chain with a mock ERC20. Every denial reason, including Feature 1's drift rule (with the real NVDAB numbers from 2026-09-25), the three-distinct-roles rule, agent-only commit/settle/cancel (a stranger, the owner and the updater all revert), the settle and cancel lifecycle, the understated-quote attack, Feature 3's position cap, and preview/commit agreement.
+- `test/Covenant.unit.ts` (43): in-memory chain with a mock ERC20. Every denial reason, including Feature 1's drift rule (with the real NVDAB numbers from 2026-09-25) and the red-team H7 daily-notional cap (with a test that deliberately demonstrates its disclosed midnight-boundary limitation rather than hiding it), the three-distinct-roles rule, agent-only commit/settle/cancel (a stranger, the owner and the updater all revert), the settle and cancel lifecycle, the understated-quote attack, Feature 3's position cap, red-team H11's self-describing `DecisionCommitted` event, and preview/commit agreement.
 - `test/Covenant.fork.ts` (7): a real fork of BSC mainnet with the real Agentic Wallet impersonated as the agent, so the position cap reads the NVDAB it really bought on Day 1. Includes a full commit, real swap and settle loop against live PancakeSwap liquidity.
 - `test/nyse-calendar.ts` (8): the NYSE calendar against real dates, including a holiday, an early close, both daylight-saving switches, and a year with no data (it refuses).
 - `test/oracle-updater.live.ts` (4): Binance's real status, price and K-line endpoints, posted on chain by the real updater code and read back; the last close is re-derived independently from a separate K-line fetch.
@@ -274,3 +283,11 @@ Feature 1 needs NYSE's 2026 holidays. A web-fetch summary of nyse.com's calendar
 ### At exactly the drift bound, rounding denies
 
 A buy priced exactly 1% over the last close, with a 1% bound, is denied. `quotedOut = amountIn × 1e18 / price` truncates, which puts the implied price 20,200 wei over the bound (about 1e-16 of the price). It's the same effect as the slippage-floor case above, and it errs toward refusing, the right direction for a guard, so the contract is unchanged. The unit test asserts the denial at the exact bound and an allow just inside it, so the direction can't silently flip.
+
+### Enriching one event for red-team fix H11 broke compilation, not just a test
+
+Adding four fields to `DecisionCommitted` (H11's fix, so a decision is provable without replaying `MandateSet`/`OracleUpdated` history) made `commit()` fail to compile with `HHE910: Stack too deep`, not a logic error - Solidity's legacy codegen ran out of stack slots for the emit's fifteen arguments alongside `commit`'s other locals. The fix is `viaIR: true` in `hardhat.config.ts`, the standard Solidity pipeline for exactly this, not a change to contract behavior. Caught immediately by `npx hardhat compile`, before a single test ran - the kind of bug that only shows up once an event actually carries enough real data to be useful.
+
+### A day-of check with a stopwatch problem: the H7 midnight-burst test denied everything until the timestamps had real headroom
+
+The first version of the H7 double-burst test tried to land a trade at 23:59:58 UTC and a second one four seconds after midnight. Both got denied. The reason: every transaction mines its own block, and Hardhat's default automining timestamp only guarantees strictly increasing, not real-clock-paced - two transactions after the first "23:59:58" jump had already pushed the chain to 00:00:00 before the deliberately-`23:59:58`-timed trade even landed, so both commits ended up in the *same* UTC day and the cumulative cap correctly (but confusingly) denied the second one. Fixed by giving the pre-midnight side fifteen seconds of headroom and the post-midnight side twenty, rather than shaving the gap to the literal minimum the scenario describes.
