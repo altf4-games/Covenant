@@ -168,6 +168,55 @@ describe("Covenant v2 (unit, mocked tokens)", function () {
       expect(await f.covenant.agent()).to.equal(f.other.address);
     });
 
+    it("setMandateForTokens (Feature 2 redesign) sets the mandate and configures every token in one owner transaction", async function () {
+      const f = await networkHelpers.loadFixture(deployFixture);
+      const second = await ethers.deployContract("MockERC20", ["Mock AMDB", "mAMDB"]);
+      const secondAddress = await second.getAddress();
+      const latest = await networkHelpers.time.latest();
+      const expiry = latest + 30 * ONE_DAY;
+
+      await expect(
+        f.covenant.connect(f.agent).setMandateForTokens(
+          5n * E18, 3n, expiry, [f.stockAddress, secondAddress], [100, 150], [50n * E18, 50n * E18], [100, 0],
+        ),
+      ).to.be.revertedWithCustomError(f.covenant, "NotOwner");
+
+      // Array-length mismatch is refused before anything is written.
+      await expect(
+        f.covenant.setMandateForTokens(5n * E18, 3n, expiry, [f.stockAddress, secondAddress], [100], [50n * E18, 50n * E18], [100, 0]),
+      ).to.be.revertedWithCustomError(f.covenant, "ArrayLengthMismatch");
+
+      await f.covenant.setMandateForTokens(
+        5n * E18, 3n, expiry, [f.stockAddress, secondAddress], [100, 150], [50n * E18, 60n * E18], [100, 0],
+      );
+
+      const mandate = await f.covenant.mandate();
+      expect(mandate.active).to.equal(true);
+      expect(mandate.maxNotionalPerTradeUsd).to.equal(5n * E18);
+      expect(mandate.maxTradesPerDay).to.equal(3n);
+
+      const cfg1 = await f.covenant.tokenConfig(f.stockAddress);
+      expect(cfg1.allowed).to.equal(true);
+      expect(cfg1.maxSlippageBps).to.equal(100);
+      expect(cfg1.maxPositionUsd).to.equal(50n * E18);
+      expect(cfg1.maxClosedMarketDriftBps).to.equal(100);
+
+      const cfg2 = await f.covenant.tokenConfig(secondAddress);
+      expect(cfg2.allowed).to.equal(true);
+      expect(cfg2.maxSlippageBps).to.equal(150);
+      expect(cfg2.maxPositionUsd).to.equal(60n * E18);
+      expect(cfg2.maxClosedMarketDriftBps).to.equal(0);
+
+      // Emits the exact same events the single-token setters would, so no
+      // off-chain decoder needs a separate code path for this function.
+      await expect(
+        f.covenant.setMandateForTokens(5n * E18, 3n, expiry, [f.stockAddress], [100], [50n * E18], [100]),
+      )
+        .to.emit(f.covenant, "MandateSet").withArgs(5n * E18, 3n, expiry)
+        .and.to.emit(f.covenant, "TokenConfigured").withArgs(f.stockAddress, true, 100, 50n * E18)
+        .and.to.emit(f.covenant, "ClosedMarketDriftSet").withArgs(f.stockAddress, 100);
+    });
+
     it("setMaxDailyNotionalUsd (red-team H7) is owner-only, independent of setMandate, and defaults to disabled", async function () {
       const f = await networkHelpers.loadFixture(deployFixture);
       expect(await f.covenant.maxDailyNotionalUsd()).to.equal(0n);
@@ -422,6 +471,39 @@ describe("Covenant v2 (unit, mocked tokens)", function () {
       // With a 100% slippage bound the slippage check passes anything, so
       // this isolates the position check: a $6 buy reported as a tiny quote.
       expect((await commit(f, Side.Buy, { amountIn: 6n * E18, quotedOut: 1n, minOut: 0n })).reason).to.equal(Reason.PositionLimit);
+    });
+
+    it("token-to-share ratio normalization: the real ~0.078% share-vs-token skew (friction-log C17) makes the position check stricter, not exploitable", async function () {
+      // baw market-order quote's toCoinAmount (this project's quotedOut) is
+      // reported in bStock *share* units; balanceOf and the real ERC-20
+      // Transfer move *token* units. NVDAB's real ratio, confirmed live via
+      // the Day-1 gate swap (friction-log C17): toTokenActualQty
+      // 0.001578888415748593 share units for a real Transfer of
+      // 0.001577660642762526 token units - quotedOut runs about 0.0778%
+      // (778 parts per million) above what the wallet will really hold.
+      // The position check takes max(quotedOut, oracleOut), so this
+      // real-world skew can only make the cap bind *earlier* than the real
+      // post-trade position would - never later. No normalization is
+      // applied on chain because none is needed: the conservative direction
+      // is already the safe one, the same reasoning Feature 1's boundary
+      // rounding test relies on.
+      const f = await networkHelpers.loadFixture(deployFixture);
+      const REAL_RATIO_PPM = 778n; // 0.0778%, i.e. 778 / 1_000_000
+      const oracleOnly = buyArgs(5n * E18); // exactly at the $5 cap in real token units
+      const shareInflatedQuotedOut = oracleOnly.quotedOut + (oracleOnly.quotedOut * REAL_RATIO_PPM) / 1_000_000n;
+
+      await makeTradeable(f, { maxPositionUsd: 5n * E18 });
+      // The real (token-unit) amount alone sits exactly at the cap: allowed.
+      expect(
+        await f.covenant.previewDecision(Side.Buy, f.stockAddress, oracleOnly.amountIn, oracleOnly.quotedOut, oracleOnly.minOut),
+      ).to.equal(Reason.None);
+      // The same trade, but with the real share-unit-inflated quotedOut a
+      // live `baw market-order quote` would actually report, is denied -
+      // the contract errs toward the wallet's real future balance being
+      // slightly higher than it will be, never lower.
+      expect(
+        await f.covenant.previewDecision(Side.Buy, f.stockAddress, oracleOnly.amountIn, shareInflatedQuotedOut, oracleOnly.minOut),
+      ).to.equal(Reason.PositionLimit);
     });
 
     it("doesn't apply to sells: reducing a position is never blocked by the cap", async function () {

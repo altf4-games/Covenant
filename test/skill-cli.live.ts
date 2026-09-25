@@ -220,4 +220,63 @@ describe("covenant-mandate skill CLI (live, against a real spawned JSON-RPC node
       }
     });
   });
+
+  describe("compile-mandate (Feature 2, redesigned - theme-map.json, not the dead RWA sector filter)", function () {
+    async function expectRefusal(text: string, pattern: RegExp) {
+      try {
+        await COMMANDS.compileMandate({ text });
+        expect.fail(`expected compile-mandate to refuse "${text}"`);
+      } catch (err: any) {
+        expect(err.message).to.match(pattern);
+      }
+    }
+
+    it("refuses to guess a theme, or a missing dollar/trade-count/percentage field, rather than defaulting silently", async function () {
+      await expectRefusal("Only quantum computing stocks, $1 per trade, 3 trades a day, premium over 1%", /no known theme/);
+      await expectRefusal("Only AI-chip stocks, 3 trades a day, premium over 1%", /per trade/);
+      await expectRefusal("Only AI-chip stocks, $1 per trade, premium over 1%", /trades a day/);
+      await expectRefusal("Only AI-chip stocks, $1 per trade, 3 trades a day", /premium over/);
+    });
+
+    it("compiles the plain-English example sentence into one real setMandateForTokens transaction that configures every token", async function () {
+      const text = "Only AI-chip stocks, at most $1 per trade, 3 trades a day, no weekend premium over 1%.";
+      const result = await COMMANDS.compileMandate({ text });
+      expect(result.theme).to.equal("ai-chips");
+      expect(result.tickers).to.include.members(["NVDA", "AMD", "AVGO", "ARM", "INTC", "QCOM", "TSM", "MU"]);
+      expect(result.tokens.length).to.equal(result.tickers.length);
+
+      // Sent from the owner key - setMandateForTokens is onlyOwner - as one
+      // real transaction, exactly the "one owner transaction sets the whole
+      // mandate" claim this feature is built on.
+      const receipt = await (await env.owner.sendTransaction({ to: env.covenantAddress, data: result.calldata })).wait();
+      expect(receipt!.status).to.equal(1);
+
+      const covenant = new ethers.Contract(env.covenantAddress, covenantArtifact.abi, env.provider);
+      const mandate = await covenant.mandate();
+      expect(mandate.active).to.equal(true);
+      expect(mandate.maxNotionalPerTradeUsd).to.equal(ethers.parseUnits("1", 18));
+      expect(mandate.maxTradesPerDay).to.equal(3n);
+
+      for (const token of result.tokens) {
+        const cfg = await covenant.tokenConfig(token);
+        expect(cfg.allowed, `token ${token} should be allowed`).to.equal(true);
+        expect(cfg.maxSlippageBps).to.equal(100n);
+        expect(cfg.maxPositionUsd).to.equal(ethers.parseUnits("10", 18));
+        expect(cfg.maxClosedMarketDriftBps).to.equal(100n);
+      }
+    });
+  });
+
+  describe("classify-execution-mode (RFQ vs pool - real router addresses, never a guessed rfq)", function () {
+    it("classifies the real Day-1 fill's router as aggregator, PancakeSwap V3's as pool, and anything else as unknown", async function () {
+      // docs/evidence/day1-gate-swap.json's real swap `to`.
+      expect((await COMMANDS.classifyExecutionMode({ to: "0xb300000b72deaeb607a12d5f54773d1c19c7028d" })).executionMode).to.equal("aggregator");
+      // Same address, different case - addresses aren't case-sensitive.
+      expect((await COMMANDS.classifyExecutionMode({ to: "0xB300000B72DEAEB607A12D5F54773D1C19C7028D" })).executionMode).to.equal("aggregator");
+      // PancakeSwap V3 SwapRouter, used directly in test/Covenant.fork.ts and scripts/chaos-fork.ts.
+      expect((await COMMANDS.classifyExecutionMode({ to: "0x1b81D678ffb9C0263b24A97847620C99d213eB14" })).executionMode).to.equal("pool");
+      // Never guesses "rfq", and anything unrecognized is "unknown", not a default guess.
+      expect((await COMMANDS.classifyExecutionMode({ to: NVDAB })).executionMode).to.equal("unknown");
+    });
+  });
 });

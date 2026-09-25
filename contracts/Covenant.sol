@@ -224,6 +224,9 @@ contract Covenant {
     error DecisionNotAllowed();
     error DecisionClosed();
     error ZeroTxHash();
+    /// @notice Feature 2: setMandateForTokens's per-token array arguments
+    /// must all be the same length as `tokens`.
+    error ArrayLengthMismatch();
 
     // ---------------------------------------------------------------------
     // Modifiers
@@ -282,14 +285,7 @@ contract Covenant {
     // ---------------------------------------------------------------------
 
     function setMandate(uint256 maxNotionalPerTradeUsd, uint256 maxTradesPerDay, uint256 expiry) external onlyOwner {
-        if (expiry <= block.timestamp) revert ExpiryInPast();
-        mandate = Mandate({
-            active: true,
-            maxNotionalPerTradeUsd: maxNotionalPerTradeUsd,
-            maxTradesPerDay: maxTradesPerDay,
-            expiry: expiry
-        });
-        emit MandateSet(maxNotionalPerTradeUsd, maxTradesPerDay, expiry);
+        _setMandate(maxNotionalPerTradeUsd, maxTradesPerDay, expiry);
     }
 
     function revokeMandate() external onlyOwner {
@@ -314,13 +310,7 @@ contract Covenant {
         external
         onlyOwner
     {
-        if (token == address(0)) revert ZeroAddress();
-        if (maxSlippageBps > 10_000) revert InvalidBound();
-        TokenConfig storage cfg = tokenConfig[token];
-        cfg.allowed = allowed;
-        cfg.maxSlippageBps = maxSlippageBps;
-        cfg.maxPositionUsd = maxPositionUsd;
-        emit TokenConfigured(token, allowed, maxSlippageBps, maxPositionUsd);
+        _configureToken(token, allowed, maxSlippageBps, maxPositionUsd);
     }
 
     /// @notice Feature 1: while the underlying exchange is closed, deny a
@@ -329,10 +319,38 @@ contract Covenant {
     /// pay a weekend premium on a stock whose real market is shut. 0 turns
     /// the rule off for this token.
     function setClosedMarketDrift(address token, uint16 bps) external onlyOwner {
-        if (token == address(0)) revert ZeroAddress();
-        if (bps > 10_000) revert InvalidBound();
-        tokenConfig[token].maxClosedMarketDriftBps = bps;
-        emit ClosedMarketDriftSet(token, bps);
+        _setClosedMarketDrift(token, bps);
+    }
+
+    /// @notice Feature 2 (redesigned, friction-log A10): the owner's plain
+    /// English is compiled off chain (skills/covenant-mandate/scripts/cli.mjs
+    /// `compileMandate`, against a small self-maintained ticker->theme map -
+    /// the RWA API's advertised sector filter doesn't exist server-side, see
+    /// friction-log A10) into exactly this one call, so a mandate spanning
+    /// several tokens in a theme is genuinely **one owner transaction**, not
+    /// one per token. Reuses `_setMandate`/`_configureToken`/
+    /// `_setClosedMarketDrift` so this path can never drift from what the
+    /// single-token setters above validate and emit.
+    function setMandateForTokens(
+        uint256 maxNotionalPerTradeUsd,
+        uint256 maxTradesPerDay,
+        uint256 expiry,
+        address[] calldata tokens,
+        uint16[] calldata maxSlippageBpsList,
+        uint256[] calldata maxPositionUsdList,
+        uint16[] calldata maxClosedMarketDriftBpsList
+    ) external onlyOwner {
+        if (
+            tokens.length != maxSlippageBpsList.length || tokens.length != maxPositionUsdList.length
+                || tokens.length != maxClosedMarketDriftBpsList.length
+        ) {
+            revert ArrayLengthMismatch();
+        }
+        _setMandate(maxNotionalPerTradeUsd, maxTradesPerDay, expiry);
+        for (uint256 i = 0; i < tokens.length; i++) {
+            _configureToken(tokens[i], true, maxSlippageBpsList[i], maxPositionUsdList[i]);
+            _setClosedMarketDrift(tokens[i], maxClosedMarketDriftBpsList[i]);
+        }
     }
 
     function setAgent(address newAgent) external onlyOwner {
@@ -595,6 +613,34 @@ contract Covenant {
         }
 
         return (DenialReason.None, notional);
+    }
+
+    function _setMandate(uint256 maxNotionalPerTradeUsd, uint256 maxTradesPerDay, uint256 expiry) internal {
+        if (expiry <= block.timestamp) revert ExpiryInPast();
+        mandate = Mandate({
+            active: true,
+            maxNotionalPerTradeUsd: maxNotionalPerTradeUsd,
+            maxTradesPerDay: maxTradesPerDay,
+            expiry: expiry
+        });
+        emit MandateSet(maxNotionalPerTradeUsd, maxTradesPerDay, expiry);
+    }
+
+    function _configureToken(address token, bool allowed, uint16 maxSlippageBps, uint256 maxPositionUsd) internal {
+        if (token == address(0)) revert ZeroAddress();
+        if (maxSlippageBps > 10_000) revert InvalidBound();
+        TokenConfig storage cfg = tokenConfig[token];
+        cfg.allowed = allowed;
+        cfg.maxSlippageBps = maxSlippageBps;
+        cfg.maxPositionUsd = maxPositionUsd;
+        emit TokenConfigured(token, allowed, maxSlippageBps, maxPositionUsd);
+    }
+
+    function _setClosedMarketDrift(address token, uint16 bps) internal {
+        if (token == address(0)) revert ZeroAddress();
+        if (bps > 10_000) revert InvalidBound();
+        tokenConfig[token].maxClosedMarketDriftBps = bps;
+        emit ClosedMarketDriftSet(token, bps);
     }
 
     function _existing(uint256 id) internal view returns (Decision storage) {

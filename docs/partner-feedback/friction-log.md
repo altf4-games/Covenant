@@ -414,6 +414,11 @@ The bStock trades around the clock, so `TRADING` is true of the token, but every
 
 **Redesign suggestion:** add an underlying-market field (`underlyingSession: "regular" | "pre" | "post" | "closed"`, plus the next regular open and close) that's populated for bStocks too, and document the units of the time fields.
 
+### C19. `[AI-STACK][DOCS]` Mentor guidance said "read the execution-mode field on every response" - no real response carries one
+The pre-build research notes (`docs/research/opus-2026-09-24/c-predecessors-and-sponsor-intent.md`, attributed to a Binance Web3 Wallet mentor) say bStocks/Ondo "can fill via RFQ instead of a pool... 'you don't pick it'. Read the execution-mode field on every response." Checked against the real raw JSON from the Day-1 gate's actual `baw market-order quote` and `market-order list` calls (`docs/evidence/day1-gate-quote.json`, `day1-gate-swap.json`): neither response has any field naming a route, a venue, or an execution mode - `quote` returns only the two amounts and slippage; `swap`/`list` returns order metadata (`orderId`, `status`, `txHash`, timestamps) and the fill amount, nothing else.
+The only real signal is the swap transaction's own `to` address, and even that under-determines the answer: the Day-1 fill routed through Binance's own router (`0xb300000b72deaeb607a12d5f54773d1c19c7028d`) with multiple intermediate hops, and that same router is used for both RFQ and pool fills per the mentor's own "you don't pick it" - so `to` alone can say "this went through Binance's router" but genuinely cannot distinguish RFQ from pool through it. `skills/covenant-mandate/scripts/cli.mjs`'s `classify-execution-mode` implements exactly the rule this leaves available: `aggregator` for Binance's router, `pool` only for a known direct-DEX router (PancakeSwap V3, this project's fork stand-in), `unknown` for everything else - and it never guesses `rfq`, because there is no real evidence that would let it.
+**Redesign suggestion:** either add a real execution-mode/venue field to the quote and order-status responses, or correct the mentor guidance/onboarding materials to say plainly that no such field exists yet, so a team doesn't spend time searching a real response for a field that isn't there.
+
 ---
 
 ## D. BNB Agent Studio

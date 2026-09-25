@@ -1,0 +1,32 @@
+{
+  "_comment": "Feature 2, redesigned (friction-log A10): the RWA API's advertised sector filter (Magnificent 7 / AI Chips / ETF / Buffett Portfolio) doesn't exist server-side - 13+ real signed calls with plausible sectorTab values all returned the same unfiltered 488 tokens. This is a small, self-maintained, versioned replacement: real bStock tickers and BSC contract addresses, read from Binance's public RWA token list on 2026-09-25 and cross-checked against docs/research/verified-facts.md (NVDAB's address matches exactly). Every address here is pinned by exact address, never resolved by ticker at commit time - same rule as configureToken's own doc comment.",
+  "_source": "https://www.binance.com/bapi/defi/v1/public/wallet-direct/buw/wallet/market/token/rwa/stock/detail/list/ai, type=3 (bstock), chainId=56, fetched 2026-09-25",
+  "_lastVerified": "2026-09-25",
+  "themes": {
+    "ai-chips": {
+      "label": "AI chips",
+      "tickers": {
+        "NVDA": "0x02fca66c1d1afb4e2a7884261eb00f63598a7436",
+        "AMD": "0x75fd4cf6f8392e41e70391d60c90c0d5211603a1",
+        "AVGO": "0x76682c454467b3a1150ad8b6a92fc5ee2c21d7ed",
+        "ARM": "0xd42a79ebb7f527f40faecd196ffb47ad5e8d6f8c",
+        "INTC": "0xe614e2fc6c787035ff51f452e8e826bfd32d5283",
+        "QCOM": "0x5f7a56e877b9130608bf8be962621011182fefe1",
+        "TSM": "0xab78b89b5bb00236be0b4b20704cbfa04efc711c",
+        "MU": "0xcdf2f3e0fa43c47a6662a91c9e4a7c5f69762699"
+      }
+    },
+    "magnificent-7": {
+      "label": "Magnificent 7",
+      "tickers": {
+        "AAPL": "0x431a3bee82e2ca41e49895cbece5bb0f76a89b7a",
+        "MSFT": "0x80106cb3ead06659a5ad19df39d9b4733863b9b0",
+        "GOOGL": "0x3f53de71c126bdabae20f9cd64848d317f6c3238",
+        "AMZN": "0x1a4b499833a79a09ad7cf1d42d7dacf71e92eb00",
+        "META": "0x7425889fe94f9d693e8daefe88bcced6acfef4c0",
+        "NVDA": "0x02fca66c1d1afb4e2a7884261eb00f63598a7436",
+        "TSLA": "0x5b1910eaad6450e50f816082aa078c41f10c292f"
+      }
+    }
+  }
+}

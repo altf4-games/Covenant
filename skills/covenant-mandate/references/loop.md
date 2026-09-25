@@ -25,7 +25,7 @@ baw market-order list  --orderId <orderId> --json
 - The quote worked without any API-key error (another hackathon entrant reported `40101` at this step).
 - `swap` returns **only an `orderId`**. The fill and its `txHash` appear only in `market-order list`, once `status` is `FINISHED`. Poll until it's `FINISHED` or `FAILED`.
 - No App confirmation was needed for the swap.
-- The Day-1 fill went through Binance's router contract (`0xb300000b72deaeb607a12d5f54773d1c19c7028d`) with several hops, not straight to one pool. The responses have no field saying whether a fill was RFQ or pool. Record `aggregator` when the swap transaction's `to` is that router, and `unknown` otherwise; don't guess `rfq` or `pool`.
+- The Day-1 fill went through Binance's router contract (`0xb300000b72deaeb607a12d5f54773d1c19c7028d`) with several hops, not straight to one pool. The responses have no field saying whether a fill was RFQ or pool - checked the raw JSON directly (`docs/evidence/day1-gate-{quote,swap}.json`), not just the summarized fields; there is genuinely nothing to read. Record `aggregator` when the swap transaction's `to` is that router, and `unknown` otherwise; don't guess `rfq` or `pool`. `node scripts/cli.mjs classify-execution-mode '{"to":"<swap tx to address>"}'` applies this rule in code now, against the same real router address plus PancakeSwap V3's (the fork's stand-in execution venue, `pool`).
 
 ## The amount to settle with
 

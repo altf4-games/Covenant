@@ -47,7 +47,7 @@ Covenant ([contracts/Covenant.sol](../../contracts/Covenant.sol)) is an on-chain
 3. **Check.** `check` with side, amounts, and a `minOut` inside the token's slippage bound. If `decision.allowed` is false, **stop** and tell the user the reason verbatim. See [references/check.md](references/check.md).
 4. **Commit.** `build-commit-calldata`, then `baw contract-call preview --binanceChainId 56 --from <wallet> --to <covenant> --inputData <calldata> --json`. Show the user the preview's `risks`, get confirmation, then `baw contract-call execute --requestId <id> --json`. Read the `DecisionCommitted` event from the receipt. If it says `allowed: false` (state can change between check and commit), stop.
 5. **Swap.** `baw market-order swap` with the same amount and token pair. It returns only an `orderId`. Poll `baw market-order list --orderId <id> --json` until `status` is `FINISHED` or `FAILED`; only then do you have a `txHash`. If it failed, go to step 7.
-6. **Settle.** Read the swap's receipt and take the ERC-20 `Transfer` amount **to the wallet** as `amountOut`. Don't use `toTokenActualQty`: for bStocks it's in share units, 0.078% off the real token amount for NVDAB (friction-log C17). `build-settle-calldata` with the decision id, the swap `txHash`, `amountOut` and the execution mode, then preview and execute as in step 4.
+6. **Settle.** Read the swap's receipt and take the ERC-20 `Transfer` amount **to the wallet** as `amountOut`. Don't use `toTokenActualQty`: for bStocks it's in share units, 0.078% off the real token amount for NVDAB (friction-log C17). Get the execution mode from `classify-execution-mode` with the receipt's `to` address - it's `aggregator` when `to` is Binance's router, `unknown` otherwise, and never a guessed `rfq`; see [references/loop.md](references/loop.md). `build-settle-calldata` with the decision id, the swap `txHash`, `amountOut` and the execution mode, then preview and execute as in step 4.
 7. **Cancel** instead of settling if you decide not to trade, or the swap failed: `build-cancel-calldata`, preview, execute. A cancelled decision still counts toward the day.
 
 Details on each `baw` step, with the raw responses observed on mainnet, are in [references/loop.md](references/loop.md).
@@ -64,7 +64,14 @@ node scripts/cli.mjs hash-ref '{"text":"<raw quote JSON>"}'
 node scripts/cli.mjs build-commit-calldata '{"side":"buy","tokenAddress":"0x...","amountIn":"...","quotedOut":"...","minOut":"...","quoteRef":"0x..."}'
 node scripts/cli.mjs build-settle-calldata '{"decisionId":"1","swapTxHash":"0x...","amountOut":"...","executionMode":"aggregator"}'
 node scripts/cli.mjs build-cancel-calldata '{"decisionId":"1"}'
+node scripts/cli.mjs compile-mandate '{"text":"Only AI-chip stocks, at most $1 per trade, 3 trades a day, no weekend premium over 1%."}'
 ```
+
+## The owner's plain-English mandate (Feature 2, redesigned)
+
+`compile-mandate` resolves a sentence like the example above against [scripts/theme-map.json](scripts/theme-map.json) - a small, self-maintained ticker→theme map, **not** a live API sector filter. The RWA API's advertised "sector filter" (Magnificent 7 / AI Chips / ETF / Buffett Portfolio) doesn't exist server-side: 13+ real signed calls with every plausible parameter value returned the same unfiltered token list (`docs/partner-feedback/friction-log.md` A10). `theme-map.json` is built from real bStock tickers and addresses instead, verified against the live token list.
+
+It returns a human-readable summary and one `setMandateForTokens` calldata that sets the mandate and configures every token in the theme - genuinely **one owner transaction**, even when the theme spans several tokens, because `Covenant.sol` has a dedicated batch setter for exactly this (it reuses the same internal validation and emits the same events as the single-token setters, so it can't drift from them). It refuses, never guesses, when the theme or a required number isn't found in the text - the same rule `resolve` follows for tickers.
 
 ## Rules
 

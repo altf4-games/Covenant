@@ -12,6 +12,13 @@
 //   build-settle-calldata  ABI-encode settle(...), after the real swap has landed
 //   build-cancel-calldata  ABI-encode cancel(...), to abandon an approved decision
 //   hash-ref               SHA-256 of a raw response, for commit's quoteRef/researchRef
+//   compile-mandate         plain-English mandate text -> resolved tokens, a human summary,
+//                          and one setMandateForTokens calldata (Feature 2, redesigned - see
+//                          docs/partner-feedback/friction-log.md A10 for why this reads a
+//                          small local theme-map.json instead of a live RWA sector filter)
+//   build-set-mandate-for-tokens-calldata  ABI-encode setMandateForTokens(...) directly
+//   classify-execution-mode  swap tx `to` address -> aggregator/pool/unknown for settle,
+//                          never guesses rfq specifically (see KNOWN_ROUTERS below)
 //
 // Why `check` exists: Covenant's `commit` never reverts on a denial (see
 // contracts/Covenant.sol) - it records the refusal as an event instead. So
@@ -69,6 +76,8 @@ const SELECTORS = {
   maxDailyNotionalUsd: "0x5b8f6f8e", // maxDailyNotionalUsd()
   notionalUsedToday: "0x96ae41f0", // notionalUsedToday()
   setMaxDailyNotionalUsd: "0x884dc5bf", // setMaxDailyNotionalUsd(uint256)
+  // Feature 2 (redesigned, friction-log A10).
+  setMandateForTokens: "0xc0139456", // setMandateForTokens(uint256,uint256,uint256,address[],uint16[],uint256[],uint16[])
 };
 
 // Mirrors Covenant.DenialReason, in order. Append-only on the contract side.
@@ -90,6 +99,34 @@ const DENIAL_REASONS = [
 
 const SIDES = { buy: 0, sell: 1 };
 const EXECUTION_MODES = { unknown: 0, pool: 1, rfq: 2, aggregator: 3 };
+
+// ---- execution-mode classification, for settle's executionMode field ----
+// Neither `baw market-order quote` nor `market-order list` carries a field
+// saying whether a fill was RFQ or pool (checked against the real raw JSON
+// in docs/evidence/day1-gate-{quote,swap}.json - despite mentor guidance in
+// docs/research/opus-2026-09-24/c-predecessors-and-sponsor-intent.md saying
+// to "read the execution-mode field on every response", no such field is
+// actually present in a real response). The only real signal available is
+// the swap transaction's `to` address, and that signal only goes so far:
+// Binance's own router settles both RFQ and pool fills through the same
+// address (the Day-1 real swap did, with multiple intermediate hops -
+// docs/evidence/day1-gate-swap.json), so a route through it is recorded as
+// `aggregator`, never guessed as `rfq` or `pool` specifically (this rule
+// was already correct in skills/covenant-mandate/references/loop.md before
+// this function existed - this just makes it code instead of only prose).
+// A route through a known direct-DEX router (PancakeSwap V3, used directly
+// in test/Covenant.fork.ts and scripts/chaos-fork.ts, since there's no
+// Binance backend on a fork) is unambiguous: `pool`. Anything else: `unknown`.
+const KNOWN_ROUTERS = {
+  "0xb300000b72deaeb607a12d5f54773d1c19c7028d": "aggregator", // Binance's router, real Day-1 fill
+  "0x1b81d678ffb9c0263b24a97847620c99d213eb14": "pool", // PancakeSwap V3 SwapRouter
+};
+
+/** { to } -> "aggregator" | "pool" | "unknown". Never returns "rfq" - see comment above. */
+function classifyExecutionMode({ to }) {
+  if (!to) return "unknown";
+  return KNOWN_ROUTERS[String(to).toLowerCase()] ?? "unknown";
+}
 
 /** A 0x-prefixed 32-byte hex value, or 32 zero bytes when omitted. */
 function bytes32(value, name) {
@@ -115,6 +152,15 @@ const addr32 = (a) => a.replace(/^0x/, "").toLowerCase().padStart(64, "0");
 const slot = (data, i) => "0x" + data.replace(/^0x/, "").slice(i * 64, i * 64 + 64);
 const asBool = (data, i) => BigInt(slot(data, i)) !== 0n;
 const asUint = (data, i) => BigInt(slot(data, i));
+
+// ---- dynamic-array ABI encoding for setMandateForTokens (Feature 2) ----
+// Every array element here is a value type (address/uint16/uint256), so
+// like any non-packed array each element still takes one full 32-byte
+// word - encodeXArray below never packs uint16 into fewer bytes than
+// hex32 would. Verified byte-for-byte against ethers' own encoder in
+// test/skill-cli.live.ts.
+const encodeAddressArray = (arr) => hex32(arr.length) + arr.map(addr32).join("");
+const encodeUintArray = (arr) => hex32(arr.length) + arr.map(hex32).join("");
 
 async function ethCall(rpcUrl, to, calldata) {
   const body = { jsonrpc: "2.0", method: "eth_call", params: [{ to, data: calldata }, "latest"], id: 1 };
@@ -249,7 +295,13 @@ const COMMANDS = {
       throw Object.assign(new Error(`resolve: unknown provider "${provider}". Expected one of: ondo, xstock, bstock`), { exitCode: 1 });
     }
 
-    const listUrl = "https://www.binance.com/bapi/defi/v1/public/wallet-direct/buw/wallet/market/token/rwa/stock/detail/list/ai";
+    // The endpoint honors a server-side `?type=` filter (verified live,
+    // 2026-09-25: `?type=3` returns exactly the 80 real bstock listings,
+    // nothing else) - pass it whenever `provider` narrows the request
+    // up front, instead of always fetching every provider's full list
+    // and filtering client-side.
+    const listBaseUrl = "https://www.binance.com/bapi/defi/v1/public/wallet-direct/buw/wallet/market/token/rwa/stock/detail/list/ai";
+    const listUrl = provider !== undefined ? `${listBaseUrl}?type=${PROVIDER_TYPE[provider]}` : listBaseUrl;
     const listResp = await call({ url: listUrl });
     const tokens = listResp.data ?? [];
     const wantedTicker = String(ticker).toUpperCase();
@@ -258,7 +310,9 @@ const COMMANDS = {
       throw Object.assign(new Error(`resolve: no token found for ticker "${ticker}" on any provider`), { exitCode: 1 });
     }
 
-    // Axis 1: provider.
+    // Axis 1: provider (already applied server-side above when given; this
+    // still runs so the "no provider given, multiple types matched" branch
+    // below is reached correctly when provider is undefined).
     if (provider !== undefined) {
       matches = matches.filter((t) => t.type === PROVIDER_TYPE[provider]);
       if (matches.length === 0) {
@@ -466,6 +520,16 @@ const COMMANDS = {
   },
 
   /**
+   * { to } -> "aggregator" | "pool" | "unknown", from the swap transaction's
+   * `to` address alone. See the KNOWN_ROUTERS comment above for exactly
+   * what this can and can't tell you - it deliberately never returns "rfq".
+   */
+  async classifyExecutionMode({ to }) {
+    if (!to) throw Object.assign(new Error("classify-execution-mode requires { to }"), { exitCode: 1 });
+    return { executionMode: classifyExecutionMode({ to }) };
+  },
+
+  /**
    * { decisionId, swapTxHash, amountOut, executionMode }
    *   -> settle calldata. amountOut must be the ERC-20 Transfer amount the
    *      wallet really received, not market-order list's toTokenActualQty,
@@ -490,6 +554,174 @@ const COMMANDS = {
   async buildCancelCalldata({ decisionId }) {
     if (decisionId === undefined) throw Object.assign(new Error("build-cancel-calldata requires { decisionId }"), { exitCode: 1 });
     return { calldata: SELECTORS.cancel + hex32(decisionId) };
+  },
+
+  /**
+   * { maxNotionalPerTradeUsd, maxTradesPerDay, expiry, tokens, maxSlippageBpsList,
+   *   maxPositionUsdList, maxClosedMarketDriftBpsList } -> setMandateForTokens calldata.
+   * Every *List array must be the same length as `tokens` - the contract checks this
+   * too (ArrayLengthMismatch), but failing here first gives a clearer message.
+   */
+  async buildSetMandateForTokensCalldata({
+    maxNotionalPerTradeUsd,
+    maxTradesPerDay,
+    expiry,
+    tokens,
+    maxSlippageBpsList,
+    maxPositionUsdList,
+    maxClosedMarketDriftBpsList,
+  }) {
+    if (
+      maxNotionalPerTradeUsd === undefined || maxTradesPerDay === undefined || expiry === undefined
+      || !Array.isArray(tokens) || !Array.isArray(maxSlippageBpsList) || !Array.isArray(maxPositionUsdList)
+      || !Array.isArray(maxClosedMarketDriftBpsList)
+    ) {
+      throw Object.assign(
+        new Error(
+          "build-set-mandate-for-tokens-calldata requires { maxNotionalPerTradeUsd, maxTradesPerDay, expiry, tokens, maxSlippageBpsList, maxPositionUsdList, maxClosedMarketDriftBpsList }",
+        ),
+        { exitCode: 1 },
+      );
+    }
+    const n = tokens.length;
+    if (maxSlippageBpsList.length !== n || maxPositionUsdList.length !== n || maxClosedMarketDriftBpsList.length !== n) {
+      throw Object.assign(new Error(`build-set-mandate-for-tokens-calldata: tokens has ${n} entries but the *List arrays don't all match`), { exitCode: 1 });
+    }
+    const HEAD_WORDS = 7;
+    const tokensEncoded = encodeAddressArray(tokens);
+    const slipEncoded = encodeUintArray(maxSlippageBpsList);
+    const posEncoded = encodeUintArray(maxPositionUsdList);
+    const driftEncoded = encodeUintArray(maxClosedMarketDriftBpsList);
+
+    const offsetTokens = HEAD_WORDS * 32;
+    const offsetSlip = offsetTokens + tokensEncoded.length / 2;
+    const offsetPos = offsetSlip + slipEncoded.length / 2;
+    const offsetDrift = offsetPos + posEncoded.length / 2;
+
+    const calldata =
+      SELECTORS.setMandateForTokens +
+      hex32(maxNotionalPerTradeUsd) +
+      hex32(maxTradesPerDay) +
+      hex32(expiry) +
+      hex32(offsetTokens) +
+      hex32(offsetSlip) +
+      hex32(offsetPos) +
+      hex32(offsetDrift) +
+      tokensEncoded +
+      slipEncoded +
+      posEncoded +
+      driftEncoded;
+    return { calldata };
+  },
+
+  /**
+   * { text, durationDays? } -> resolves a plain-English mandate sentence
+   * against skills/covenant-mandate/scripts/theme-map.json (Feature 2,
+   * redesigned - see docs/partner-feedback/friction-log.md A10) and returns
+   * the matched theme, its pinned tokens, a human-readable summary, and one
+   * setMandateForTokens calldata that sets the whole mandate in a single
+   * owner transaction.
+   *
+   * This is regex/keyword extraction, not an LLM call - zero dependencies,
+   * same convention as the rest of this file - so it recognizes a specific,
+   * documented shape rather than arbitrary phrasing. It refuses (never
+   * guesses) when the theme or the dollar/trade-count/percentage fields
+   * aren't found, the same "never guess" rule `resolve` follows for tickers.
+   *
+   * Recognized shape (case-insensitive), matching the example sentence in
+   * FEATURES-V2-2026-09-24.md: "Only AI-chip stocks, at most $1 per trade,
+   * 3 trades a day, no weekend premium over 1%."
+   *   - theme: any theme_map.json label or key appearing anywhere in `text`
+   *   - per-trade cap: `$<number> per trade`
+   *   - trades per day: `<number> trades (a|per) day`
+   *   - closed-market drift bound: `premium (over|above) <number>%`
+   *   - optional slippage: `slippage (of|up to)? <number>%` (default 100 bps / 1%)
+   *   - optional position cap: `position cap $<number>` (default 10x the per-trade cap)
+   */
+  async compileMandate({ text, durationDays }) {
+    if (typeof text !== "string" || text.length === 0) {
+      throw Object.assign(new Error("compile-mandate requires { text }"), { exitCode: 1 });
+    }
+    const { readFileSync } = await import("node:fs");
+    const { fileURLToPath } = await import("node:url");
+    const mapPath = fileURLToPath(new URL("./theme-map.json", import.meta.url));
+    const themeMap = JSON.parse(readFileSync(mapPath, "utf8"));
+
+    const lower = text.toLowerCase();
+    // Normalized (letters/digits only, trailing "s" stripped) so "AI-chip
+    // stocks" matches theme key "ai-chips" and label "AI chips" without
+    // requiring the exact punctuation or plural form.
+    const normalize = (s) => s.toLowerCase().replace(/[^a-z0-9]/g, "").replace(/s$/, "");
+    const textNorm = normalize(text);
+    let matchedKey;
+    for (const [key, theme] of Object.entries(themeMap.themes)) {
+      if (textNorm.includes(normalize(key)) || textNorm.includes(normalize(theme.label))) {
+        matchedKey = key;
+        break;
+      }
+    }
+    if (!matchedKey) {
+      const known = Object.values(themeMap.themes).map((t) => t.label).join(", ");
+      throw Object.assign(
+        new Error(`compile-mandate: no known theme found in "${text}" - refusing to guess. Known themes: ${known}`),
+        { exitCode: 2 },
+      );
+    }
+    const theme = themeMap.themes[matchedKey];
+    const tickers = Object.keys(theme.tickers);
+    const tokens = tickers.map((t) => theme.tickers[t]);
+
+    const perTradeMatch = lower.match(/\$(\d+(?:\.\d+)?)\s*per trade/);
+    if (!perTradeMatch) {
+      throw Object.assign(new Error(`compile-mandate: no "$<amount> per trade" found in "${text}" - refusing to guess`), { exitCode: 2 });
+    }
+    const maxNotionalUsd = perTradeMatch[1];
+
+    const tradesMatch = lower.match(/(\d+)\s*trades?\s*(?:a|per)\s*day/);
+    if (!tradesMatch) {
+      throw Object.assign(new Error(`compile-mandate: no "<n> trades a day" found in "${text}" - refusing to guess`), { exitCode: 2 });
+    }
+    const maxTradesPerDay = tradesMatch[1];
+
+    const driftMatch = lower.match(/premium\s*(?:over|above)\s*(\d+(?:\.\d+)?)%/);
+    if (!driftMatch) {
+      throw Object.assign(new Error(`compile-mandate: no "premium over <n>%" found in "${text}" - refusing to guess`), { exitCode: 2 });
+    }
+    const driftBps = Math.round(Number(driftMatch[1]) * 100);
+
+    const slippageMatch = lower.match(/slippage\s*(?:of|up to)?\s*(\d+(?:\.\d+)?)%/);
+    const slippageBps = slippageMatch ? Math.round(Number(slippageMatch[1]) * 100) : 100;
+
+    const positionMatch = lower.match(/position cap\s*\$(\d+(?:\.\d+)?)/);
+    const maxPositionUsd = positionMatch ? positionMatch[1] : String(Number(maxNotionalUsd) * 10);
+
+    const days = durationDays ?? 30;
+    const nowSec = Math.floor(Date.now() / 1000);
+    const expiry = nowSec + days * 24 * 60 * 60;
+
+    const E18 = 1_000_000_000_000_000_000n;
+    const toBase = (usd) => (BigInt(Math.round(Number(usd) * 1e6)) * E18) / 1_000_000n;
+    const maxNotionalBase = toBase(maxNotionalUsd);
+    const maxPositionBase = toBase(maxPositionUsd);
+
+    const n = tokens.length;
+    const { calldata } = await COMMANDS.buildSetMandateForTokensCalldata({
+      maxNotionalPerTradeUsd: maxNotionalBase,
+      maxTradesPerDay,
+      expiry,
+      tokens,
+      maxSlippageBpsList: Array(n).fill(slippageBps),
+      maxPositionUsdList: Array(n).fill(maxPositionBase),
+      maxClosedMarketDriftBpsList: Array(n).fill(driftBps),
+    });
+
+    const summary =
+      `Theme "${theme.label}" -> ${tickers.join(", ")} (${n} token${n === 1 ? "" : "s"}). ` +
+      `Max $${maxNotionalUsd} per trade, ${maxTradesPerDay} trades/day, expires in ${days} days. ` +
+      `Slippage bound ${slippageBps / 100}%, position cap $${maxPositionUsd} per token, ` +
+      `no more than ${driftBps / 100}% premium/discount to last close while the NYSE is shut.`;
+
+    return { theme: matchedKey, label: theme.label, tickers, tokens, maxNotionalUsd, maxTradesPerDay, expiry, slippageBps, maxPositionUsd, driftBps, summary, calldata };
   },
 
   /**
@@ -534,6 +766,9 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     "build-settle-calldata": "buildSettleCalldata",
     "build-cancel-calldata": "buildCancelCalldata",
     "hash-ref": "hashRef",
+    "compile-mandate": "compileMandate",
+    "build-set-mandate-for-tokens-calldata": "buildSetMandateForTokensCalldata",
+    "classify-execution-mode": "classifyExecutionMode",
   }[cmd];
 
   if (!cmd || cmd === "--help" || cmd === "-h") {
@@ -545,6 +780,9 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     console.log("  build-settle-calldata  { decisionId, swapTxHash, amountOut, executionMode }");
     console.log("  build-cancel-calldata  { decisionId }");
     console.log("  hash-ref               { text }");
+    console.log("  compile-mandate        { text, durationDays? }");
+    console.log("  build-set-mandate-for-tokens-calldata  { maxNotionalPerTradeUsd, maxTradesPerDay, expiry, tokens, maxSlippageBpsList, maxPositionUsdList, maxClosedMarketDriftBpsList }");
+    console.log("  classify-execution-mode  { to }");
     process.exit(0);
   }
 
