@@ -3,6 +3,7 @@ import Phaser from "phaser";
 import { WorldScene } from "../game/scenes/WorldScene";
 import { HERO_FRAME, RULE_CHECKER_FRAME, MONSTER, type QuestStep } from "../game/logic";
 import type { Decision } from "../lib/covenant";
+import { Sprite } from "./Sprite";
 
 interface GameCanvasProps {
   decisions: Decision[];
@@ -14,25 +15,6 @@ interface GameCanvasProps {
 
 const QUEST_START_DELAY_MS = 700;
 const FONT_WAIT_MS = 2500;
-
-/** One 16x16 frame of a Kenney sheet, scaled up crisply in plain HTML. */
-function Sprite({ sheet, frame, size = 40 }: { sheet: "dungeon" | "town"; frame: number; size?: number }) {
-  const s = size / 16;
-  return (
-    <span
-      aria-hidden
-      className="inline-block shrink-0"
-      style={{
-        width: size,
-        height: size,
-        backgroundImage: `url(/game/kenney-tiny-${sheet}.png)`,
-        backgroundSize: `${192 * s}px ${176 * s}px`,
-        backgroundPosition: `-${(frame % 12) * 16 * s}px -${Math.floor(frame / 12) * 16 * s}px`,
-        imageRendering: "pixelated",
-      }}
-    />
-  );
-}
 
 /**
  * The game: Phaser 3 with Kenney's CC0 Tiny Town / Tiny Dungeon art. The

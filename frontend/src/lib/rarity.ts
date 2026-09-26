@@ -57,9 +57,13 @@ export function classifyRarity(record: TrackRecord): Rarity {
   return "Bronze";
 }
 
-export const RARITY_STYLE: Record<Rarity, { gradient: string; glow: string; label: string }> = {
-  Bronze: { gradient: "from-[#5a4632] to-[#2a2118]", glow: "rgba(180,140,90,.35)", label: "Bronze" },
-  Silver: { gradient: "from-[#7d8794] to-[#2c3038]", glow: "rgba(190,200,215,.4)", label: "Silver" },
-  Gold: { gradient: "from-[#caa33d] to-[#3a2c0f]", glow: "rgba(245,196,81,.55)", label: "Gold" },
-  Legendary: { gradient: "from-[#e5484d] via-[#f5c451] to-[#3a0f10]", glow: "rgba(229,72,77,.6)", label: "Legendary" },
+/**
+ * Trading-card look per tier: the inner panel color (like a card's type
+ * color) and a corner rarity symbol, the way a real TCG card marks rarity.
+ */
+export const RARITY_STYLE: Record<Rarity, { panel: string; symbol: string; label: string }> = {
+  Bronze: { panel: "bg-gradient-to-b from-orange-100 to-amber-200", symbol: "●", label: "BRONZE" },
+  Silver: { panel: "bg-gradient-to-b from-slate-100 to-slate-300", symbol: "◆", label: "SILVER" },
+  Gold: { panel: "bg-gradient-to-b from-yellow-100 to-amber-300", symbol: "★", label: "GOLD" },
+  Legendary: { panel: "bg-gradient-to-b from-rose-100 via-amber-100 to-violet-200", symbol: "★★", label: "LEGENDARY" },
 };
