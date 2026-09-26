@@ -1,11 +1,31 @@
 import { describe, expect, it } from "vitest";
-import { buildQuest, spriteForReason, tokenTilePositions, attackNameFor, BOSS_SPRITE, WORLD_COLS, WORLD_ROWS } from "../logic";
+import {
+  buildQuest,
+  buildings,
+  route,
+  walkableTiles,
+  standSpot,
+  roofTop,
+  monsterFor,
+  attackNameFor,
+  kidExplanation,
+  prettyAmount,
+  HOME,
+  HOME_STAND,
+  UNKNOWN_STAND,
+  RULE_CHECKER_FRAME,
+  WORLD_COLS,
+  WORLD_ROWS,
+  type Spot,
+} from "../logic";
 import { TERRITORY_TOKENS } from "../../data/liquidity";
 import { DENIAL_REASONS } from "../../lib/covenant";
 import type { Decision } from "../../lib/covenant";
 
 const NVDAB = "0x02fca66c1d1afb4e2a7884261eb00f63598a7436";
+const NVDAON = "0xa9ee28c80f960b889dfbd1902055218cba016f75";
 const IMPERSONATOR = "0x2F701b108a9aF5558960325A0239D0a13c2C4444";
+const ONE = 10n ** 18n;
 
 function commit(overrides: Partial<NonNullable<Decision["commit"]>>): Decision["commit"] {
   return {
@@ -13,12 +33,12 @@ function commit(overrides: Partial<NonNullable<Decision["commit"]>>): Decision["
     side: "buy",
     allowed: true,
     reason: "None",
-    amountIn: 1n,
+    amountIn: ONE,
     quotedOut: 1n,
     minOut: 1n,
     expiresAt: 0,
-    mandateMaxNotionalPerTradeUsd: 1n,
-    mandateMaxTradesPerDay: 1n,
+    mandateMaxNotionalPerTradeUsd: ONE,
+    mandateMaxTradesPerDay: 10n,
     mandateExpiry: 0,
     oracleUpdatedAt: 0,
     blockNumber: 1,
@@ -27,103 +47,194 @@ function commit(overrides: Partial<NonNullable<Decision["commit"]>>): Decision["
   };
 }
 
-describe("spriteForReason / BOSS_SPRITE", () => {
-  it("assigns a real sprite key to every real DenialReason except None", () => {
-    for (const reason of DENIAL_REASONS) {
-      if (reason === "None") continue;
-      expect(BOSS_SPRITE[reason], `no sprite mapped for real reason ${reason}`).toBeDefined();
+const realReasons = DENIAL_REASONS.filter((r: string) => r !== "None");
+
+describe("monsters, moves, and explanations", () => {
+  it("gives every real DenialReason a real monster, move, and plain-English explanation", () => {
+    for (const reason of realReasons) {
+      expect(monsterFor(reason).name, reason).not.toBe("MYSTERY RULE");
+      expect(attackNameFor(reason), reason).not.toBe("UNKNOWN GUARD");
+      expect(kidExplanation(reason), reason).not.toContain("A safety rule said no");
     }
   });
 
-  it("falls back to a default sprite for an unrecognized reason rather than throwing", () => {
-    expect(spriteForReason("SomeFutureReasonNotYetMapped")).toBe("boss_goblin");
+  it("only uses monster tiles (108-124) as monsters, never a townsperson or item", () => {
+    for (const reason of realReasons) {
+      const f = monsterFor(reason).frame;
+      expect(f >= 108 && f <= 124, `${reason} -> frame ${f}`).toBe(true);
+    }
+  });
+
+  it("falls back instead of throwing for a reason added to the contract later", () => {
+    expect(monsterFor("SomeFutureReason").name).toBe("MYSTERY RULE");
+    expect(attackNameFor("SomeFutureReason")).toBe("UNKNOWN GUARD");
+    expect(kidExplanation("SomeFutureReason")).toContain("SomeFutureReason");
+  });
+
+  it("quotes the real per-trade cap from the commit in the NotionalExceeded explanation", () => {
+    const c = commit({ allowed: false, reason: "NotionalExceeded", mandateMaxNotionalPerTradeUsd: 5n * ONE });
+    expect(kidExplanation("NotionalExceeded", c!)).toContain("$5");
+  });
+
+  it("formats wei amounts without trailing zeros", () => {
+    expect(prettyAmount(ONE)).toBe("1");
+    expect(prettyAmount(4_412_345_000_000_000n)).toBe("0.004412");
+    expect(prettyAmount(0n)).toBe("0");
   });
 });
 
-describe("attackNameFor", () => {
-  it("assigns a real move name to every real DenialReason except None", () => {
-    for (const reason of DENIAL_REASONS) {
-      if (reason === "None") continue;
-      expect(attackNameFor(reason), `no move name mapped for real reason ${reason}`).not.toBe("UNKNOWN GUARD");
+describe("the town", () => {
+  const all = buildings();
+
+  it("has exactly one building per real territory token, plus the agent's home", () => {
+    expect(all.length).toBe(TERRITORY_TOKENS.length + 1);
+    for (const t of TERRITORY_TOKENS) {
+      expect(all.filter((b) => b.token?.ticker === t.ticker)).toHaveLength(1);
     }
   });
 
-  it("falls back to a default move name for an unrecognized reason rather than throwing", () => {
-    expect(attackNameFor("SomeFutureReasonNotYetMapped")).toBe("UNKNOWN GUARD");
+  it("gives bigger real markets bigger houses", () => {
+    const shops = all.filter((b) => b.token?.platform === "bstock");
+    const byReserves = [...shops].sort((a, b) => b.token!.reservesUsd - a.token!.reservesUsd);
+    for (let i = 1; i < byReserves.length; i++) {
+      expect(byReserves[i].width).toBeLessThanOrEqual(byReserves[i - 1].width);
+    }
+  });
+
+  it("marks xStocks lots as ruins - the real pools hold almost nothing", () => {
+    for (const b of all.filter((b) => b.token?.platform === "xstock")) expect(b.kind).toBe("ruin");
+  });
+
+  it("keeps every building on the map and never overlaps two buildings or a building and a road", () => {
+    const walk = walkableTiles();
+    const used = new Set<string>();
+    for (const b of all) {
+      for (let r = roofTop(b); r < roofTop(b) + 3; r++) {
+        for (let c = b.x; c < b.x + b.width; c++) {
+          expect(c >= 0 && c < WORLD_COLS && r >= 0 && r < WORLD_ROWS, `${b.id} off map`).toBe(true);
+          expect(used.has(`${c},${r}`), `${b.id} overlaps another building at ${c},${r}`).toBe(false);
+          expect(walk.has(`${c},${r}`), `${b.id} sits on a road at ${c},${r}`).toBe(false);
+          used.add(`${c},${r}`);
+        }
+      }
+    }
+  });
+
+  it("puts every doorstep on a walkable tile right in front of its door", () => {
+    const walk = walkableTiles();
+    for (const b of all) {
+      const s = standSpot(b);
+      expect(walk.has(`${s.col},${s.row}`), b.id).toBe(true);
+      expect(s.row).toBe(roofTop(b) + 3);
+    }
   });
 });
 
-describe("tokenTilePositions", () => {
-  it("places every real territory token inside the world grid bounds", () => {
-    const positions = tokenTilePositions();
-    for (const token of TERRITORY_TOKENS) {
-      const pos = positions.get(token.ticker);
-      expect(pos, `no position for ${token.ticker}`).toBeDefined();
-      expect(pos!.col).toBeGreaterThanOrEqual(0);
-      expect(pos!.col).toBeLessThan(WORLD_COLS);
-      expect(pos!.row).toBeGreaterThanOrEqual(0);
-      expect(pos!.row).toBeLessThan(WORLD_ROWS);
-      expect(pos!.platform).toBe(token.platform);
-    }
-  });
+describe("route", () => {
+  const walk = walkableTiles();
 
-  it("is deterministic - the same real data always lays out the same way", () => {
-    const a = tokenTilePositions();
-    const b = tokenTilePositions();
-    expect([...a.entries()]).toEqual([...b.entries()]);
+  function expectWalkable(from: Spot, pts: { col: number; row: number }[]) {
+    let prev = { col: from.col, row: from.row };
+    for (const p of pts) {
+      expect(p.col === prev.col || p.row === prev.row, `diagonal step ${JSON.stringify(prev)} -> ${JSON.stringify(p)}`).toBe(true);
+      const dc = Math.sign(p.col - prev.col);
+      const dr = Math.sign(p.row - prev.row);
+      for (let c = prev.col, r = prev.row; c !== p.col || r !== p.row; ) {
+        c += dc;
+        r += dr;
+        expect(walk.has(`${c},${r}`), `walked off the road at ${c},${r}`).toBe(true);
+      }
+      prev = p;
+    }
+  }
+
+  it("walks along roads - never through a house - between every pair of places", () => {
+    const spots = [...buildings().map(standSpot), UNKNOWN_STAND];
+    for (const a of spots) {
+      for (const b of spots) {
+        const pts = route(a, b);
+        expectWalkable(a, pts);
+        if (a.col !== b.col || a.row !== b.row) expect(pts[pts.length - 1]).toEqual({ col: b.col, row: b.row });
+      }
+    }
   });
 });
 
 describe("buildQuest", () => {
-  it("walks to NVDAB's real position, then battles the real boss for a denied decision", () => {
-    const decisions: Decision[] = [
-      { id: "1", commit: commit({ allowed: false, reason: "NotionalExceeded" }), settle: null, cancelled: false },
-    ];
-    const quest = buildQuest(decisions);
-    expect(quest).toHaveLength(2);
-    expect(quest[0]).toMatchObject({ kind: "walk", decisionId: "1" });
-    expect(quest[1]).toMatchObject({
-      kind: "battle",
-      decisionId: "1",
-      reason: "NotionalExceeded",
-      sprite: "boss_golem",
-      bossName: "The Spending Cap",
-      bossIcon: "💰",
-      attackName: "OVERDRAFT SLAM",
-    });
+  it("fights a monster at NVIDIA's shop for a denied trade, and the agent loses", () => {
+    const quest = buildQuest([{ id: "1", commit: commit({ allowed: false, reason: "NotionalExceeded" }), settle: null, cancelled: false }]);
+    expect(quest.map((s) => s.kind)).toEqual(["walk", "battle", "walk"]);
+    const battle = quest[1] as Extract<(typeof quest)[number], { kind: "battle" }>;
+    expect(battle.won).toBe(false);
+    expect(battle.foeName).toBe("SPENDING CAP");
+    const text = battle.lines.map((l) => l.text).join(" ");
+    expect(text).toContain("NVIDIA");
+    expect(text).toContain("TRADE BLOCKED");
+    expect(text).toContain("OVERDRAFT SLAM");
+    expect(battle.lines.some((l) => l.cue === "heroFaint")).toBe(true);
 
-    const nvdabPos = tokenTilePositions().get("NVDAB")!;
-    expect((quest[0] as any).toCol).toBe(nvdabPos.col);
-    expect((quest[0] as any).toRow).toBe(nvdabPos.row);
+    const nvdaShop = buildings().find((b) => b.id === "NVDAB")!;
+    const walk = quest[0] as Extract<(typeof quest)[number], { kind: "walk" }>;
+    expect(walk.route[walk.route.length - 1]).toEqual({ col: standSpot(nvdaShop).col, row: standSpot(nvdaShop).row });
   });
 
-  it("arrives quietly for an allowed decision - no battle for a trade that wasn't stopped", () => {
-    const decisions: Decision[] = [{ id: "1", commit: commit({ allowed: true }), settle: null, cancelled: false }];
-    const quest = buildQuest(decisions);
-    expect(quest.map((s) => s.kind)).toEqual(["walk", "arrive"]);
+  it("still battles for an allowed trade - the agent beats the Rule Checker", () => {
+    const d: Decision = {
+      id: "2",
+      commit: commit({ allowed: true }),
+      settle: { swapTxHash: "0x1", amountOut: 4_412_345_000_000_000n, executionMode: "pool", belowMin: false, txHash: "0x2" },
+      cancelled: false,
+    };
+    const battle = buildQuest([d])[1] as Extract<ReturnType<typeof buildQuest>[number], { kind: "battle" }>;
+    expect(battle.kind).toBe("battle");
+    expect(battle.won).toBe(true);
+    expect(battle.foeFrame).toBe(RULE_CHECKER_FRAME);
+    const text = battle.lines.map((l) => l.text).join(" ");
+    expect(text).toContain("TRADE ALLOWED");
+    expect(text).toContain("0.004412 NVIDIA shares");
+    expect(battle.lines.some((l) => l.cue === "foeFaint")).toBe(true);
+    expect(battle.lines.some((l) => l.cue === "heroFaint")).toBe(false);
   });
 
-  it("sends an unrecognized token (an impersonator, no real liquidity entry) to the unrecognized-territory marker, never a guessed real position", () => {
-    const decisions: Decision[] = [
+  it("says so when an allowed trade was abandoned instead of filled", () => {
+    const d: Decision = { id: "3", commit: commit({ allowed: true }), settle: null, cancelled: true };
+    const battle = buildQuest([d])[1] as Extract<ReturnType<typeof buildQuest>[number], { kind: "battle" }>;
+    expect(battle.lines[battle.lines.length - 1].text).toContain("changed its mind");
+  });
+
+  it("sends a token with no shop in town (an impersonator) to the unknown lot, never a guessed shop", () => {
+    const quest = buildQuest([
       { id: "1", commit: commit({ token: IMPERSONATOR, allowed: false, reason: "TokenNotAllowed" }), settle: null, cancelled: false },
-    ];
-    const quest = buildQuest(decisions);
-    expect((quest[0] as any).toCol).toBe(WORLD_COLS - 1);
-    expect((quest[0] as any).toRow).toBe(WORLD_ROWS - 1);
+    ]);
+    const walk = quest[0] as Extract<(typeof quest)[number], { kind: "walk" }>;
+    expect(walk.route[walk.route.length - 1]).toEqual({ col: UNKNOWN_STAND.col, row: UNKNOWN_STAND.row });
+    // Kids see "MYSTERY", never a hex address.
+    expect(walk.placeLabel).toBe("MYSTERY");
+    const battle = quest[1] as Extract<(typeof quest)[number], { kind: "battle" }>;
+    for (const line of battle.lines) expect(line.text).not.toMatch(/0x[0-9a-f]/i);
   });
 
-  it("skips a decision whose commit fell outside the scanned block range - nowhere real to send the hero", () => {
+  it("routes to Ondo's NVIDIA shop, not the bStocks one, for the Ondo token", () => {
+    const quest = buildQuest([{ id: "1", commit: commit({ token: NVDAON }), settle: null, cancelled: false }]);
+    const ondoShop = buildings().find((b) => b.id === "NVDAon")!;
+    const walk = quest[0] as Extract<(typeof quest)[number], { kind: "walk" }>;
+    expect(walk.route[walk.route.length - 1].col).toBe(standSpot(ondoShop).col);
+  });
+
+  it("replays oldest first, starts from home, and walks home at the end", () => {
+    const quest = buildQuest([
+      { id: "2", commit: commit({ allowed: false, reason: "OracleHalted" }), settle: null, cancelled: false },
+      { id: "1", commit: commit({ allowed: true }), settle: null, cancelled: false },
+    ]);
+    expect(quest.map((s) => s.decisionId)).toEqual(["1", "1", "2", "2", null]);
+    const last = quest[quest.length - 1] as Extract<(typeof quest)[number], { kind: "walk" }>;
+    expect(last.placeLabel).toBe(HOME.label);
+    expect(last.route[last.route.length - 1]).toEqual({ col: HOME_STAND.col, row: HOME_STAND.row });
+  });
+
+  it("skips a decision whose commit fell outside the scanned range, and has nothing to do with no decisions", () => {
     const settleOnly: Decision = { id: "9", commit: null, settle: { swapTxHash: "0x1", amountOut: 1n, executionMode: "pool", belowMin: false, txHash: "0x1" }, cancelled: false };
     expect(buildQuest([settleOnly])).toEqual([]);
-  });
-
-  it("plays decisions oldest-first even though the input list is newest-first", () => {
-    const decisions: Decision[] = [
-      { id: "2", commit: commit({ allowed: false, reason: "OracleHalted" }), settle: null, cancelled: false },
-      { id: "1", commit: commit({ allowed: false, reason: "TokenNotAllowed" }), settle: null, cancelled: false },
-    ];
-    const quest = buildQuest(decisions);
-    const decisionOrder = quest.map((s) => s.decisionId);
-    expect(decisionOrder).toEqual(["1", "1", "2", "2"]);
+    expect(buildQuest([])).toEqual([]);
   });
 });

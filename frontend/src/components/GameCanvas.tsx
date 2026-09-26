@@ -1,157 +1,220 @@
 import { useEffect, useRef, useState } from "react";
 import Phaser from "phaser";
 import { WorldScene } from "../game/scenes/WorldScene";
-import { buildQuest, WORLD_COLS, WORLD_ROWS, TILE, HEADER_HEIGHT } from "../game/logic";
-import { bossFor, tokenName, type Decision } from "../lib/covenant";
+import { HERO_FRAME, RULE_CHECKER_FRAME, MONSTER, type QuestStep } from "../game/logic";
+import type { Decision } from "../lib/covenant";
 
 interface GameCanvasProps {
   decisions: Decision[];
-  /** Called the moment the player actually starts the replay (not on load). */
+  /** CSS px on the right covered by the menu panel; the town recenters into what's left. */
+  rightInset: number;
+  /** Called when the player starts the replay (not on load). */
   onStart?: () => void;
 }
 
-// A short pause between the player clicking start and the hero's first
-// step - instant playback read as the game "auto-playing itself" rather
-// than something the player triggered.
-const QUEST_START_DELAY_MS = 900;
+const QUEST_START_DELAY_MS = 700;
+const FONT_WAIT_MS = 2500;
+
+/** One 16x16 frame of a Kenney sheet, scaled up crisply in plain HTML. */
+function Sprite({ sheet, frame, size = 40 }: { sheet: "dungeon" | "town"; frame: number; size?: number }) {
+  const s = size / 16;
+  return (
+    <span
+      aria-hidden
+      className="inline-block shrink-0"
+      style={{
+        width: size,
+        height: size,
+        backgroundImage: `url(/game/kenney-tiny-${sheet}.png)`,
+        backgroundSize: `${192 * s}px ${176 * s}px`,
+        backgroundPosition: `-${(frame % 12) * 16 * s}px -${Math.floor(frame / 12) * 16 * s}px`,
+        imageRendering: "pixelated",
+      }}
+    />
+  );
+}
 
 /**
- * The real 2D game (replaces the earlier emoji-based BossBattle/TerritoryMap
- * pair): Phaser 3, real CC0 sprites from Kenney's "Tiny Dungeon" and
- * "Tiny Town" packs (frontend/assets-src/, see the LICENSE.txt kept there),
- * not an AI-styled decoration layer. A hero walks the real territory map
- * toward wherever a real decision actually traded, and a real denial
- * triggers a real battle screen against the boss sprite for that
- * DenialReason - the queue and every position on the map come from
- * frontend/src/game/logic.ts, unit-tested independently of Phaser/canvas
- * rendering (which needs a real browser to verify - see this component's
- * manual browser verification in the session that built it).
+ * The game: Phaser 3 with Kenney's CC0 Tiny Town / Tiny Dungeon art. The
+ * canvas is rendered at the screen's real device resolution (not a small
+ * canvas stretched with CSS), so pixel art and text both stay sharp at any
+ * size; WorldScene's camera fits the town to whatever shape the window is.
  */
-export function GameCanvas({ decisions, onStart }: GameCanvasProps) {
+export function GameCanvas({ decisions, rightInset, onStart }: GameCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const gameRef = useRef<Phaser.Game | null>(null);
   const sceneRef = useRef<WorldScene | null>(null);
-  const [current, setCurrent] = useState<string | null>(null);
+  const [step, setStep] = useState<QuestStep | null>(null);
+  const [place, setPlace] = useState<string>("");
   const [ready, setReady] = useState(false);
   const [started, setStarted] = useState(false);
+  const [finished, setFinished] = useState(false);
+  const [score, setScore] = useState({ allowed: 0, blocked: 0 });
+
+  const trades = decisions.filter((d) => d.commit).length;
 
   useEffect(() => {
-    if (!containerRef.current || gameRef.current) return;
-    const width = WORLD_COLS * TILE;
-    const height = WORLD_ROWS * TILE + HEADER_HEIGHT;
-    const game = new Phaser.Game({
-      type: Phaser.AUTO,
-      width,
-      height,
-      parent: containerRef.current,
-      backgroundColor: "#0b0d10",
-      scene: [WorldScene],
-      // pixelArt forces nearest-neighbor texture filtering (crisp sprites
-      // at every scale step); antialias/roundPixels off keeps Phaser's own
-      // text and shape rendering crisp too, rather than anti-aliased and
-      // then blurred further by FIT's canvas upscale.
-      render: { pixelArt: true, antialias: false, roundPixels: true },
-      scale: {
-        mode: Phaser.Scale.FIT,
-        autoCenter: Phaser.Scale.CENTER_BOTH,
-        width,
-        height,
-      },
-    });
-    gameRef.current = game;
-    // Belt-and-suspenders: `render.pixelArt` should already make Phaser set
-    // this, but only on the browsers where its own default matches - set it
-    // explicitly so FIT's CSS-level canvas upscale never falls back to the
-    // browser's default bilinear smoothing.
-    game.canvas.style.imageRendering = "pixelated";
-    // The scene object doesn't exist yet at all right after `new
-    // Phaser.Game(...)` - the SceneManager adds it during boot, which
-    // happens on a later tick. Wait for the Game's own READY event first
-    // (boot complete, scene object now exists), THEN wait for that SCENE's
-    // own CREATE event before touching it. "ready" alone isn't enough:
-    // preload() loads real image files asynchronously, so create() (which
-    // actually assigns this.hero/this.battleLayer) can still be pending
-    // when "ready" fires - calling playQuest() in that window was the real
-    // cause of the earlier "Cannot read properties of undefined" crash.
-    game.events.once(Phaser.Core.Events.READY, () => {
-      const scene = game.scene.getScene("world") as WorldScene;
-      sceneRef.current = scene;
-      const onCreated = () => {
-        scene.setOnStep((step) => {
-          setCurrent(step ? step.decisionId : null);
-        });
-        setReady(true);
-      };
-      // In case CREATE already fired between boot and this handler
-      // running (e.g. cached assets loading instantly).
-      if (scene.sys.settings.status >= Phaser.Scenes.RUNNING) {
-        onCreated();
-      } else {
-        scene.events.once(Phaser.Scenes.Events.CREATE, onCreated);
-      }
-    });
+    let cancelled = false;
+    let game: Phaser.Game | null = null;
+    let observer: ResizeObserver | null = null;
+
+    (async () => {
+      // Draw the town's signs in the pixel font from the first frame, not a
+      // fallback font that never gets redrawn.
+      await Promise.race([
+        document.fonts.load("8px 'Press Start 2P'").catch(() => undefined),
+        new Promise((r) => setTimeout(r, FONT_WAIT_MS)),
+      ]);
+      const el = containerRef.current;
+      if (cancelled || !el) return;
+      const dpr = window.devicePixelRatio || 1;
+      game = new Phaser.Game({
+        type: Phaser.AUTO,
+        parent: el,
+        backgroundColor: "#2f6b33",
+        scene: [WorldScene],
+        render: { pixelArt: true, antialias: false, roundPixels: true },
+        scale: {
+          mode: Phaser.Scale.NONE,
+          width: Math.max(1, el.clientWidth * dpr),
+          height: Math.max(1, el.clientHeight * dpr),
+          zoom: 1 / dpr,
+        },
+      });
+      observer = new ResizeObserver(() => {
+        const d = window.devicePixelRatio || 1;
+        game?.scale.resize(Math.max(1, el.clientWidth * d), Math.max(1, el.clientHeight * d));
+      });
+      observer.observe(el);
+
+      // The scene object only exists after boot (READY), and its create()
+      // - which builds the hero and the town - runs after the sprite
+      // sheets finish loading, so wait for the scene's own CREATE too.
+      game.events.once(Phaser.Core.Events.READY, () => {
+        const scene = game!.scene.getScene("world") as WorldScene;
+        const onCreated = () => {
+          sceneRef.current = scene;
+          scene.setOnStep((s) => {
+            setStep(s);
+            if (s?.kind === "walk") setPlace(s.placeLabel);
+            if (s === null) setFinished(true);
+          });
+          scene.setOnResult((_id, won) =>
+            setScore((sc) => (won ? { ...sc, allowed: sc.allowed + 1 } : { ...sc, blocked: sc.blocked + 1 })),
+          );
+          setReady(true);
+        };
+        if (scene.sys.settings.status >= Phaser.Scenes.RUNNING) onCreated();
+        else scene.events.once(Phaser.Scenes.Events.CREATE, onCreated);
+      });
+    })();
+
     return () => {
-      game.destroy(true);
-      gameRef.current = null;
+      cancelled = true;
+      observer?.disconnect();
+      game?.destroy(true);
       sceneRef.current = null;
     };
   }, []);
 
   useEffect(() => {
-    // Gated behind an explicit player click (see the "▶ START" overlay
-    // below) - the world used to start replaying decisions, battles and
-    // all, the instant the page loaded, before the player had even seen
-    // the map. A short delay on top of that so the first step still reads
-    // as "the player just started this" rather than instant playback.
-    if (!ready || !started || !sceneRef.current) return;
-    const scene = sceneRef.current;
-    const id = setTimeout(() => scene.playQuest(buildQuest(decisions)), QUEST_START_DELAY_MS);
-    return () => clearTimeout(id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ready, started, decisions]);
+    if (ready) sceneRef.current?.setRightInset(rightInset * (window.devicePixelRatio || 1));
+  }, [ready, rightInset]);
 
-  const currentDecision = decisions.find((d) => d.id === current);
-  const currentBoss = currentDecision?.commit && !currentDecision.commit.allowed ? bossFor(currentDecision.commit.reason) : null;
+  function start() {
+    setStarted(true);
+    setFinished(false);
+    setScore({ allowed: 0, blocked: 0 });
+    onStart?.();
+    setTimeout(() => sceneRef.current?.playDecisions(decisions), QUEST_START_DELAY_MS);
+  }
+
+  // Numbered by the decision's own place in the day (oldest first), not by
+  // the running score - the score ticks up at the end of a battle, before
+  // the next step starts, which briefly showed "Trade 5 of 4".
+  const order = decisions.filter((d) => d.commit).map((d) => d.id).reverse();
+  const n = step?.decisionId ? order.indexOf(step.decisionId) + 1 : 0;
+  let status = "Your agent is waiting at home.";
+  if (started && step?.kind === "walk") {
+    status = step.decisionId === null ? "All done! Walking home." : `Trade ${n} of ${trades}: walking to the ${place} shop…`;
+  } else if (started && step?.kind === "battle") {
+    status = `Trade ${n} of ${trades}: safety check at the ${place} shop!`;
+  } else if (finished) {
+    status = `Day complete: ${score.allowed} allowed, ${score.blocked} blocked.`;
+  }
 
   return (
-    <div className="relative h-full w-full overflow-hidden bg-[var(--panel)]">
-      {/* Fullscreen game - no HTML chrome shrinking the canvas. Zone labels
-          render inside the canvas itself (WorldScene.drawWorld); this is
-          just a thin status strip overlaid on top of the game, not beside
-          it, per direction that the panels/HUD "can be in game only".
-          Plain `absolute inset-0`, no flex centering here - Phaser's own
-          CENTER_BOTH scale mode already positions the canvas within this
-          div via inline margin styles, and the two centering systems
-          fighting each other was leaving the canvas pinned near the
-          bottom instead of centered on a fresh page load. */}
+    <div className="absolute inset-0 overflow-hidden bg-[#2f6b33]">
       <div ref={containerRef} className="absolute inset-0" />
+
       {!ready && (
-        <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-[var(--bg)]">
-          <div className="h-8 w-8 animate-spin rounded-full border-2 border-[var(--border)] border-t-[var(--accent)]" />
-          <p className="font-pixel text-[10px] tracking-widest text-[var(--muted)]">LOADING WORLD…</p>
+        <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-4 bg-[var(--bg)]">
+          <Sprite sheet="dungeon" frame={HERO_FRAME} size={48} />
+          <p className="font-pixel text-[10px] tracking-widest text-[var(--muted)]">LOADING TOWN…</p>
         </div>
       )}
-      {ready && !started && (
-        <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/35">
-          <button
-            onClick={() => {
-              setStarted(true);
-              onStart?.();
-            }}
-            className="font-pixel animate-pulse rounded border-2 border-[var(--text)] bg-[var(--panel)] px-6 py-3 text-xs text-[var(--text)] shadow-2xl hover:border-[var(--accent)] hover:text-[var(--accent)]"
-          >
-            ▶ RELIVE TODAY
-          </button>
+
+      {ready && started && (
+        <div className="pointer-events-none absolute left-3 top-3 z-10 flex items-center gap-3 rounded-lg border-2 border-slate-800 bg-white/95 px-3 py-2 text-slate-800 shadow-lg">
+          <span className="font-pixel text-[10px] text-green-700">✓ ALLOWED {score.allowed}</span>
+          <span className="font-pixel text-[10px] text-red-700">✋ BLOCKED {score.blocked}</span>
         </div>
       )}
-      <p className="pointer-events-none absolute bottom-0 left-0 right-0 min-h-[1.2em] bg-gradient-to-t from-black/70 to-transparent px-4 py-2 text-center text-xs text-[var(--muted)]">
-        {currentDecision?.commit
-          ? currentBoss
-            ? `Decision #${current}: ${currentDecision.commit.side} attempt on ${tokenName(currentDecision.commit.token)} — battling ${currentBoss.icon} ${currentBoss.name}`
-            : `Decision #${current}: ${currentDecision.commit.side} on ${tokenName(currentDecision.commit.token)} — allowed, no boss here`
-          : started
-            ? "Walking home."
-            : "Exploring near home."}
+
+      {ready && (!started || finished) && (
+        <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/45 p-4" style={{ paddingRight: rightInset + 16 }}>
+          <div className="w-full max-w-md rounded-xl border-4 border-slate-800 bg-white p-5 text-slate-800 shadow-2xl">
+            <h2 className="font-pixel mb-4 text-center text-sm">{finished ? "DAY COMPLETE!" : "HOW IT WORKS"}</h2>
+            {finished ? (
+              <p className="mb-4 text-center text-sm">
+                The agent tried <b>{trades}</b> trades today. <b className="text-green-700">{score.allowed} followed the rules</b> and went ahead.{" "}
+                <b className="text-red-700">{score.blocked} broke a rule</b> and were blocked, so that money stayed safe.
+              </p>
+            ) : (
+              <ul className="mb-4 space-y-3 text-sm">
+                <li className="flex items-center gap-3">
+                  <Sprite sheet="dungeon" frame={HERO_FRAME} />
+                  <span>
+                    This is your <b>AGENT</b>. It buys and sells stocks for you.
+                  </span>
+                </li>
+                <li className="flex items-center gap-3">
+                  <Sprite sheet="town" frame={63} />
+                  <span>
+                    Each house is a <b>SHOP</b> for one stock. Bigger house = more money traded there.
+                  </span>
+                </li>
+                <li className="flex items-center gap-3">
+                  <Sprite sheet="dungeon" frame={RULE_CHECKER_FRAME} />
+                  <span>
+                    Before every trade, the agent must battle the <b>SAFETY RULES</b>. Follows the rules?{" "}
+                    <b className="text-green-700">Agent wins, trade happens.</b>
+                  </span>
+                </li>
+                <li className="flex items-center gap-3">
+                  <Sprite sheet="dungeon" frame={MONSTER.NotionalExceeded.frame} />
+                  <span>
+                    Breaks a rule? A <b>RULE MONSTER</b> wins and the trade is{" "}
+                    <b className="text-red-700">BLOCKED. Your money stays safe.</b>
+                  </span>
+                </li>
+              </ul>
+            )}
+            <button
+              onClick={start}
+              disabled={trades === 0}
+              className="font-pixel w-full rounded-lg border-4 border-slate-800 bg-yellow-300 px-4 py-3 text-xs text-slate-900 shadow-[0_4px_0_#1e293b] transition hover:bg-yellow-200 active:translate-y-1 active:shadow-none disabled:opacity-50"
+            >
+              {trades === 0 ? "NO TRADES FOUND" : finished ? "▶ WATCH AGAIN" : `▶ WATCH TODAY'S ${trades} TRADES`}
+            </button>
+          </div>
+        </div>
+      )}
+
+      <p
+        className="font-pixel pointer-events-none absolute bottom-0 left-0 z-10 bg-gradient-to-t from-black/80 to-transparent px-4 pb-3 pt-6 text-center text-[10px] leading-relaxed text-white"
+        style={{ right: rightInset }}
+      >
+        {status}
       </p>
     </div>
   );

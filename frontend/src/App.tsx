@@ -2,7 +2,12 @@ import { useEffect, useState } from "react";
 import { fetchSnapshot, fmtAmount, describeDecision, guardedVsUnguarded, bossFor, tokenName, type CovenantSnapshot, type Decision } from "./lib/covenant";
 import { TradingCard } from "./components/TradingCard";
 import { GameCanvas } from "./components/GameCanvas";
+import { monsterFor } from "./game/logic";
 import narration from "./data/narration.json";
+
+const WIDE_MIN_PX = 900;
+/** The menu's width (360) plus its 12px margin and a 12px gap before the town. */
+const PANEL_STRIP_PX = 384;
 
 function readUrlParams() {
   const params = new URLSearchParams(location.search);
@@ -32,6 +37,7 @@ function DecisionRow({ d }: { d: Decision }) {
   const plain = describeDecision(d, fmtAmount);
   const twin = guardedVsUnguarded(d, fmtAmount);
   const boss = c && !c.allowed ? bossFor(c.reason) : null;
+  const monster = c && !c.allowed ? monsterFor(c.reason).name : null;
 
   return (
     <div className="border-b border-[var(--border)] py-2.5">
@@ -52,7 +58,12 @@ function DecisionRow({ d }: { d: Decision }) {
       {twin && <p className="mt-1 rounded bg-[rgba(62,207,142,.06)] px-2 py-1 text-xs text-[var(--allow)]">{twin}</p>}
       {boss && (
         <p className="mt-1 text-[11px] text-[var(--muted)]">
-          {boss.icon} Fought in the world as <span className="font-semibold">{boss.name}</span>.
+          {boss.icon} In the game: lost to the <span className="font-semibold">{monster}</span>.
+        </p>
+      )}
+      {c?.allowed && (
+        <p className="mt-1 text-[11px] text-[var(--muted)]">
+          In the game: beat the <span className="font-semibold">RULE CHECKER</span>.
         </p>
       )}
     </div>
@@ -76,6 +87,19 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [panelOpen, setPanelOpen] = useState(true);
+  const [wide, setWide] = useState(() => window.innerWidth >= WIDE_MIN_PX);
+
+  useEffect(() => {
+    const onResize = () => setWide(window.innerWidth >= WIDE_MIN_PX);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+
+  // On a wide screen the open menu reserves its strip and the town recenters
+  // beside it, so the menu can stay open without ever covering a battle. On
+  // a narrow screen there's no room for both, so the menu overlays and
+  // closes itself when the replay starts.
+  const rightInset = panelOpen && wide ? PANEL_STRIP_PX : 0;
 
   async function load() {
     setError(null);
@@ -87,10 +111,6 @@ export default function App() {
     try {
       const snap = await fetchSnapshot(rpc, contract, fromBlock);
       setSnapshot(snap);
-      // Get out of the way of the game the moment it has something to show -
-      // the panel reopens on request, but a fresh connect shouldn't leave it
-      // sitting over the map.
-      setPanelOpen(false);
     } catch (err) {
       console.error(err);
       setError(err instanceof Error ? err.message : String(err));
@@ -106,15 +126,15 @@ export default function App() {
 
   return (
     <main className="relative h-screen w-screen overflow-hidden bg-[var(--bg)]">
-      {/* The game fills the entire screen - it is the app, not a panel next
-          to the app. Everything else (connection form, trading card,
-          mandate stats, decision log) is a Pokemon-menu-style overlay that
-          floats ON TOP of the game canvas and can be pulled up or dismissed,
-          rather than a sidebar that permanently shrinks the game area. Per
-          direction: "I kind of wanted it to only be a game, and others can
-          be sidepanels" + "the panels can be in game only." */}
+      {/* The game fills the entire screen; the menu floats on top of it. */}
       {snapshot ? (
-        <GameCanvas decisions={snapshot.decisions} onStart={() => setPanelOpen(false)} />
+        <GameCanvas
+          decisions={snapshot.decisions}
+          rightInset={rightInset}
+          onStart={() => {
+            if (!wide) setPanelOpen(false);
+          }}
+        />
       ) : (
         <div className="flex h-full flex-col items-center justify-center gap-6 bg-[var(--bg)] px-6 text-center">
           <h1 className="font-pixel text-xl text-[var(--text)] sm:text-2xl">COVENANT</h1>
