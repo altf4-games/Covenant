@@ -588,13 +588,30 @@ contract Covenant {
         // the quote to both the minimum and the oracle, so an inflated quote
         // can't hide a bad fill. Both sides of the comparison are the token's
         // own price, so no token-to-share normalisation is needed here.
+        //
+        // Red-team H12: a sell with amountIn == 0 divided by amountIn here
+        // and panicked (0x12, division by zero) instead of denying cleanly -
+        // confirmed live, since nothing upstream rejects a zero amount (a
+        // zero-size sell trivially clears the notional/daily/slippage
+        // checks too, since everything it's compared against scales with
+        // amountIn). That broke commit()'s own contract of never reverting
+        // on a policy denial. quotedOut == 0 is already caught by the
+        // slippage check above and can't reach the buy branch below, but
+        // guarding both sides explicitly here doesn't depend on that
+        // ordering holding forever. A zero-size trade has no implied price
+        // to measure drift against, so it's treated as passing this check
+        // rather than assigned a new denial reason - the append-only
+        // DenialReason list every off-chain decoder indexes into doesn't
+        // need a new value for "there was nothing to check".
         if (!o.sessionOpen && cfg.maxClosedMarketDriftBps > 0) {
             if (side == Side.Buy) {
-                uint256 implied = (amountIn * 1e18) / quotedOut;
-                if (implied * 10_000 > o.lastCloseUsd * (10_000 + uint256(cfg.maxClosedMarketDriftBps))) {
-                    return (DenialReason.ClosedMarketDrift, 0);
+                if (quotedOut > 0) {
+                    uint256 implied = (amountIn * 1e18) / quotedOut;
+                    if (implied * 10_000 > o.lastCloseUsd * (10_000 + uint256(cfg.maxClosedMarketDriftBps))) {
+                        return (DenialReason.ClosedMarketDrift, 0);
+                    }
                 }
-            } else {
+            } else if (amountIn > 0) {
                 uint256 implied = (quotedOut * 1e18) / amountIn;
                 if (implied * 10_000 < o.lastCloseUsd * (10_000 - uint256(cfg.maxClosedMarketDriftBps))) {
                     return (DenialReason.ClosedMarketDrift, 0);

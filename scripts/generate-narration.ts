@@ -60,17 +60,39 @@ export function buildPrompt(d: Decision): string | null {
   return `Write one excited sportscaster sentence (under 30 words) narrating a trading bot's ${verb} order for $${amount} of ${name} getting approved and waiting to settle. Real enthusiasm, no disclaimers.`;
 }
 
-async function narrate(apiKey: string, prompt: string): Promise<string> {
-  const res = await fetch(GEMINI_URL(apiKey), {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
-  });
-  const body = await res.json();
-  if (!res.ok) throw new Error(`Gemini API error: HTTP ${res.status} ${JSON.stringify(body)}`);
-  const text = body?.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (typeof text !== "string" || text.length === 0) throw new Error(`Gemini returned no text: ${JSON.stringify(body)}`);
-  return text.trim();
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * gemini-2.5-flash's free tier returns a real, documented-as-transient 503
+ * ("This model is currently experiencing high demand... usually temporary")
+ * often enough in practice that a single-shot call isn't reliable - seen
+ * live, back to back, on prompts as small as one sentence, while a bare
+ * "Say OK" against the same model in the same minute succeeded. Retried
+ * with backoff rather than failing the whole batch on the first bad roll.
+ */
+async function narrate(apiKey: string, prompt: string, attempts = 4): Promise<string> {
+  let lastError: unknown;
+  for (let i = 0; i < attempts; i++) {
+    if (i > 0) await sleep(2 ** i * 1000);
+    const res = await fetch(GEMINI_URL(apiKey), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
+    });
+    const body = await res.json();
+    if (!res.ok) {
+      lastError = new Error(`Gemini API error: HTTP ${res.status} ${JSON.stringify(body)}`);
+      if (res.status === 503 || res.status === 429) continue; // retry only on transient errors
+      throw lastError;
+    }
+    const text = body?.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (typeof text !== "string" || text.length === 0) {
+      lastError = new Error(`Gemini returned no text: ${JSON.stringify(body)}`);
+      continue;
+    }
+    return text.trim();
+  }
+  throw lastError;
 }
 
 async function main() {

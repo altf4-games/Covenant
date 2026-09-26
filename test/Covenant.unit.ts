@@ -605,6 +605,19 @@ describe("Covenant v2 (unit, mocked tokens)", function () {
       await f.covenant.setClosedMarketDrift(f.stockAddress, 100); // 1%: acceptable
       expect(await f.covenant.previewDecision(Side.Buy, f.stockAddress, a.amountIn, a.quotedOut, a.minOut)).to.equal(Reason.None);
     });
+
+    it("H12: a zero-size sell no longer panics on division by zero while the market is closed", async function () {
+      const f = await networkHelpers.loadFixture(deployFixture);
+      await makeTradeable(f, { slippageBps: 100 });
+      await f.covenant.setClosedMarketDrift(f.stockAddress, 100);
+      await closedMarket(f, 200n * E18, 200n * E18);
+
+      // amountIn = 0 makes oracleOut (and notional) 0 too, so quotedOut/minOut
+      // only need to satisfy the slippage ratio against each other -
+      // 9_900/10_000 clears a 1% (100 bps) slippage bound exactly.
+      expect(await f.covenant.previewDecision(Side.Sell, f.stockAddress, 0n, 10_000n, 9_900n)).to.equal(Reason.None);
+      expect((await commit(f, Side.Sell, { amountIn: 0n, quotedOut: 10_000n, minOut: 9_900n })).reason).to.equal(Reason.None);
+    });
   });
 
   describe("the allowed path: commit -> settle", function () {
