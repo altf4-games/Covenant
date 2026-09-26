@@ -150,11 +150,39 @@ The live suites share `scripts/lib/local-fork.ts`, which deploys with the real `
 
 ## Running the status page
 
+Two versions exist. `frontend/` (React + Vite + Tailwind + framer-motion) is the primary one, built for GAMIFICATION-PLAN-2026-09-25.md's presentation layer - boss battles, the Guarded vs. Unguarded Twin, the trading card, and the territory map. `status-page/index.html` is the original zero-build static page; both read the exact same tested logic in `status-page/lib.mjs`, so nothing about the on-chain reads or decision decoding differs between them.
+
 ```bash
-python3 -m http.server 4173 --directory status-page
+cd frontend && npm install && npm run dev
 ```
 
-Open `http://localhost:4173` and point it at an RPC URL and a deployed Covenant (or pass `?rpc=...&contract=...&fromBlock=...`). It shows the mandate and every decision, joined with its settle or cancel, each with a plain-English line underneath ("Buy order: spend 0.5 USDT for NVIDIA (NVDAB) — denied: NotionalExceeded.") - real stock names from a small pinned map, not raw addresses or wei. `scripts/seed-status-page-demo.ts` deploys to a local `hardhat node --fork` and records a denial, a settled trade and a cancelled one, if you want something to look at.
+Open the printed localhost URL and point it at an RPC URL and a deployed Covenant (or pass `?rpc=...&contract=...&fromBlock=...`). `scripts/seed-status-page-demo.ts` deploys to a local `hardhat node --fork` and records a denial, a settled trade and a cancelled one, if you want something to look at - works against either version, since both take the same query params.
+
+`frontend`'s own test suite (`cd frontend && npm test`, Vitest + React Testing Library) covers the parts unique to it: the game's quest-building and boss-sprite-mapping logic for every real `DenialReason`, the trading card's rarity classification from a real track record, and Covenant's own decision-decoding re-exports - real business-logic tests, not snapshot tests or canvas pixel comparisons (Phaser's own rendering needs a real browser, which is where it was verified instead - see below).
+
+### The world (a real 2D game, not a decoration layer)
+
+The first version of this was React components with emoji standing in for sprites - flagged, correctly, as reading like an AI-generated mockup, not a game. It's now Phaser 3 (`frontend/src/game/`), with real CC0 sprite art from Kenney's "Tiny Dungeon" and "Tiny Town" packs (`frontend/assets-src/`, license files kept alongside the shipped assets in `frontend/public/game/`) - a hero character, monster sprites, and real tile art, not emoji or a hand-rolled placeholder.
+
+- **The map** is tile-rendered terrain across three real zones (`frontend/src/game/scenes/WorldScene.ts`), sized and populated from the same real GeckoTerminal reserves already cited in `docs/research/verified-facts.md` and `docs/partner-feedback/friction-log.md` B8/B9 - bStocks Land lush and tree-dense (genuinely the largest, most liquid), Ondo Territory a small real settlement (~200x thinner), xStocks Wasteland genuinely barren ($324 total reserves, $0 24h volume).
+- **The hero walks.** Every real decision in the loaded range becomes a quest step (`frontend/src/game/logic.ts`'s `buildQuest`, unit-tested independently of Phaser/canvas rendering): the hero sprite walks from home to wherever that trade actually happened, in the order it happened on chain.
+- **Real boss battles.** A real denial triggers a real battle scene: the correct monster sprite for that `DenialReason` (`BOSS_SPRITE` in `logic.ts` - a distinct creature for the flagship `ClosedMarketDrift`, others grouped by the same "spending cap" family the icon version used), a lunge-and-bounce-back clash (the agent never wins a denial - the mandate held), and a result banner. An allowed decision gets a quiet green arrival ring instead - nothing to fight, since nothing was stopped.
+
+### Guarded vs. Unguarded Twin
+
+Still shown in the decision list for every real denial: what the wallet would have spent with no mandate at all, computed from `amountIn` Covenant already evaluated at commit time - no second real trade, no invented number (`status-page/lib.mjs`'s `guardedVsUnguarded`).
+
+### Trading card
+
+A real ERC-8004 identity, registered on BSC mainnet (`docs/evidence/erc8004-registration.json`: agentId 358509, tx `0x34fbf9...591f1b`, ~$0.05 real gas, ahead of the single final mainnet deploy pass by explicit choice, since this card needed a real identity to show). The card's rarity tier is a real classification from the loaded decisions' actual track record (`frontend/src/lib/rarity.ts`) - Legendary the moment a real `ClosedMarketDrift` denial lands, Gold once a real denial and a real settle both exist, Silver for real activity short of that, Bronze otherwise. That's exactly the kind of task TypeSafe's Jev model (a classifier, not a text generator - confirmed by reading its own docs, not assumed) is built for; it's wired as a disclosed, deterministic heuristic instead of a live Jev call because a real API key needs a new third-party account this session can't create on your behalf, the same constraint as Gemini's key below.
+
+### Play-by-play narration (needs your own key)
+
+`scripts/generate-narration.ts` batch-generates one sportscaster-style sentence per real decision via Gemini, grounded only in real on-chain fields, and writes `frontend/src/data/narration.json` for the app to read statically (no live API call from the browser, no key exposed client-side). Needs a free `GEMINI_API_KEY` from `aistudio.google.com` - a real account sign-in, so not something this session can do for you; the app renders nothing extra until that file has real entries.
+
+```bash
+GEMINI_API_KEY=... npx tsx scripts/generate-narration.ts <rpcUrl> <covenantAddress> <fromBlock>
+```
 
 ## Running the MCP server
 

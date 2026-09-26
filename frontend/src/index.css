@@ -1,0 +1,35 @@
+@import "tailwindcss";
+
+:root {
+  --bg: #0b0d10;
+  --panel: #14171c;
+  --panel-2: #191c22;
+  --border: #262b33;
+  --text: #e6e9ee;
+  --muted: #8b93a1;
+  --allow: #3ecf8e;
+  --deny: #e5484d;
+  --accent: #6ea8fe;
+  --gold: #f5c451;
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+::selection {
+  background: var(--accent);
+  color: #0b0d10;
+}
