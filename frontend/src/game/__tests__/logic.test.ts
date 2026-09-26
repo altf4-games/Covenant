@@ -69,7 +69,7 @@ describe("buildQuest", () => {
     const quest = buildQuest(decisions);
     expect(quest).toHaveLength(2);
     expect(quest[0]).toMatchObject({ kind: "walk", decisionId: "1" });
-    expect(quest[1]).toMatchObject({ kind: "battle", decisionId: "1", reason: "NotionalExceeded", sprite: "boss_golem" });
+    expect(quest[1]).toMatchObject({ kind: "battle", decisionId: "1", reason: "NotionalExceeded", sprite: "boss_golem", bossName: "The Spending Cap", bossIcon: "💰" });
 
     const nvdabPos = tokenTilePositions().get("NVDAB")!;
     expect((quest[0] as any).toCol).toBe(nvdabPos.col);

@@ -16,7 +16,7 @@
     "@testing-library/user-event": "^14.6.7",
     "ethers": "^6.17.0",
     "jsdom": "^30.1.1",
-    "phaser": "^4.2.1",
+    "phaser": "^3.90.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "vitest": "^5.0.2"

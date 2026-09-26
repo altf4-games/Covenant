@@ -18,15 +18,17 @@
   box-sizing: border-box;
 }
 
-body {
+html, body {
   margin: 0;
+  height: 100%;
+  overflow: hidden;
   background: var(--bg);
   color: var(--text);
   font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 }
 
 #root {
-  min-height: 100vh;
+  height: 100%;
 }
 
 ::selection {

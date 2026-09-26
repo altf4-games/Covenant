@@ -1,4 +1,4 @@
-import type { Decision } from "../lib/covenant";
+import { bossFor, type Decision } from "../lib/covenant";
 import { TERRITORY_TOKENS, type Platform } from "../data/liquidity";
 
 /**
@@ -47,15 +47,33 @@ export const WORLD_ZONES: WorldZone[] = [
 export const WORLD_COLS = 21;
 export const WORLD_ROWS = 9;
 export const HOME_TILE = { col: 2, row: 4 };
+// Rendered tile size in px (source art is 16x16, scaled 1.5x). Shared
+// between WorldScene (which draws at this size) and GameCanvas (which sizes
+// the Phaser.Game/canvas from it) - these two previously used different
+// hardcoded values (32 vs 24), so the canvas was sized for a bigger grid
+// than the one actually drawn, leaving the rendered world floating in a
+// mostly-empty canvas. One constant, one source of truth.
+export const TILE = 24;
+export const HEADER_HEIGHT = 40;
+
+// Markers were originally placed one per column (24px apart at TILE=24) -
+// tight enough that a token's ticker label (up to 5 chars) ran directly
+// into its neighbor's, and 7 bstock markers in a single row rendered as one
+// unreadable smear of text. Spacing them 2 columns apart horizontally and 3
+// rows apart between wrapped rows gives each label room to breathe.
+const MARKER_COL_STRIDE = 2;
+const MARKER_ROW_STRIDE = 3;
 
 /** Real per-token positions, deterministic and derived from liquidity rank within its zone - not random, so the same data always lays out the same way. */
 export function tokenTilePositions(): Map<string, { col: number; row: number; platform: Platform }> {
   const out = new Map<string, { col: number; row: number; platform: Platform }>();
   for (const zone of WORLD_ZONES) {
     const tokensInZone = TERRITORY_TOKENS.filter((t) => t.platform === zone.platform).sort((a, b) => b.reservesUsd - a.reservesUsd);
+    const interior = Math.max(zone.width - 2, 1);
+    const perRow = Math.max(1, Math.floor(interior / MARKER_COL_STRIDE) + 1);
     tokensInZone.forEach((t, i) => {
-      const col = zone.x + 1 + (i % Math.max(zone.width - 2, 1));
-      const row = 2 + Math.floor(i / Math.max(zone.width - 2, 1)) * 2;
+      const col = zone.x + 1 + (i % perRow) * MARKER_COL_STRIDE;
+      const row = 2 + Math.floor(i / perRow) * MARKER_ROW_STRIDE;
       out.set(t.ticker, { col: Math.min(col, WORLD_COLS - 1), row: Math.min(row, WORLD_ROWS - 1), platform: zone.platform });
     });
   }
@@ -64,7 +82,7 @@ export function tokenTilePositions(): Map<string, { col: number; row: number; pl
 
 export type QuestStep =
   | { kind: "walk"; toCol: number; toRow: number; decisionId: string }
-  | { kind: "battle"; decisionId: string; reason: string; sprite: string; allowed: false }
+  | { kind: "battle"; decisionId: string; reason: string; sprite: string; bossName: string; bossIcon: string; allowed: false }
   | { kind: "arrive"; decisionId: string; allowed: true };
 
 /**
@@ -91,7 +109,16 @@ export function buildQuest(decisions: Decision[]): QuestStep[] {
     const target = findTokenPosition(c.token, positions);
     steps.push({ kind: "walk", toCol: target.col, toRow: target.row, decisionId: d.id });
     if (!c.allowed) {
-      steps.push({ kind: "battle", decisionId: d.id, reason: c.reason, sprite: spriteForReason(c.reason), allowed: false });
+      const boss = bossFor(c.reason);
+      steps.push({
+        kind: "battle",
+        decisionId: d.id,
+        reason: c.reason,
+        sprite: spriteForReason(c.reason),
+        bossName: boss?.name ?? c.reason,
+        bossIcon: boss?.icon ?? "⚔️",
+        allowed: false,
+      });
     } else {
       steps.push({ kind: "arrive", decisionId: d.id, allowed: true });
     }
