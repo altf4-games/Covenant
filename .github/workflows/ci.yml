@@ -1,0 +1,44 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: npm ci
+      # The live/fork tests deploy to a real forked BSC mainnet and read
+      # real chain state over public RPCs (no private key needed - nothing
+      # here spends real gas). They can occasionally be slow or flaky under
+      # a free-tier RPC's rate limit; the suite's own failover logic
+      # (cli.mjs's jsonRpcWithFailover) is what those tests exist to prove
+      # works, not something CI needs to work around.
+      #
+      # oracle-updater.live.ts cross-checks against Binance's authenticated
+      # Web3 API (red-team H10) and fails closed without real credentials -
+      # add WEB3_API_KEY / WEB3_API_SECRET as repo secrets (Settings ->
+      # Secrets and variables -> Actions) or this one test fails in CI even
+      # though everything else passes with no secrets at all.
+      - run: npm test
+        env:
+          WEB3_API_KEY: ${{ secrets.WEB3_API_KEY }}
+          WEB3_API_SECRET: ${{ secrets.WEB3_API_SECRET }}
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: npm ci
+        working-directory: frontend
+      - run: npm test
+        working-directory: frontend
+      - run: npm run build
+        working-directory: frontend
