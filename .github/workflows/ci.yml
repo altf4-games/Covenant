@@ -12,6 +12,15 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
+      # setup-node's Node 22 ships npm 10.9.8; both lockfiles were written
+      # by npm 12. `npm ci` requires an exact match to the lockfile, and
+      # npm 10 read this repo's own lockfile as missing several nested
+      # optional-peer entries (@noble/hashes@2.4.0) that npm 12 resolves -
+      # a real, reproduced CI failure (run 36254087956), not a hypothetical
+      # one. Pinning npm here instead of trying to regenerate the lockfile
+      # under an older npm, since the same drift would just reappear the
+      # next time either lockfile is regenerated locally.
+      - run: npm install -g npm@12.0.2
       - run: npm ci
       # The live/fork tests deploy to a real forked BSC mainnet and read
       # real chain state over public RPCs (no private key needed - nothing
@@ -36,6 +45,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
+      - run: npm install -g npm@12.0.2
       - run: npm ci
         working-directory: frontend
       - run: npm test
