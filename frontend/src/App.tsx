@@ -87,6 +87,10 @@ export default function App() {
     try {
       const snap = await fetchSnapshot(rpc, contract, fromBlock);
       setSnapshot(snap);
+      // Get out of the way of the game the moment it has something to show -
+      // the panel reopens on request, but a fresh connect shouldn't leave it
+      // sitting over the map.
+      setPanelOpen(false);
     } catch (err) {
       console.error(err);
       setError(err instanceof Error ? err.message : String(err));
@@ -110,7 +114,7 @@ export default function App() {
           direction: "I kind of wanted it to only be a game, and others can
           be sidepanels" + "the panels can be in game only." */}
       {snapshot ? (
-        <GameCanvas decisions={snapshot.decisions} />
+        <GameCanvas decisions={snapshot.decisions} onStart={() => setPanelOpen(false)} />
       ) : (
         <div className="flex h-full flex-col items-center justify-center gap-6 bg-[var(--bg)] px-6 text-center">
           <h1 className="font-pixel text-xl text-[var(--text)] sm:text-2xl">COVENANT</h1>

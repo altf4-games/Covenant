@@ -6,7 +6,14 @@ import { bossFor, tokenName, type Decision } from "../lib/covenant";
 
 interface GameCanvasProps {
   decisions: Decision[];
+  /** Called the moment the player actually starts the replay (not on load). */
+  onStart?: () => void;
 }
+
+// A short pause between the player clicking start and the hero's first
+// step - instant playback read as the game "auto-playing itself" rather
+// than something the player triggered.
+const QUEST_START_DELAY_MS = 900;
 
 /**
  * The real 2D game (replaces the earlier emoji-based BossBattle/TerritoryMap
@@ -20,12 +27,13 @@ interface GameCanvasProps {
  * rendering (which needs a real browser to verify - see this component's
  * manual browser verification in the session that built it).
  */
-export function GameCanvas({ decisions }: GameCanvasProps) {
+export function GameCanvas({ decisions, onStart }: GameCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const gameRef = useRef<Phaser.Game | null>(null);
   const sceneRef = useRef<WorldScene | null>(null);
   const [current, setCurrent] = useState<string | null>(null);
   const [ready, setReady] = useState(false);
+  const [started, setStarted] = useState(false);
 
   useEffect(() => {
     if (!containerRef.current || gameRef.current) return;
@@ -90,11 +98,17 @@ export function GameCanvas({ decisions }: GameCanvasProps) {
   }, []);
 
   useEffect(() => {
-    if (ready && sceneRef.current) {
-      sceneRef.current.playQuest(buildQuest(decisions));
-    }
+    // Gated behind an explicit player click (see the "▶ START" overlay
+    // below) - the world used to start replaying decisions, battles and
+    // all, the instant the page loaded, before the player had even seen
+    // the map. A short delay on top of that so the first step still reads
+    // as "the player just started this" rather than instant playback.
+    if (!ready || !started || !sceneRef.current) return;
+    const scene = sceneRef.current;
+    const id = setTimeout(() => scene.playQuest(buildQuest(decisions)), QUEST_START_DELAY_MS);
+    return () => clearTimeout(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ready, decisions]);
+  }, [ready, started, decisions]);
 
   const currentDecision = decisions.find((d) => d.id === current);
   const currentBoss = currentDecision?.commit && !currentDecision.commit.allowed ? bossFor(currentDecision.commit.reason) : null;
@@ -104,12 +118,30 @@ export function GameCanvas({ decisions }: GameCanvasProps) {
       {/* Fullscreen game - no HTML chrome shrinking the canvas. Zone labels
           render inside the canvas itself (WorldScene.drawWorld); this is
           just a thin status strip overlaid on top of the game, not beside
-          it, per direction that the panels/HUD "can be in game only". */}
-      <div ref={containerRef} className="absolute inset-0 flex items-center justify-center" />
+          it, per direction that the panels/HUD "can be in game only".
+          Plain `absolute inset-0`, no flex centering here - Phaser's own
+          CENTER_BOTH scale mode already positions the canvas within this
+          div via inline margin styles, and the two centering systems
+          fighting each other was leaving the canvas pinned near the
+          bottom instead of centered on a fresh page load. */}
+      <div ref={containerRef} className="absolute inset-0" />
       {!ready && (
         <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-[var(--bg)]">
           <div className="h-8 w-8 animate-spin rounded-full border-2 border-[var(--border)] border-t-[var(--accent)]" />
           <p className="font-pixel text-[10px] tracking-widest text-[var(--muted)]">LOADING WORLD…</p>
+        </div>
+      )}
+      {ready && !started && (
+        <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/35">
+          <button
+            onClick={() => {
+              setStarted(true);
+              onStart?.();
+            }}
+            className="font-pixel animate-pulse rounded border-2 border-[var(--text)] bg-[var(--panel)] px-6 py-3 text-xs text-[var(--text)] shadow-2xl hover:border-[var(--accent)] hover:text-[var(--accent)]"
+          >
+            ▶ RELIVE TODAY
+          </button>
         </div>
       )}
       <p className="pointer-events-none absolute bottom-0 left-0 right-0 min-h-[1.2em] bg-gradient-to-t from-black/70 to-transparent px-4 py-2 text-center text-xs text-[var(--muted)]">
@@ -117,7 +149,9 @@ export function GameCanvas({ decisions }: GameCanvasProps) {
           ? currentBoss
             ? `Decision #${current}: ${currentDecision.commit.side} attempt on ${tokenName(currentDecision.commit.token)} — battling ${currentBoss.icon} ${currentBoss.name}`
             : `Decision #${current}: ${currentDecision.commit.side} on ${tokenName(currentDecision.commit.token)} — allowed, no boss here`
-          : "Walking home."}
+          : started
+            ? "Walking home."
+            : "Exploring near home."}
       </p>
     </div>
   );

@@ -66,6 +66,37 @@ export class WorldScene extends Phaser.Scene {
     this.battleLayer = this.add.container(0, 0);
     this.battleLayer.setDepth(200);
     this.battleLayer.setVisible(false);
+
+    this.startIdleWander();
+  }
+
+  /**
+   * Nothing to relive yet, or the hero already finished today's decisions -
+   * rather than stand frozen, wander a couple of tiles around home. Purely
+   * cosmetic (a real quest step always takes priority: wanderStep() no-ops
+   * whenever `playing` is true), so it never competes with real playback.
+   */
+  private startIdleWander() {
+    this.time.addEvent({
+      delay: 2600,
+      loop: true,
+      callback: () => {
+        if (this.destroyed || this.playing) return;
+        this.wanderStep();
+      },
+    });
+  }
+
+  private wanderStep() {
+    const col = Phaser.Math.Clamp(HOME_TILE.col + Phaser.Math.Between(-1, 1), 1, 3);
+    const row = Phaser.Math.Clamp(HOME_TILE.row + Phaser.Math.Between(-1, 1), HOME_TILE.row - 1, HOME_TILE.row + 1);
+    this.tweens.add({
+      targets: this.hero,
+      x: this.tileX(col),
+      y: this.tileY(row),
+      duration: 900,
+      ease: "Sine.easeInOut",
+    });
   }
 
   /** Called from React once real decisions load. Cancels any quest in flight. */
@@ -96,7 +127,11 @@ export class WorldScene extends Phaser.Scene {
     for (let row = 0; row < WORLD_ROWS; row++) {
       for (let col = 0; col < WORLD_COLS; col++) {
         const zone = ZONE_OF_COL[col];
-        const isBorder = row === 0 || row === WORLD_ROWS - 1 || col === 0 || col === WORLD_COLS - 1;
+        // Only the top/bottom edges are treated as a border - the left/right
+        // map edges are just wherever a zone happens to end, and bordering
+        // them too made the world read as a closed box rather than a route
+        // that continues off both sides.
+        const isBorder = row === 0 || row === WORLD_ROWS - 1;
         const isRoad = row === HOME_TILE.row;
 
         // Base ground: always a full, opaque tile - never a decoration
@@ -151,14 +186,17 @@ export class WorldScene extends Phaser.Scene {
     // edge of trees - deliberately never on the road row so the border
     // never blocks the one row the hero actually walks along.
     if (isBorder) {
+      // A tree/fence LINE, not a solid wall - every other cell, so
+      // individual sprites still read as trees rather than one fused block.
+      if ((col + (row === 0 ? 0 : 1)) % 2 !== 0) return null;
       if (zone === "ondo") return "fence";
-      if (zone === "xstock") return hash(col, row) < 0.6 ? "rock" : null;
+      if (zone === "xstock") return hash(col, row) < 0.5 ? "rock" : null;
       return "tree";
     }
     const n = hash(col + 91, row + 17);
-    if (zone === "bstock") return n < 0.14 ? "tree" : null;
-    if (zone === "ondo") return n < 0.08 ? "fence" : null;
-    return n < 0.05 ? "rock" : null;
+    if (zone === "bstock") return n < 0.08 ? "tree" : null;
+    if (zone === "ondo") return n < 0.05 ? "fence" : null;
+    return n < 0.03 ? "rock" : null;
   }
 
   private drawTokenMarkers() {
@@ -168,13 +206,19 @@ export class WorldScene extends Phaser.Scene {
       if (!pos) continue;
       // A real game object (a treasure chest, from the same CC0 sprite
       // pack as everything else) sized by real liquidity, not a plain
-      // colored circle standing in for one.
+      // colored circle standing in for one. Tinting the sprite itself
+      // (tried first) muddied its dark outline pixels into an illegible
+      // blob, so the platform color instead goes on a ring underneath,
+      // leaving the chest's own colors - and the gem inside it - visible.
       const scale = Math.max(0.9, Math.min(1.9, 0.9 + Math.sqrt(token.reservesUsd) / 3200));
+      const platformColor = Phaser.Display.Color.HexStringToColor(PLATFORM_LABEL[token.platform].color).color;
       const shadow = this.add.ellipse(this.tileX(pos.col), this.tileY(pos.row) + 7, 16 * scale * 0.7, 5, 0x000000, 0.35);
       shadow.setDepth(2);
+      const ring = this.add.circle(this.tileX(pos.col), this.tileY(pos.row), 9 * scale, platformColor, 0.22);
+      ring.setStrokeStyle(1, platformColor, 0.8);
+      ring.setDepth(2);
       const marker = this.add.sprite(this.tileX(pos.col), this.tileY(pos.row), "marker_chest");
       marker.setScale(1.5 * scale);
-      marker.setTint(Phaser.Display.Color.HexStringToColor(PLATFORM_LABEL[token.platform].color).color);
       marker.setDepth(3);
       this.add
         .text(this.tileX(pos.col), this.tileY(pos.row) + TILE / 2 + 3, token.ticker, {
