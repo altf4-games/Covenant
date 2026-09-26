@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { fetchSnapshot, fmtAmount, describeDecision, guardedVsUnguarded, bossFor, tokenName, type CovenantSnapshot, type Decision } from "./lib/covenant";
 import { TradingCard } from "./components/TradingCard";
 import { GameCanvas } from "./components/GameCanvas";
@@ -23,11 +23,26 @@ function fmtTime(unixSeconds: bigint): string {
   return new Date(Number(unixSeconds) * 1000).toISOString().replace("T", " ").slice(0, 19) + " UTC";
 }
 
+/** A Pokemon-menu window: cream fill, thick dark frame with a light inner rule, pixel-font title. */
+function PokeBox({ title, children, className = "" }: { title?: string; children: ReactNode; className?: string }) {
+  return (
+    <section
+      className={`rounded-xl border-4 border-slate-800 bg-[#fffdf3] p-3 text-slate-800 shadow-[inset_0_0_0_2px_#cbd5e1,0_4px_0_#1e293b] ${className}`}
+    >
+      {title && <h2 className="font-pixel mb-3 text-[9px] text-slate-700">▶ {title}</h2>}
+      {children}
+    </section>
+  );
+}
+
+const INPUT =
+  "w-full rounded-md border-2 border-slate-400 bg-white px-2 py-1.5 text-xs text-slate-800 outline-none placeholder:text-slate-400 focus:border-blue-500";
+
 function StatTile({ label, value }: { label: string; value: string }) {
   return (
-    <div>
-      <div className="text-[10px] uppercase tracking-wide text-[var(--muted)]">{label}</div>
-      <div className="mt-0.5 text-sm">{value}</div>
+    <div className="rounded-md bg-slate-100 px-2 py-1.5">
+      <div className="font-pixel text-[7px] leading-relaxed text-slate-500">{label.toUpperCase()}</div>
+      <div className="mt-0.5 text-sm font-semibold text-slate-800">{value}</div>
     </div>
   );
 }
@@ -40,42 +55,46 @@ function DecisionRow({ d }: { d: Decision }) {
   const monster = c && !c.allowed ? monsterFor(c.reason).name : null;
 
   return (
-    <div className="border-b border-[var(--border)] py-2.5">
-      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-[var(--muted)]">
-        <span className="font-semibold text-[var(--text)]">#{d.id}</span>
-        {c && <span className="uppercase">{c.side}</span>}
+    <div className="border-b-2 border-dashed border-slate-300 py-2.5 last:border-b-0">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-slate-500">
+        <span className="font-pixel text-[8px] text-slate-800">No.{d.id}</span>
+        {c && <span className="font-semibold uppercase">{c.side}</span>}
         {c && (
-          <span className="text-[var(--accent)]" title={c.token}>
+          <span className="font-semibold text-blue-700" title={c.token}>
             {tokenName(c.token)}
           </span>
         )}
         <StatusBadge d={d} />
       </div>
-      <p className="mt-1 text-xs italic text-[var(--muted)]">{plain}</p>
+      <p className="mt-1 text-xs text-slate-600">{plain}</p>
       {(narration as Record<string, string>)[d.id] && (
-        <p className="mt-1 text-xs font-semibold text-[var(--gold)]">🎙️ {(narration as Record<string, string>)[d.id]}</p>
+        <p className="mt-1 text-xs font-semibold text-amber-700">🎙️ {(narration as Record<string, string>)[d.id]}</p>
       )}
-      {twin && <p className="mt-1 rounded bg-[rgba(62,207,142,.06)] px-2 py-1 text-xs text-[var(--allow)]">{twin}</p>}
+      {twin && <p className="mt-1.5 rounded-md border-2 border-green-200 bg-green-50 px-2 py-1 text-xs text-green-800">{twin}</p>}
       {boss && (
-        <p className="mt-1 text-[11px] text-[var(--muted)]">
-          {boss.icon} In the game: lost to the <span className="font-semibold">{monster}</span>.
+        <p className="mt-1.5 text-[11px] text-slate-500">
+          {boss.icon} In the game: lost to the <span className="font-semibold text-red-700">{monster}</span>.
         </p>
       )}
       {c?.allowed && (
-        <p className="mt-1 text-[11px] text-[var(--muted)]">
-          In the game: beat the <span className="font-semibold">RULE CHECKER</span>.
+        <p className="mt-1.5 text-[11px] text-slate-500">
+          In the game: beat the <span className="font-semibold text-green-700">RULE CHECKER</span>.
         </p>
       )}
     </div>
   );
 }
 
+function Badge({ color, children }: { color: string; children: ReactNode }) {
+  return <span className={`font-pixel rounded-md border-2 border-slate-800 px-1.5 py-0.5 text-[7px] text-white ${color}`}>{children}</span>;
+}
+
 function StatusBadge({ d }: { d: Decision }) {
-  if (!d.commit) return <span className="rounded-full bg-white/10 px-2 py-0.5 text-[10px] font-semibold">SETTLED</span>;
-  if (!d.commit.allowed) return <span className="rounded-full bg-[rgba(229,72,77,.15)] px-2 py-0.5 text-[10px] font-semibold text-[var(--deny)]">DENIED</span>;
-  if (d.cancelled) return <span className="rounded-full bg-white/10 px-2 py-0.5 text-[10px] font-semibold">CANCELLED</span>;
-  if (d.settle) return <span className="rounded-full bg-[rgba(62,207,142,.15)] px-2 py-0.5 text-[10px] font-semibold text-[var(--allow)]">{d.settle.belowMin ? "SETTLED, BELOW MIN" : "SETTLED"}</span>;
-  return <span className="rounded-full bg-[rgba(62,207,142,.15)] px-2 py-0.5 text-[10px] font-semibold text-[var(--allow)]">ALLOWED</span>;
+  if (!d.commit) return <Badge color="bg-blue-600">SETTLED</Badge>;
+  if (!d.commit.allowed) return <Badge color="bg-red-600">BLOCKED</Badge>;
+  if (d.cancelled) return <Badge color="bg-slate-500">CANCELLED</Badge>;
+  if (d.settle) return <Badge color="bg-green-600">{d.settle.belowMin ? "FILLED, BELOW MIN" : "FILLED"}</Badge>;
+  return <Badge color="bg-green-600">ALLOWED</Badge>;
 }
 
 export default function App() {
@@ -111,6 +130,9 @@ export default function App() {
     try {
       const snap = await fetchSnapshot(rpc, contract, fromBlock);
       setSnapshot(snap);
+      // Wide screens keep the menu open beside the town. A narrow screen has
+      // no room for both, and the menu would hide the start card.
+      if (window.innerWidth < WIDE_MIN_PX) setPanelOpen(false);
     } catch (err) {
       console.error(err);
       setError(err instanceof Error ? err.message : String(err));
@@ -147,53 +169,48 @@ export default function App() {
 
       <button
         onClick={() => setPanelOpen((v) => !v)}
-        className="font-pixel absolute right-3 top-3 z-20 rounded border-2 border-[var(--text)] bg-[var(--panel)] px-3 py-2 text-[10px] text-[var(--text)] shadow-lg hover:border-[var(--accent)] hover:text-[var(--accent)]"
+        className="font-pixel absolute right-3 top-3 z-20 rounded-lg border-4 border-slate-800 bg-[#fffdf3] px-3 py-2 text-[10px] text-slate-800 shadow-[0_4px_0_#1e293b] transition hover:bg-yellow-200 active:translate-y-1 active:shadow-none"
       >
-        {panelOpen ? "✕" : "☰ MENU"}
+        {panelOpen ? "✕ CLOSE" : "☰ MENU"}
       </button>
 
       {panelOpen && (
-        <aside className="absolute right-3 top-14 z-20 max-h-[calc(100%-4.5rem)] w-[360px] overflow-y-auto rounded-lg border-2 border-[var(--text)] bg-[var(--panel-2)]/95 p-3 text-sm shadow-2xl backdrop-blur-sm">
-          <section className="rounded-lg border border-[var(--border)] bg-[var(--panel)] p-3">
-            <h2 className="mb-2 text-[10px] font-semibold uppercase tracking-wide text-[var(--muted)]">Connection</h2>
-            <input
-              className="mb-2 w-full rounded border border-[var(--border)] bg-[#0e1013] px-2 py-1.5 text-xs text-[var(--text)] outline-none focus:border-[var(--accent)]"
-              placeholder="RPC URL"
-              value={rpc}
-              onChange={(e) => setRpc(e.target.value)}
-            />
-            <input
-              className="mb-2 w-full rounded border border-[var(--border)] bg-[#0e1013] px-2 py-1.5 text-xs text-[var(--text)] outline-none focus:border-[var(--accent)]"
-              placeholder="Covenant contract address (0x...)"
-              value={contract}
-              onChange={(e) => setContract(e.target.value)}
-            />
-            <div className="flex gap-2">
+        <aside className="absolute right-3 top-16 z-20 max-h-[calc(100%-5rem)] w-[360px] space-y-3 overflow-y-auto rounded-2xl border-4 border-slate-800 bg-sky-200/95 p-3 text-sm shadow-2xl">
+          <PokeBox title="CONNECT">
+            <div className="space-y-2">
+              <input className={INPUT} placeholder="RPC URL" value={rpc} onChange={(e) => setRpc(e.target.value)} />
               <input
-                className="flex-1 rounded border border-[var(--border)] bg-[#0e1013] px-2 py-1.5 text-xs text-[var(--text)] outline-none focus:border-[var(--accent)]"
-                placeholder="fromBlock (optional)"
-                value={fromBlock}
-                onChange={(e) => setFromBlock(e.target.value)}
+                className={INPUT}
+                placeholder="Covenant contract address (0x...)"
+                value={contract}
+                onChange={(e) => setContract(e.target.value)}
               />
-              <button
-                onClick={load}
-                disabled={loading}
-                className="rounded bg-[var(--accent)] px-3 py-1.5 text-xs font-semibold text-[#0b0d10] disabled:opacity-50"
-              >
-                {loading ? "…" : "Load"}
-              </button>
+              <div className="flex gap-2">
+                <input
+                  className={INPUT}
+                  placeholder="fromBlock (optional)"
+                  value={fromBlock}
+                  onChange={(e) => setFromBlock(e.target.value)}
+                />
+                <button
+                  onClick={load}
+                  disabled={loading}
+                  className="font-pixel shrink-0 rounded-md border-2 border-slate-800 bg-yellow-300 px-3 text-[9px] text-slate-900 shadow-[0_3px_0_#1e293b] transition hover:bg-yellow-200 active:translate-y-0.5 active:shadow-none disabled:opacity-50"
+                >
+                  {loading ? "…" : "LOAD"}
+                </button>
+              </div>
             </div>
-            {error && <p className="mt-2 text-xs text-[var(--deny)]">{error}</p>}
-          </section>
+            {error && <p className="mt-2 rounded-md bg-red-50 px-2 py-1 text-xs text-red-700">{error}</p>}
+          </PokeBox>
 
           {snapshot && (
             <>
-              <section className="mt-3 flex justify-center">
+              <section className="flex justify-center">
                 <TradingCard decisions={snapshot.decisions} />
               </section>
 
-              <section className="mt-3 rounded-lg border border-[var(--border)] bg-[var(--panel)] p-3">
-                <h2 className="mb-2 text-[10px] font-semibold uppercase tracking-wide text-[var(--muted)]">Mandate</h2>
+              <PokeBox title="THE RULES">
                 <div className="grid grid-cols-2 gap-2">
                   <StatTile label="Active" value={snapshot.mandate.active ? "yes" : "no"} />
                   <StatTile label="Max per trade" value={`$${fmtAmount(snapshot.mandate.maxNotionalPerTradeUsd)}`} />
@@ -203,16 +220,15 @@ export default function App() {
                   <StatTile label="Spent today" value={`$${fmtAmount(snapshot.notionalUsedToday)}`} />
                   <StatTile label="Agent" value={snapshot.agent.slice(0, 6) + "…" + snapshot.agent.slice(-4)} />
                 </div>
-              </section>
+              </PokeBox>
 
-              <section className="mt-3 rounded-lg border border-[var(--border)] bg-[var(--panel)] p-3">
-                <h2 className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--muted)]">Decisions (most recent first)</h2>
+              <PokeBox title="TRADE LOG (NEWEST FIRST)">
                 {snapshot.decisions.length === 0 ? (
-                  <p className="text-xs italic text-[var(--muted)]">No decisions found in the scanned block range.</p>
+                  <p className="text-xs italic text-slate-500">No decisions found in the scanned block range.</p>
                 ) : (
                   snapshot.decisions.map((d) => <DecisionRow key={d.id} d={d} />)
                 )}
-              </section>
+              </PokeBox>
             </>
           )}
         </aside>
