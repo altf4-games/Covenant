@@ -2,7 +2,7 @@ import { expect } from "chai";
 import { ethers } from "ethers";
 import covenantArtifact from "../artifacts/contracts/Covenant.sol/Covenant.json" with { type: "json" };
 import { verifyTx, runJudge, decodeCovenantLog, TOPICS } from "../scripts/judge.js";
-import { startForkNode, setupCovenant, buyAt } from "../scripts/lib/local-fork.js";
+import { startForkNode, setupCovenant, buyAt, isWeb3ApiGeoBlocked } from "../scripts/lib/local-fork.js";
 
 // Real forked node, real Covenant deployed with the real deploy script,
 // real commit/settle/cancel transactions from the agent key. judge.ts's job
@@ -29,7 +29,12 @@ describe("judge.ts (live, real transactions, independent re-derivation from real
 
   before(async function () {
     node = await startForkNode(RPC_PORT);
-    env = await setupCovenant(node.rpcUrl);
+    try {
+      env = await setupCovenant(node.rpcUrl);
+    } catch (err) {
+      if (isWeb3ApiGeoBlocked(err)) return this.skip();
+      throw err;
+    }
     covenant = new ethers.Contract(env.covenantAddress, covenantArtifact.abi, env.agent);
     a = buyAt(env.livePrice, E18);
     const quoteRef = ethers.keccak256(ethers.toUtf8Bytes("real quote json"));

@@ -2,7 +2,7 @@ import { expect } from "chai";
 import { ethers } from "ethers";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { startForkNode, setupCovenant, buyAt } from "../scripts/lib/local-fork.js";
+import { startForkNode, setupCovenant, buyAt, isWeb3ApiGeoBlocked } from "../scripts/lib/local-fork.js";
 
 // Real MCP protocol, real spawned server subprocess, real spawned fork node,
 // real deployed contract (via the real deploy script), real live Binance
@@ -33,7 +33,12 @@ describe("Covenant MCP server (live, real subprocess speaking real MCP protocol)
   before(async function () {
     node = await startForkNode(RPC_PORT);
     RPC_URL = node.rpcUrl;
-    env = await setupCovenant(RPC_URL, { maxNotionalUsd: "50" });
+    try {
+      env = await setupCovenant(RPC_URL, { maxNotionalUsd: "50" });
+    } catch (err) {
+      if (isWeb3ApiGeoBlocked(err)) return this.skip();
+      throw err;
+    }
     covenantAddress = env.covenantAddress;
 
     mcpTransport = new StdioClientTransport({

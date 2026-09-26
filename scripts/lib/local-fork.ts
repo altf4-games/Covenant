@@ -13,6 +13,26 @@ import { pushOracleUpdate, readLiveOracle } from "../oracle-updater.js";
 
 export const BSC_FORK_URL = process.env.BSC_RPC_URL || "https://bsc-mainnet.public.blastapi.io";
 
+/**
+ * Binance's Web3 API geo-blocks by the caller's exit IP - real, documented
+ * behavior (a competing team's own research independently found the same
+ * thing: code 40304, "compliance restriction", from US/SG/NL exits).
+ * GitHub-hosted Actions runners exit from US datacenters, so every
+ * `setupCovenant` call - which goes through `readLiveOracle`'s H10 check
+ * against this same API - fails there every time in hosted CI, regardless
+ * of credentials being correctly configured. Confirmed live: run
+ * 36254685190 failed 9 tests with this exact error, all traceable to
+ * `web3ApiGet` -> `verifyTokenListed` -> `readLiveOracle`, none anywhere
+ * else. Not a code bug and not fixable by retrying - `this.skip()` in the
+ * test's own `before()` when this specific error is seen, so hosted CI
+ * reports "skipped" honestly instead of "failed" for a reason that has
+ * nothing to do with whether Covenant works. A self-hosted runner (or any
+ * machine outside the blocked regions) still gets the full, real signal.
+ */
+export function isWeb3ApiGeoBlocked(err: unknown): boolean {
+  return err instanceof Error && /compliance restriction|code=40304/i.test(err.message);
+}
+
 // Hardhat node's well-known development keys #0-#2. Public, funded only on
 // local nodes. Three distinct keys because Covenant rejects role overlap.
 export const DEV_KEYS = {
@@ -40,13 +60,32 @@ export async function waitForRpc(url: string, timeoutMs: number): Promise<void> 
 }
 
 export async function startForkNode(port: number): Promise<{ rpcUrl: string; process: ChildProcess; stop: () => void }> {
+  // `detached: true` puts the child in its own process group. `npx` spawns
+  // Hardhat's real node process as its own child in turn, and killing just
+  // the `npx` PID doesn't reliably reach that grandchild - confirmed real,
+  // not hypothetical: a live suite run in CI (Linux) printed its full
+  // mocha summary (103 passing, 9 failing - the failures were a real,
+  // separate Web3 API geo-block, not this) and then hung for 10+ minutes
+  // instead of exiting, while the exact same suite always exited cleanly
+  // locally (macOS). Killing the whole group (`process.kill(-pid, ...)`,
+  // the POSIX convention for a negative pid) reaches every process `npx`
+  // spawned, not just the wrapper.
   const child = spawn("npx", ["hardhat", "node", "--fork", BSC_FORK_URL, "--chain-id", "56", "--port", String(port)], {
     cwd: new URL("../..", import.meta.url).pathname,
     stdio: "ignore",
+    detached: true,
   });
   const rpcUrl = `http://127.0.0.1:${port}`;
   await waitForRpc(rpcUrl, 60_000);
-  return { rpcUrl, process: child, stop: () => child.kill() };
+  const stop = () => {
+    if (child.pid === undefined) return;
+    try {
+      process.kill(-child.pid, "SIGTERM");
+    } catch {
+      child.kill(); // fallback if the group kill itself fails (e.g. already exited)
+    }
+  };
+  return { rpcUrl, process: child, stop };
 }
 
 /**

@@ -2,7 +2,7 @@ import { expect } from "chai";
 import { ethers } from "ethers";
 import covenantArtifact from "../artifacts/contracts/Covenant.sol/Covenant.json" with { type: "json" };
 import { COMMANDS } from "../skills/covenant-mandate/scripts/cli.mjs";
-import { startForkNode, setupCovenant, buyAt } from "../scripts/lib/local-fork.js";
+import { startForkNode, setupCovenant, buyAt, isWeb3ApiGeoBlocked } from "../scripts/lib/local-fork.js";
 
 // The skill's cli.mjs is a standalone, zero-dep script meant to run against
 // a real HTTP RPC endpoint exactly like it would in production - not against
@@ -25,7 +25,12 @@ describe("covenant-mandate skill CLI (live, against a real spawned JSON-RPC node
   before(async function () {
     node = await startForkNode(RPC_PORT);
     rpcUrl = node.rpcUrl;
-    env = await setupCovenant(rpcUrl, { maxNotionalUsd: "50" });
+    try {
+      env = await setupCovenant(rpcUrl, { maxNotionalUsd: "50" });
+    } catch (err) {
+      if (isWeb3ApiGeoBlocked(err)) return this.skip();
+      throw err;
+    }
   });
 
   after(function () {

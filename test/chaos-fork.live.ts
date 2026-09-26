@@ -1,5 +1,6 @@
 import { expect } from "chai";
 import { spawn } from "node:child_process";
+import { isWeb3ApiGeoBlocked } from "../scripts/lib/local-fork.js";
 
 // Spawns the real scripts/chaos-fork.ts as a subprocess - the exact command
 // a judge runs (`npm run chaos-fork`) - and asserts on its actual stdout,
@@ -13,23 +14,29 @@ describe("chaos-fork.ts (live, real subprocess, the actual judge-facing command)
   this.timeout(240_000);
 
   it("deliberately trips the guard on real deployed bytecode and reports every real decision", async function () {
-    const output = await new Promise<{ stdout: string; code: number | null }>((resolve, reject) => {
-      const child = spawn("npx", ["tsx", "scripts/chaos-fork.ts"], {
-        cwd: new URL("..", import.meta.url).pathname,
+    let output: { stdout: string; code: number | null };
+    try {
+      output = await new Promise<{ stdout: string; code: number | null }>((resolve, reject) => {
+        const child = spawn("npx", ["tsx", "scripts/chaos-fork.ts"], {
+          cwd: new URL("..", import.meta.url).pathname,
+        });
+        let stdout = "";
+        let stderr = "";
+        child.stdout.on("data", (d) => (stdout += d.toString()));
+        child.stderr.on("data", (d) => (stderr += d.toString()));
+        child.on("error", reject);
+        child.on("close", (code) => {
+          if (code !== 0) {
+            reject(new Error(`chaos-fork.ts exited ${code}\nstdout:\n${stdout}\nstderr:\n${stderr}`));
+            return;
+          }
+          resolve({ stdout, code });
+        });
       });
-      let stdout = "";
-      let stderr = "";
-      child.stdout.on("data", (d) => (stdout += d.toString()));
-      child.stderr.on("data", (d) => (stderr += d.toString()));
-      child.on("error", reject);
-      child.on("close", (code) => {
-        if (code !== 0) {
-          reject(new Error(`chaos-fork.ts exited ${code}\nstdout:\n${stdout}\nstderr:\n${stderr}`));
-          return;
-        }
-        resolve({ stdout, code });
-      });
-    });
+    } catch (err) {
+      if (isWeb3ApiGeoBlocked(err)) return this.skip();
+      throw err;
+    }
 
     expect(output.stdout).to.include("Deployed real Covenant at 0x");
 

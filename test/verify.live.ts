@@ -2,7 +2,7 @@ import { expect } from "chai";
 import { ethers } from "ethers";
 import covenantArtifact from "../artifacts/contracts/Covenant.sol/Covenant.json" with { type: "json" };
 import { reconcile } from "../scripts/verify.js";
-import { startForkNode, setupCovenant } from "../scripts/lib/local-fork.js";
+import { startForkNode, setupCovenant, isWeb3ApiGeoBlocked } from "../scripts/lib/local-fork.js";
 
 // Real forked node, Covenant deployed with the real deploy script, and real
 // swaps against live PancakeSwap liquidity from the agent key (on mainnet
@@ -75,7 +75,12 @@ describe("verify.ts (live, real swaps, real reconciliation)", function () {
     fromBlock = (await new ethers.JsonRpcProvider(node.rpcUrl).getBlockNumber()) + 1; // after the fork point (friction-log B16)
     // A 5% slippage bound: the pool's real price can sit a little away from
     // the RWA endpoint's, and this suite is about reconciliation.
-    env = await setupCovenant(node.rpcUrl, { maxSlippageBps: 500 });
+    try {
+      env = await setupCovenant(node.rpcUrl, { maxSlippageBps: 500 });
+    } catch (err) {
+      if (isWeb3ApiGeoBlocked(err)) return this.skip();
+      throw err;
+    }
     covenant = new ethers.Contract(env.covenantAddress, covenantArtifact.abi, env.agent);
 
     // Real USDT for the agent, from a real holder.

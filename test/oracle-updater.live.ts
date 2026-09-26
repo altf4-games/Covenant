@@ -3,6 +3,7 @@ import { network } from "hardhat";
 import { isHalted, priceToUsdE18, fetchHourlyKlines } from "../scripts/lib/rwa-status.js";
 import { isRegularSessionOpen, lastRegularClose } from "../scripts/lib/nyse-calendar.js";
 import { readLiveOracle, pushOracleUpdate } from "../scripts/oracle-updater.js";
+import { isWeb3ApiGeoBlocked } from "../scripts/lib/local-fork.js";
 
 const { ethers, networkHelpers } = await network.getOrCreate("bscFork");
 
@@ -25,7 +26,13 @@ describe("Oracle updater (live RWA status + live price -> real on-chain write)",
     const covenantAddress = await covenant.getAddress();
 
     const now = new Date();
-    const reading = await readLiveOracle(BSC_BINANCE_CHAIN_ID, NVDAB, now);
+    let reading: Awaited<ReturnType<typeof readLiveOracle>>;
+    try {
+      reading = await readLiveOracle(BSC_BINANCE_CHAIN_ID, NVDAB, now);
+    } catch (err) {
+      if (isWeb3ApiGeoBlocked(err)) return this.skip();
+      throw err;
+    }
     console.log(
       `      (live NVDAB: openState=${reading.status.openState} reasonCode=${reading.status.reasonCode} -> halted=${reading.halted}, price=${reading.rawPrice})`,
     );

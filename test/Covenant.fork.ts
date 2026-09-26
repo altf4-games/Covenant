@@ -1,6 +1,7 @@
 import { expect } from "chai";
 import { network } from "hardhat";
 import { readLiveOracle } from "../scripts/oracle-updater.js";
+import { isWeb3ApiGeoBlocked } from "../scripts/lib/local-fork.js";
 
 const { ethers, networkHelpers } = await network.getOrCreate("bscFork");
 
@@ -72,7 +73,12 @@ describe("Covenant v2 (fork, real BSC mainnet state)", function () {
     // here on purpose so the allow path can run whatever the market is
     // doing right now; the live halt signal itself is tested in
     // test/oracle-updater.live.ts, and a halt is exercised explicitly below.
-    livePrice = (await readLiveOracle(56, NVDAB)).priceUsd;
+    try {
+      livePrice = (await readLiveOracle(56, NVDAB)).priceUsd;
+    } catch (err) {
+      if (isWeb3ApiGeoBlocked(err)) return this.skip();
+      throw err;
+    }
     await covenant.connect(updater).updateOracle(NVDAB, false, livePrice, true, livePrice);
 
     const latest = await networkHelpers.time.latest();

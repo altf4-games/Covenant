@@ -2,7 +2,7 @@ import { expect } from "chai";
 import { ethers } from "ethers";
 import covenantArtifact from "../artifacts/contracts/Covenant.sol/Covenant.json" with { type: "json" };
 import { ABI, fetchDecisionEvents, joinDecisions, resolveFromBlock, DEFAULT_LOOKBACK_BLOCKS, describeDecision, tokenName, bossFor, DENIAL_REASONS, guardedVsUnguarded } from "../status-page/lib.mjs";
-import { startForkNode, setupCovenant, buyAt } from "../scripts/lib/local-fork.js";
+import { startForkNode, setupCovenant, buyAt, isWeb3ApiGeoBlocked } from "../scripts/lib/local-fork.js";
 
 // This suite exists because the bug it guards against was found by actually
 // driving the status page in a real browser, not by writing a test first -
@@ -42,7 +42,13 @@ describe("status page: real decision reads and the fork-boundary hang", function
     const provider = new ethers.JsonRpcProvider(node.rpcUrl);
     forkStartBlock = await provider.getBlockNumber();
 
-    const env = await setupCovenant(node.rpcUrl);
+    let env: Awaited<ReturnType<typeof setupCovenant>>;
+    try {
+      env = await setupCovenant(node.rpcUrl);
+    } catch (err) {
+      if (isWeb3ApiGeoBlocked(err)) return this.skip();
+      throw err;
+    }
     covenant = new ethers.Contract(env.covenantAddress, ABI, provider);
     const asAgent = new ethers.Contract(env.covenantAddress, covenantArtifact.abi, env.agent);
     const a = buyAt(env.livePrice, 10n ** 18n);
