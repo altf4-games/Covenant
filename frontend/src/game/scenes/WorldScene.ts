@@ -12,6 +12,15 @@ const ZONE_OF_COL: Platform[] = (() => {
   return arr;
 })();
 
+// One deterministic hash per cell (not a linear row/col modulo) so
+// decoration placement reads as scattered/organic rather than a visible
+// diagonal stripe cutting across the map - the earlier version's
+// `(row+col) % 5` produced exactly that stripe.
+function hash(col: number, row: number): number {
+  const h = Math.sin(col * 127.1 + row * 311.7) * 43758.5453;
+  return h - Math.floor(h);
+}
+
 export type StepListener = (step: QuestStep | null) => void;
 
 export class WorldScene extends Phaser.Scene {
@@ -28,18 +37,14 @@ export class WorldScene extends Phaser.Scene {
 
   preload() {
     this.load.image("hero", "/game/dungeon/hero.png");
+    this.load.image("marker_chest", "/game/dungeon/marker_chest.png");
     const bosses = [
       "boss_ghost", "boss_hood", "boss_golem", "boss_skeleton", "boss_purple",
       "boss_demon2", "boss_skeleton2", "boss_mummy", "boss_demon", "boss_goblin",
     ];
     for (const b of bosses) this.load.image(b, `/game/dungeon/${b}.png`);
-    this.load.image("grass", "/game/town/grass.png");
-    this.load.image("grass_flower", "/game/town/grass_flower.png");
-    this.load.image("tree", "/game/town/tree.png");
-    this.load.image("dirt", "/game/town/dirt.png");
-    this.load.image("dirt2", "/game/town/dirt2.png");
-    this.load.image("stone", "/game/town/stone.png");
-    this.load.image("stone2", "/game/town/stone2.png");
+    const tiles = ["grass", "grass_flower", "dirt", "dirt2", "stone", "stone2", "tree", "path", "fence", "rock"];
+    for (const t of tiles) this.load.image(t, `/game/town/${t}.png`);
   }
 
   create() {
@@ -81,40 +86,79 @@ export class WorldScene extends Phaser.Scene {
   }
 
   private drawWorld() {
+    const positions = tokenTilePositions();
+    // Cells that must stay clear of any decoration overlay: the home tile,
+    // and every token marker (a tree/rock/fence drawn on top of a marker
+    // would visually bury it).
+    const reserved = new Set<string>([`${HOME_TILE.col},${HOME_TILE.row}`]);
+    for (const pos of positions.values()) reserved.add(`${pos.col},${pos.row}`);
+
     for (let row = 0; row < WORLD_ROWS; row++) {
       for (let col = 0; col < WORLD_COLS; col++) {
         const zone = ZONE_OF_COL[col];
-        const key = this.floorTileFor(zone, row, col);
-        const img = this.add.image(this.tileX(col), this.tileY(row), key);
-        img.setScale(1.5);
+        const isBorder = row === 0 || row === WORLD_ROWS - 1 || col === 0 || col === WORLD_COLS - 1;
+        const isRoad = row === HOME_TILE.row;
+
+        // Base ground: always a full, opaque tile - never a decoration
+        // sprite standing in for the ground itself. An earlier version drew
+        // "tree" (a 16x16 sprite with mostly-transparent corners) as the
+        // *entire* cell for some bstock tiles, and "dirt2" in the xstock
+        // zone had been miscopied from the wrong source tile and was
+        // actually a tree sprite too - both left the game's own dark
+        // background canvas showing through as a "black box" around the
+        // sprite. Ground and decoration are now always two separate draws.
+        const groundKey = isRoad ? "path" : this.groundTileFor(zone, row, col);
+        this.add.image(this.tileX(col), this.tileY(row), groundKey).setScale(1.5);
+
+        if (reserved.has(`${col},${row}`)) continue;
+
+        const decoKey = this.decorationFor(zone, row, col, isBorder, isRoad);
+        if (decoKey) {
+          this.add.image(this.tileX(col), this.tileY(row), decoKey).setScale(1.5).setDepth(2);
+        }
       }
     }
+
     // Zone labels.
     let x = 0;
     for (const zone of ["bstock", "ondo", "xstock"] as Platform[]) {
       const cols = ZONE_OF_COL.filter((z) => z === zone).length;
       const label = PLATFORM_LABEL[zone];
-      this.add.text(this.tileX(x) - TILE / 2, 12, label.name, {
-        fontFamily: "ui-monospace, monospace",
-        fontSize: "13px",
-        color: label.color,
-        fontStyle: "bold",
-      });
+      this.add
+        .text(this.tileX(x) - TILE / 2, 14, label.name, {
+          fontFamily: "ui-monospace, monospace",
+          fontSize: "11px",
+          fontStyle: "bold",
+          color: label.color,
+        })
+        .setResolution(2);
       x += cols;
     }
   }
 
-  private floorTileFor(zone: Platform, row: number, col: number): string {
-    if (zone === "bstock") {
-      if ((row + col) % 5 === 0) return "tree";
-      if ((row * 3 + col) % 7 === 0) return "grass_flower";
-      return "grass";
+  /** Always a full, opaque tile - safe to use as the entire cell's ground. */
+  private groundTileFor(zone: Platform, row: number, col: number): string {
+    const n = hash(col, row);
+    if (zone === "bstock") return n < 0.12 ? "grass_flower" : "grass";
+    if (zone === "ondo") return n < 0.15 ? "stone" : "dirt";
+    return n < 0.1 ? "stone2" : "dirt2";
+  }
+
+  /** A sparse decoration drawn on TOP of the ground tile already at this cell, or null for none. */
+  private decorationFor(zone: Platform, row: number, col: number, isBorder: boolean, isRoad: boolean): string | null {
+    if (isRoad) return null;
+    // A tree/fence border ringing the whole map, like a Pokemon route's
+    // edge of trees - deliberately never on the road row so the border
+    // never blocks the one row the hero actually walks along.
+    if (isBorder) {
+      if (zone === "ondo") return "fence";
+      if (zone === "xstock") return hash(col, row) < 0.6 ? "rock" : null;
+      return "tree";
     }
-    if (zone === "ondo") {
-      return (row + col) % 3 === 0 ? "stone" : "dirt";
-    }
-    // xstock: barren, sparse - deliberately the least decorated floor.
-    return (row + col) % 6 === 0 ? "stone2" : "dirt2";
+    const n = hash(col + 91, row + 17);
+    if (zone === "bstock") return n < 0.14 ? "tree" : null;
+    if (zone === "ondo") return n < 0.08 ? "fence" : null;
+    return n < 0.05 ? "rock" : null;
   }
 
   private drawTokenMarkers() {
@@ -122,22 +166,25 @@ export class WorldScene extends Phaser.Scene {
     for (const token of TERRITORY_TOKENS) {
       const pos = positions.get(token.ticker);
       if (!pos) continue;
-      // Radius capped well below half a tile so the marker never bleeds
-      // into a neighboring tile regardless of how large a token's real
-      // liquidity figure is.
-      const r = Math.max(4, Math.min(TILE / 2 - 3, Math.sqrt(token.reservesUsd) / 60));
-      const color = Phaser.Display.Color.HexStringToColor(PLATFORM_LABEL[token.platform].color).color;
-      const circle = this.add.circle(this.tileX(pos.col), this.tileY(pos.row), r, color, 0.7);
-      circle.setStrokeStyle(1, 0xffffff, 0.5);
-      circle.setDepth(1);
+      // A real game object (a treasure chest, from the same CC0 sprite
+      // pack as everything else) sized by real liquidity, not a plain
+      // colored circle standing in for one.
+      const scale = Math.max(0.9, Math.min(1.9, 0.9 + Math.sqrt(token.reservesUsd) / 3200));
+      const shadow = this.add.ellipse(this.tileX(pos.col), this.tileY(pos.row) + 7, 16 * scale * 0.7, 5, 0x000000, 0.35);
+      shadow.setDepth(2);
+      const marker = this.add.sprite(this.tileX(pos.col), this.tileY(pos.row), "marker_chest");
+      marker.setScale(1.5 * scale);
+      marker.setTint(Phaser.Display.Color.HexStringToColor(PLATFORM_LABEL[token.platform].color).color);
+      marker.setDepth(3);
       this.add
-        .text(this.tileX(pos.col), this.tileY(pos.row) + TILE / 2 + 2, token.ticker, {
+        .text(this.tileX(pos.col), this.tileY(pos.row) + TILE / 2 + 3, token.ticker, {
           fontFamily: "ui-monospace, monospace",
-          fontSize: "9px",
+          fontSize: "10px",
           color: "#e6e9ee",
         })
         .setOrigin(0.5, 0)
-        .setDepth(1);
+        .setResolution(2)
+        .setDepth(3);
     }
   }
 
@@ -206,10 +253,11 @@ export class WorldScene extends Phaser.Scene {
    * overworld is covered edge-to-edge, the boss stands on a platform at
    * upper right, the hero on one at lower left, and a dialogue box below
    * types out what actually happened on chain, one line at a time - "a wild
-   * X appeared", then the real denial reason, then the outcome. A denial
-   * never shows the boss losing (the mandate holding is the whole point),
-   * so the hero's own attack always fails and the boss is what's still
-   * standing at the end.
+   * X appeared", the hero's move, the boss's counter-move (named after the
+   * real DenialReason), then the real outcome. A denial never shows the
+   * boss losing (the mandate holding is the whole point), so the hero's
+   * own attack always fails and the boss is what's still standing at the
+   * end.
    */
   private playPokemonBattle(step: Extract<QuestStep, { kind: "battle" }>) {
     if (this.destroyed) return;
@@ -241,8 +289,9 @@ export class WorldScene extends Phaser.Scene {
     const boss = this.add.sprite(W * 0.74, H * 0.42 - 14, step.sprite).setScale(2.6);
     const heroBattler = this.add.sprite(W * 0.24, H * 0.66 - 14, "hero").setScale(2.6).setFlipX(true);
 
+    const pixelFont = "'Press Start 2P', ui-monospace, monospace";
     const nameTag = this.add
-      .rectangle(W * 0.74, H * 0.42 - 44, 96, 20, 0x0b0d10, 0.85)
+      .rectangle(W * 0.74, H * 0.42 - 44, 100, 20, 0x0b0d10, 0.85)
       .setStrokeStyle(1, 0xe5484d, 0.7);
     const nameText = this.add
       .text(W * 0.74, H * 0.42 - 44, `${step.bossIcon} ${step.bossName}`, {
@@ -250,21 +299,25 @@ export class WorldScene extends Phaser.Scene {
         fontSize: "9px",
         color: "#e6e9ee",
       })
-      .setOrigin(0.5);
+      .setOrigin(0.5)
+      .setResolution(2);
 
-    const boxH = 56;
+    const boxH = 60;
     const box = this.add.rectangle(W / 2, H - boxH / 2 - 4, W - 12, boxH, 0x0b0d10, 0.95).setStrokeStyle(2, 0xe6e9ee, 0.8);
     const boxText = this.add
       .text(16, H - boxH - 4 + 8, "", {
-        fontFamily: "ui-monospace, monospace",
-        fontSize: "11px",
+        fontFamily: pixelFont,
+        fontSize: "8px",
+        lineSpacing: 6,
         color: "#e6e9ee",
         wordWrap: { width: W - 32 },
       })
-      .setOrigin(0, 0);
+      .setOrigin(0, 0)
+      .setResolution(2);
     const prompt = this.add
       .text(W - 18, H - 12, "▼", { fontFamily: "ui-monospace, monospace", fontSize: "11px", color: "#8b93a1" })
-      .setOrigin(1, 1);
+      .setOrigin(1, 1)
+      .setResolution(2);
     prompt.setVisible(false);
 
     this.battleLayer.add([sky, ground, bossPad, heroPad, boss, heroBattler, nameTag, nameText, box, boxText, prompt]);
@@ -281,7 +334,9 @@ export class WorldScene extends Phaser.Scene {
 
     const lines = [
       `A wild ${step.bossIcon} ${step.bossName} appeared!`,
-      `The agent's order is DENIED — ${step.reason}.`,
+      "Covenant used MANDATE CHECK!",
+      `${step.bossIcon} ${step.bossName} used ${step.attackName}!`,
+      `DENIED — ${step.reason}.`,
       "The mandate held. No funds moved.",
     ];
 
@@ -302,10 +357,38 @@ export class WorldScene extends Phaser.Scene {
           boxText.setText(text.slice(0, i));
           if (i >= text.length) {
             prompt.setVisible(true);
-            this.time.delayedCall(650, () => {
+            this.time.delayedCall(600, () => {
               if (!this.destroyed) onDone();
             });
           }
+        },
+      });
+    };
+
+    const lunge = () => {
+      this.tweens.add({
+        targets: heroBattler,
+        x: heroBattler.x + 14,
+        duration: 180,
+        yoyo: true,
+        ease: "Quad.easeOut",
+      });
+    };
+
+    const counterLunge = () => {
+      this.tweens.add({
+        targets: boss,
+        x: boss.x - 14,
+        duration: 180,
+        yoyo: true,
+        ease: "Quad.easeOut",
+        onYoyo: () => {
+          if (this.destroyed) return;
+          this.cameras.main.shake(100, 0.003);
+          heroBattler.setTint(0xff8888);
+          this.time.delayedCall(140, () => {
+            if (!this.destroyed) heroBattler.clearTint();
+          });
         },
       });
     };
@@ -316,25 +399,10 @@ export class WorldScene extends Phaser.Scene {
         endBattle();
         return;
       }
-      if (idx === 1) {
-        // The hero's attempt lunges in and visibly fails as this line
-        // types - a denial never shows the boss losing.
-        this.tweens.add({
-          targets: heroBattler,
-          x: heroBattler.x + 14,
-          duration: 180,
-          yoyo: true,
-          ease: "Quad.easeOut",
-          onYoyo: () => {
-            if (this.destroyed) return;
-            this.cameras.main.shake(100, 0.003);
-            boss.setTint(0xff8888);
-            this.time.delayedCall(140, () => {
-              if (!this.destroyed) boss.clearTint();
-            });
-          },
-        });
-      }
+      // Line 1 is the hero's move, line 2 is the boss's counter-move - the
+      // animation plays alongside the line naming it.
+      if (idx === 1) lunge();
+      if (idx === 2) counterLunge();
       typeLine(lines[idx], () => playLine(idx + 1));
     };
 

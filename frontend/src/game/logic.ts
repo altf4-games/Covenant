@@ -33,6 +33,33 @@ export function spriteForReason(reason: string): string {
   return BOSS_SPRITE[reason] ?? "boss_goblin";
 }
 
+// A Pokemon-style battle needs a move name, not just a bare enum value.
+// The hero's "move" is always the same - Covenant re-running its own
+// mandate check - while the boss's "move" is flavor text for the specific
+// real DenialReason it embodies, so a denial reads like "Covenant used
+// MANDATE CHECK! The Spending Cap used OVERDRAFT SLAM!" instead of a
+// silent enum.
+export const HERO_MOVE_NAME = "MANDATE CHECK";
+
+const ATTACK_NAME: Record<string, string> = {
+  MandateInactive: "EXPIRY CURSE",
+  MandateExpired: "EXPIRY CURSE",
+  TokenNotAllowed: "BLACKLIST BARRIER",
+  NotionalExceeded: "OVERDRAFT SLAM",
+  PositionLimit: "OVERDRAFT SLAM",
+  DailyNotionalExceeded: "OVERDRAFT SLAM",
+  DailyLimitExceeded: "RATE LIMIT WALL",
+  OracleStale: "STALE FOG",
+  OracleHalted: "HALT FIELD",
+  SlippageTooLoose: "SLIPPAGE TRAP",
+  DecisionOpen: "QUEUE LOCK",
+  ClosedMarketDrift: "WEEKEND GAP SURGE",
+};
+
+export function attackNameFor(reason: string): string {
+  return ATTACK_NAME[reason] ?? "UNKNOWN GUARD";
+}
+
 export interface WorldZone {
   platform: Platform;
   x: number;
@@ -45,7 +72,14 @@ export const WORLD_ZONES: WorldZone[] = [
   { platform: "xstock", x: 17, width: 4 },
 ];
 export const WORLD_COLS = 21;
-export const WORLD_ROWS = 9;
+// Was 9 - a 21x9 grid (plus the 40px header) is a very wide, short
+// rectangle (aspect ~2:1) that only fills a small horizontal band of a
+// typical (landscape or portrait) browser window under Phaser's
+// letterbox-preserving FIT scale mode, leaving large empty bars above and
+// below on anything but a wide, short viewport. 13 rows brings the aspect
+// ratio down to ~1.4:1, much closer to common window shapes, without
+// distorting or cropping the pixel art.
+export const WORLD_ROWS = 13;
 export const HOME_TILE = { col: 2, row: 4 };
 // Rendered tile size in px (source art is 16x16, scaled 1.5x). Shared
 // between WorldScene (which draws at this size) and GameCanvas (which sizes
@@ -82,7 +116,16 @@ export function tokenTilePositions(): Map<string, { col: number; row: number; pl
 
 export type QuestStep =
   | { kind: "walk"; toCol: number; toRow: number; decisionId: string }
-  | { kind: "battle"; decisionId: string; reason: string; sprite: string; bossName: string; bossIcon: string; allowed: false }
+  | {
+      kind: "battle";
+      decisionId: string;
+      reason: string;
+      sprite: string;
+      bossName: string;
+      bossIcon: string;
+      attackName: string;
+      allowed: false;
+    }
   | { kind: "arrive"; decisionId: string; allowed: true };
 
 /**
@@ -117,6 +160,7 @@ export function buildQuest(decisions: Decision[]): QuestStep[] {
         sprite: spriteForReason(c.reason),
         bossName: boss?.name ?? c.reason,
         bossIcon: boss?.icon ?? "⚔️",
+        attackName: attackNameFor(c.reason),
         allowed: false,
       });
     } else {

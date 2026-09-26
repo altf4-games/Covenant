@@ -1,3 +1,4 @@
+@import url("https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap");
 @import "tailwindcss";
 
 :root {
@@ -34,4 +35,12 @@ html, body {
 ::selection {
   background: var(--accent);
   color: #0b0d10;
+}
+
+/* Reserved for real UI chrome (headings, the menu button, HUD text) - never
+   body copy or the decision log, which stay in the monospace font above for
+   readability at small sizes. */
+.font-pixel {
+  font-family: "Press Start 2P", ui-monospace, monospace;
+  line-height: 1.6;
 }

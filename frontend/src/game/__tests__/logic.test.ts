@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildQuest, spriteForReason, tokenTilePositions, BOSS_SPRITE, WORLD_COLS, WORLD_ROWS } from "../logic";
+import { buildQuest, spriteForReason, tokenTilePositions, attackNameFor, BOSS_SPRITE, WORLD_COLS, WORLD_ROWS } from "../logic";
 import { TERRITORY_TOKENS } from "../../data/liquidity";
 import { DENIAL_REASONS } from "../../lib/covenant";
 import type { Decision } from "../../lib/covenant";
@@ -40,6 +40,19 @@ describe("spriteForReason / BOSS_SPRITE", () => {
   });
 });
 
+describe("attackNameFor", () => {
+  it("assigns a real move name to every real DenialReason except None", () => {
+    for (const reason of DENIAL_REASONS) {
+      if (reason === "None") continue;
+      expect(attackNameFor(reason), `no move name mapped for real reason ${reason}`).not.toBe("UNKNOWN GUARD");
+    }
+  });
+
+  it("falls back to a default move name for an unrecognized reason rather than throwing", () => {
+    expect(attackNameFor("SomeFutureReasonNotYetMapped")).toBe("UNKNOWN GUARD");
+  });
+});
+
 describe("tokenTilePositions", () => {
   it("places every real territory token inside the world grid bounds", () => {
     const positions = tokenTilePositions();
@@ -69,7 +82,15 @@ describe("buildQuest", () => {
     const quest = buildQuest(decisions);
     expect(quest).toHaveLength(2);
     expect(quest[0]).toMatchObject({ kind: "walk", decisionId: "1" });
-    expect(quest[1]).toMatchObject({ kind: "battle", decisionId: "1", reason: "NotionalExceeded", sprite: "boss_golem", bossName: "The Spending Cap", bossIcon: "💰" });
+    expect(quest[1]).toMatchObject({
+      kind: "battle",
+      decisionId: "1",
+      reason: "NotionalExceeded",
+      sprite: "boss_golem",
+      bossName: "The Spending Cap",
+      bossIcon: "💰",
+      attackName: "OVERDRAFT SLAM",
+    });
 
     const nvdabPos = tokenTilePositions().get("NVDAB")!;
     expect((quest[0] as any).toCol).toBe(nvdabPos.col);

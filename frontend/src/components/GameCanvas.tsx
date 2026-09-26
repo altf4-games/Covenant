@@ -38,7 +38,11 @@ export function GameCanvas({ decisions }: GameCanvasProps) {
       parent: containerRef.current,
       backgroundColor: "#0b0d10",
       scene: [WorldScene],
-      render: { pixelArt: true },
+      // pixelArt forces nearest-neighbor texture filtering (crisp sprites
+      // at every scale step); antialias/roundPixels off keeps Phaser's own
+      // text and shape rendering crisp too, rather than anti-aliased and
+      // then blurred further by FIT's canvas upscale.
+      render: { pixelArt: true, antialias: false, roundPixels: true },
       scale: {
         mode: Phaser.Scale.FIT,
         autoCenter: Phaser.Scale.CENTER_BOTH,
@@ -47,6 +51,11 @@ export function GameCanvas({ decisions }: GameCanvasProps) {
       },
     });
     gameRef.current = game;
+    // Belt-and-suspenders: `render.pixelArt` should already make Phaser set
+    // this, but only on the browsers where its own default matches - set it
+    // explicitly so FIT's CSS-level canvas upscale never falls back to the
+    // browser's default bilinear smoothing.
+    game.canvas.style.imageRendering = "pixelated";
     // The scene object doesn't exist yet at all right after `new
     // Phaser.Game(...)` - the SceneManager adds it during boot, which
     // happens on a later tick. Wait for the Game's own READY event first
@@ -97,6 +106,12 @@ export function GameCanvas({ decisions }: GameCanvasProps) {
           just a thin status strip overlaid on top of the game, not beside
           it, per direction that the panels/HUD "can be in game only". */}
       <div ref={containerRef} className="absolute inset-0 flex items-center justify-center" />
+      {!ready && (
+        <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-[var(--bg)]">
+          <div className="h-8 w-8 animate-spin rounded-full border-2 border-[var(--border)] border-t-[var(--accent)]" />
+          <p className="font-pixel text-[10px] tracking-widest text-[var(--muted)]">LOADING WORLD…</p>
+        </div>
+      )}
       <p className="pointer-events-none absolute bottom-0 left-0 right-0 min-h-[1.2em] bg-gradient-to-t from-black/70 to-transparent px-4 py-2 text-center text-xs text-[var(--muted)]">
         {currentDecision?.commit
           ? currentBoss
