@@ -1,0 +1,38 @@
+{
+  "agentId": "358509",
+  "registryAddress": "0x8004A169FB4a3325136EB29fA0ceB6D2e539a432",
+  "txHash": "0x34fbf948acb7c954ec2b0c7d154113ee61b1bcf50a6154943846269459591f1b",
+  "blockNumber": 124094577,
+  "gasUsed": "1306304",
+  "owner": "0x4FF4A2F215f3DeDD2cEe1c6D2B66035B0200D418",
+  "registrationDoc": {
+    "type": "https://eips.ethereum.org/EIPS/eip-8004#registration-v1",
+    "name": "Covenant",
+    "description": "An on-chain decision ledger for an AI agent trading tokenized stocks on BNB Smart Chain. The agent's Binance Agentic Wallet keeps custody and trades natively (baw market-order swap); before each trade the agent commits the decision on chain and the owner's mandate is evaluated on chain - a per-trade notional cap, a cumulative daily-notional cap, a position cap read from the wallet's real balance, a slippage bound checked against both the quote and a live oracle, and a closed-market drift guard that denies buying at a weekend premium while the NYSE is shut. No trade happens unseen: a public script (verify.ts) reconciles every real token transfer in and out of the wallet against a settled decision, and flags anything that doesn't match.",
+    "services": [
+      {
+        "name": "web",
+        "endpoint": "https://github.com/altf4-games/Covenant"
+      },
+      {
+        "name": "agentWallet",
+        "endpoint": "eip155:56:0xaa963e1b4f913975Ee81139F4BA2953951E45844"
+      }
+    ],
+    "registrations": [
+      {
+        "agentId": null,
+        "agentRegistry": "eip155:56:0x8004A169FB4a3325136EB29fA0ceB6D2e539a432"
+      }
+    ],
+    "active": true,
+    "x402Support": false,
+    "supportedTrust": [
+      "reputation"
+    ]
+  },
+  "verifiedOnChain": {
+    "ownerOf": "0x4FF4A2F215f3DeDD2cEe1c6D2B66035B0200D418",
+    "tokenURIDecodesBackCorrectly": true
+  }
+}
