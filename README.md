@@ -132,14 +132,14 @@ npm install
 npx hardhat test
 ```
 
-Eleven suites, 105 tests:
+Fifteen suites, 142 tests:
 
-- `test/Covenant.unit.ts` (44): in-memory chain with a mock ERC20. Every denial reason, including Feature 1's drift rule (with the real NVDAB numbers from 2026-09-25) and the red-team H7 daily-notional cap (with a test that deliberately demonstrates its disclosed midnight-boundary limitation rather than hiding it), the three-distinct-roles rule, agent-only commit/settle/cancel (a stranger, the owner and the updater all revert), the settle and cancel lifecycle, the understated-quote attack, Feature 3's position cap, red-team H11's self-describing `DecisionCommitted` event, Feature 2's `setMandateForTokens` batch setter, and preview/commit agreement.
+- `test/Covenant.unit.ts` (50): in-memory chain with a mock ERC20. Every denial reason, including Feature 1's drift rule (with the real NVDAB numbers from 2026-09-25) and the red-team H7 daily-notional cap (with a test that deliberately demonstrates its disclosed midnight-boundary limitation rather than hiding it), the three-distinct-roles rule, agent-only commit/settle/cancel (a stranger, the owner and the updater all revert), the settle and cancel lifecycle, the understated-quote attack, Feature 3's position cap, red-team H11's self-describing `DecisionCommitted` event, Feature 2's `setMandateForTokens` batch setter, preview/commit agreement, and H14/H15/H16's fixes (agent-scoped settle/cancel, absurd-amount denials, and the drift-at-worst-price rewrite).
 - `test/Covenant.fork.ts` (7): a real fork of BSC mainnet with the real Agentic Wallet impersonated as the agent, so the position cap reads the NVDAB it really bought on Day 1. Includes a full commit, real swap and settle loop against live PancakeSwap liquidity.
 - `test/nyse-calendar.ts` (8): the NYSE calendar against real dates, including a holiday, an early close, both daylight-saving switches, and a year with no data (it refuses).
 - `test/oracle-updater.live.ts` (4): Binance's real status, price and K-line endpoints, posted on chain by the real updater code and read back; the last close is re-derived independently from a separate K-line fetch.
 - `test/skill-cli.live.ts` (17): the skill's own commands against a spawned fork node, including its commit, settle and cancel calldata sent as real transactions, Feature 2's `compile-mandate` turning a real plain-English sentence into one real transaction that configures eight real tokens, and `classify-execution-mode` against the real Day-1 router address.
-- `test/status-page.live.ts` (3): the page's event reading, joined per decision, and the fork-boundary timeout. Runs its boundary test last on purpose (see below).
+- `test/status-page.live.ts` (4): the page's event reading, joined per decision, and the fork-boundary timeout. Runs its boundary test last on purpose (see below).
 - `test/mcp-server.live.ts` (8): the MCP server as a real subprocess, driven by the real MCP client.
 - `test/off-hours-logger.live.ts` (2): the cron logger against Binance's live endpoints.
 - `test/judge.live.ts` (8): `judge.ts` against real commits, settles and cancels, decoded field by field against ethers' own parsing, plus a never-mined hash, a wrong contract, and a dead RPC ahead of a working one.
@@ -148,9 +148,27 @@ Eleven suites, 105 tests:
 
 The live suites share `scripts/lib/local-fork.ts`, which deploys with the real `scripts/deploy.ts` and posts the oracle with the real `scripts/oracle-updater.ts`, so every one of them also exercises the path the mainnet deployment will run. They're slower than a typical Hardhat suite; see below for why.
 
+Four more suites need no fork and no network at all - fast, pure-function coverage for logic the live suites above only exercise on the happy path, or don't touch:
+
+- `test/verify.unit.ts` (13): `reconcile()` against a mock JSON-RPC server with crafted logs - H13's overspend repro (a $1-approved buy that really moved $10,000), H14's agent-rotation scoping, a multi-token trade, a revoke, a token disallowed mid-approval, a missed deployment block, and `getLogs` chunk boundaries. The live suite only ever reconciles one honest trade at a time; this is where the actual violation-detection logic gets tested against something trying to slip past it.
+- `test/skill-cli.unit.ts` (8): the Wallet Skill CLI's own input validation - `resolve`'s chain-disambiguation refusals, and the calldata builders refusing a negative amount, a `2^256` amount, a JS number that already lost precision, and a ticker where an address belongs.
+- `test/status-page-lib.unit.ts` (9): the sell-side wording in `describeDecision`/`guardedVsUnguarded` (the live suite only ever commits buy-side decisions), and `resolveFromBlock`'s input validation (NaN, negative, non-integer).
+
+### What needs a secret, and what needs an archive RPC
+
+Not every test or script here runs the same way. Some need nothing but a public RPC; some need a real API key; a few need an RPC that actually serves old blocks, which most free public BSC endpoints refuse past a shallow window.
+
+| Needs | Examples | Why |
+|---|---|---|
+| Nothing (public RPC only) | `test/Covenant.unit.ts`, `test/verify.unit.ts`, `test/skill-cli.unit.ts`, `test/status-page-lib.unit.ts`, `test/nyse-calendar.ts` | Pure logic, or a mock chain/RPC - no real network call. |
+| `WEB3_API_KEY` / `WEB3_API_SECRET` | `test/oracle-updater.live.ts`, `test/skill-cli.live.ts`, `scripts/oracle-updater.ts` | Reads Binance's RWA Data/Market APIs (real price, real market status). |
+| `GEMINI_API_KEY` | `scripts/generate-narration.ts` | Batch play-by-play narration - see "Running the status page" below. |
+| An archive-capable RPC (`bsc-dataseed`/`1rpc` verified live to work; `publicnode` refuses old receipts) | `scripts/verify.ts` run against a wide historical range, the frontend's snapshot/re-verification mode | A public RPC's own `eth_getLogs` range cap and receipt-pruning window (docs/partner-feedback/friction-log.md) - `bsc-dataseed` returns "limit exceeded" past a few thousand blocks, `publicnode` won't serve receipts for old transactions at all. `status-page/lib.mjs`'s `fetchDecisionEvents` chunks its own `eth_getLogs` calls (`DEFAULT_LOGS_CHUNK_BLOCKS`) for exactly this reason, mirroring the chunking `scripts/verify.ts` already needed. |
+| A forked local node (`hardhat node --fork`) | Every `*.live.ts` and `*.fork.ts` suite, `scripts/chaos-fork.ts`, `scripts/try-to-break-it-demo.ts` | Real on-chain state (the live bStocks contracts, real liquidity) with no risk to the $2 real-mainnet budget. |
+
 ## Running the status page
 
-Two versions exist. `frontend/` (React + Vite + Tailwind + framer-motion) is the primary one, built for GAMIFICATION-PLAN-2026-09-25.md's presentation layer - boss battles, the Guarded vs. Unguarded Twin, the trading card, and the territory map. `status-page/index.html` is the original zero-build static page; both read the exact same tested logic in `status-page/lib.mjs`, so nothing about the on-chain reads or decision decoding differs between them.
+Two versions exist. `frontend/` (React + Vite + Tailwind + Phaser) is the primary one, built for GAMIFICATION-PLAN-2026-09-25.md's presentation layer - boss battles, the Guarded vs. Unguarded Twin, the trading card, and the territory map. `status-page/index.html` is the original zero-build static page; both read the exact same tested logic in `status-page/lib.mjs`, so nothing about the on-chain reads or decision decoding differs between them.
 
 ```bash
 cd frontend && npm install && npm run dev
@@ -342,4 +360,30 @@ Found reading `_evaluate` during a pre-deploy audit pass, not by a failing test 
 
 Confirmed live before touching the contract: a throwaway Hardhat test called `commit` with `Side.Sell`, `amountIn: 0`, a token with a nonzero `maxClosedMarketDriftBps`, and the oracle reporting the market closed. It reverted with `panic code 0x12 (Division or modulo division by zero)` - a real, reproducible crash, not a hypothetical read of the code. That breaks `commit()`'s own documented contract: "Never reverts on a policy denial: a denied commit still mines and emits `DecisionCommitted`." A degenerate agent input shouldn't be able to take down the one guarantee this contract exists to provide.
 
-Fixed by guarding both branches on their actual divisor being nonzero (`quotedOut > 0` for buy, `amountIn > 0` for sell) instead of relying on the earlier check's ordering to protect the sell side too. A zero-size trade moves no real notional, so there's no implied price to measure drift against either way - it now passes this check rather than needing a new `DenialReason`, keeping the append-only enum every off-chain decoder indexes into unchanged. `test/Covenant.unit.ts` has a regression test for the exact input that panicked, asserting `previewDecision` and `commit` both now return `None` instead of reverting.
+Fixed by guarding both branches on their actual divisor being nonzero (`quotedOut > 0` for buy, `amountIn > 0` for sell) instead of relying on the earlier check's ordering to protect the sell side too. At the time, a zero-size trade was made to pass this check rather than add a new `DenialReason` - moving no real notional, there's no implied price to measure drift against either way.
+
+**Superseded by H15 below**: a second, deeper audit pass found that "moves no real notional" wasn't quite true for the wider set of degenerate inputs it opened the door to (an absurdly large `amountIn`, `quotedOut` or `minOut`, not just a zero one), so H12's original "let it through" fix was replaced with a real `InvalidAmount` denial covering the whole family. `test/Covenant.unit.ts`'s regression test for H12's exact panicking input now asserts `InvalidAmount`, not `None`.
+
+### H13: `verify.ts` trusted `amountIn` as a spending cap without ever checking real transfers against it
+
+`Decision.amountIn` is the ceiling Covenant's mandate evaluated a trade against - the whole reason a swap is provably in-bounds. `verify.ts`'s `reconcile()` joined commits to settles and to real transfers, but never actually compared the wallet's real net spend for a decision against that decision's own `amountIn`. A wallet could settle a decision honestly (real swap, real `DecisionSettled`) while the underlying transfer moved far more value than the approved amount - say a $1-approved buy that actually spent $10,000 - and `reconcile()` would still report it clean, because nothing it checked depended on the transfer amount matching the approval at all.
+
+Caught by a live-style mock RPC test (`test/verify.unit.ts`) built specifically to reproduce this: a decision approved for 1e18 (1 USDT) wei, settled honestly, but with a crafted `Transfer` log moving 10,000e18. The old `reconcile()` returned clean; the new one flags `AMOUNT_IN_EXCEEDED`. Fixed by tracking real per-decision-window `quoteIn`/`quoteOut` movements and comparing net spend against `amountIn` (with a small tolerance for legitimate price improvement on a buy's receive side, so a wallet isn't flagged for being handed *more* stock than quoted). The same pass also added `MULTI_TOKEN_TRADE`, for a transaction that moves a second configured token `verify.ts` wasn't even looking at.
+
+### H14: `verify.ts` had no concept of the agent changing mid-flight
+
+Covenant supports `setAgent` - rotating which address can commit/settle/cancel. `verify.ts` had no notion of agent tenure at all: every transfer from the wallet was checked against every decision, regardless of which agent was live when either happened. After a rotation, a stale approval from the old agent could be matched against a transfer made under the new one (or vice versa), and neither the contract nor `verify.ts` would catch a wallet acting under someone else's approval.
+
+Fixed on both sides. `Covenant.sol` now records `agent` on the `Decision` struct at commit time and rejects `settle`/`cancel` from anyone else with `NotDecisionAgent` (`test/Covenant.unit.ts`'s H14 test asserts the new agent can't touch the old agent's still-open decision). `verify.ts` now derives agent tenures from `AgentChanged` events and only considers a decision "in scope" for the agent who committed it, plus one decision-TTL grace window after a handover (a swap can legitimately settle just after a rotation lands) - anything outside that scope is `AGENT_MISMATCH`, covered by three new `test/verify.unit.ts` cases (rotation keeps the old wallet's unmatched trade, the TTL boundary, and a trade by a genuinely different wallet).
+
+### H15: absurd amounts (zero, or near `uint256` overflow) were a live path to a panic or silent wraparound, not just H12's one case
+
+H12 fixed one panicking input (a zero-size sell during closed-market hours) by letting zero-size trades through. The wider audit that found H13/H14 asked the obvious next question: what about an `amountIn`, `quotedOut` or `minOut` near `type(uint256).max`? A buy denied by `NotionalExceeded` still has to compute `amountIn * 10_000` or similar upstream of that denial in a couple of code paths - large enough inputs there risk silent wraparound in unchecked contexts, and Solidity 0.8's checked arithmetic turns the rest into unexplained reverts (crashing `commit()`'s no-revert guarantee exactly like H12) rather than a clean, recorded denial.
+
+Fixed with `MAX_AMOUNT = type(uint128).max` (real money doesn't need more than 128 bits of wei, and it leaves headroom under every multiplication in `_evaluate` before a `uint256` could actually wrap) and a single guard at the top of `_evaluate`: any of `amountIn == 0`, or `amountIn`/`quotedOut`/`minOut` over `MAX_AMOUNT`, now returns `InvalidAmount` immediately, before any of the other checks run. `updateOracle` got the same bound on `priceUsd`/`lastCloseUsd`, reverting `InvalidBound` - the oracle updater is a separate trusted role from the agent, so a bad update there is a genuine operator error worth reverting on, not a policy denial to record. `test/Covenant.unit.ts`'s new "H15: absurd amounts are denied, never a panic" block checks a `2^250` sell, `2^255` `quotedOut`/`minOut` on both a buy and a sell, a zero buy, and confirms a buy at exactly `MAX_AMOUNT` still previews as a normal `NotionalExceeded` denial rather than anything degenerate.
+
+### H16: the closed-market drift guard measured drift at the quote, letting a loose `minOut` smuggle a bad worst-case price past it
+
+Feature 1's drift check (H16, found in the same pass as H13-H15) compared the *quoted* price against the last close, not the worst price the trade could actually fill at. A trade with an honest quote right at the drift bound, paired with a deliberately loose `minOut`/`maxIn`, could pass the drift check on the quote while still being able to fill at a real worst-case price well outside the bound - the same "checked the wrong number" shape as red-team H5's original slippage bug, just recurring in the newer Feature 1 code instead of the original slippage check.
+
+Fixed by measuring drift at `minOut` (buy) / `minOut`-implied worst price (sell) instead of `quotedOut`, the same worst-case value the slippage check itself already uses - the two checks now agree on what "the trade's worst case" means instead of the drift guard trusting a rosier number. `test/Covenant.unit.ts` rewrote the buy-drift test around the worst-price boundary (denied at 203, allowed at 200.8 and 200.98, denied at 201.1) and added a dedicated H16 case: an oracle price of 202 with a quote and `minOut` chosen so the *quote* sits inside the old bound but the worst-case `minOut` price sits outside it - the old check would have allowed this, the new one denies it as `ClosedMarketDrift`.
