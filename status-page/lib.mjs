@@ -249,6 +249,18 @@ export function joinDecisions(events) {
 
 export function resolveFromBlock(explicitFromBlock, latestBlock) {
   if (explicitFromBlock !== undefined && explicitFromBlock !== null && explicitFromBlock !== "") {
+    // Same class of gap as the CLI's hex32(): Number() coerces far more than
+    // "string or number" (Number([])===0, Number(true)===1, Number([100])===100),
+    // silently turning a plumbing bug upstream into a plausible-looking but
+    // made-up block number instead of a refusal. Neither real caller here
+    // (App.tsx, status-page/index.html) passes anything but a string/undefined
+    // today, but the check costs nothing and keeps this consistent with hex32.
+    if (typeof explicitFromBlock !== "string" && typeof explicitFromBlock !== "number") {
+      // Not JSON.stringify: it throws outright on a bigint ("Do not know how
+      // to serialize a BigInt") instead of producing an error message at
+      // all. String() always works, for any type this branch might see.
+      throw new Error(`resolveFromBlock: ${String(explicitFromBlock)} is not a number or a decimal string.`);
+    }
     const n = Number(explicitFromBlock);
     // isSafeInteger, not isInteger: same precision-loss class the CLI's
     // hex32/addr32 were hardened against - Number.isInteger(Number("9007199254740993"))

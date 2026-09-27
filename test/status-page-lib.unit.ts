@@ -87,4 +87,12 @@ describe("status-page/lib.mjs resolveFromBlock - input validation", function () 
     // just left unfixed here originally.
     expect(() => resolveFromBlock("9007199254740993", 10_000)).to.throw(/not a valid block number/);
   });
+
+  it("refuses booleans and arrays instead of silently coercing them into a made-up block number", function () {
+    // Same class of gap as hex32's: Number() coerces far more than "string
+    // or number" (Number([])===0, Number(true)===1, Number([100])===100).
+    expect(() => resolveFromBlock(true, 10_000)).to.throw(/not a number or a decimal string/);
+    expect(() => resolveFromBlock([], 10_000)).to.throw(/not a number or a decimal string/);
+    expect(() => resolveFromBlock([100], 10_000)).to.throw(/not a number or a decimal string/);
+  });
 });

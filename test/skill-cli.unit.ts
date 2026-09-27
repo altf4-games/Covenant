@@ -1,5 +1,5 @@
 import { expect } from "chai";
-import { COMMANDS } from "../skills/covenant-mandate/scripts/cli.mjs";
+import { COMMANDS, hex32 } from "../skills/covenant-mandate/scripts/cli.mjs";
 
 // Input validation in the Wallet Skill's CLI, no network: resolve gets a
 // stubbed token list, the calldata builders need none.
@@ -78,6 +78,31 @@ describe("covenant-mandate skill CLI (unit, input validation)", function () {
       const result = await build({ amountIn: "not-a-number" });
       expect(result).to.match(/^refused: .*not a valid integer/);
       expect(result).to.not.match(/SyntaxError|Cannot convert/);
+    });
+
+    it("refuses booleans and arrays instead of silently coercing them into a made-up amount", async function () {
+      // Red-team follow-up: BigInt() coerces far more than "string or
+      // number" - true/false, [] and single-element arrays all used to
+      // silently become a plausible-looking amount (1, 0, 0, and the
+      // element's own value) instead of being refused. Confirmed live
+      // before this check existed.
+      expect(await build({ amountIn: true })).to.match(/^refused: .*not a number, bigint or a decimal string/);
+      expect(await build({ amountIn: false })).to.match(/^refused: .*not a number, bigint or a decimal string/);
+      expect(await build({ amountIn: [] })).to.match(/^refused: .*not a number, bigint or a decimal string/);
+      expect(await build({ amountIn: [100] })).to.match(/^refused: .*not a number, bigint or a decimal string/);
+    });
+
+    it("still accepts a real bigint - encodeUintArray's own internal use of hex32, not just external input", function () {
+      // Regression: the type check added just above (typeof n !== "string"
+      // && typeof n !== "number") first shipped without "bigint" in the
+      // allow-list, breaking compile-mandate's own internal
+      // encodeUintArray(arr) => hex32(arr.length) + arr.map(hex32) - a real,
+      // legitimate caller that passes bigints, not external input. Caught
+      // live by test/skill-cli.live.ts, not this file, because this file
+      // had no direct hex32 coverage at all - added here so the fast suite
+      // guards it too.
+      expect(hex32(5n)).to.equal("0".repeat(63) + "5");
+      expect(hex32(0n)).to.equal("0".repeat(64));
     });
   });
 });

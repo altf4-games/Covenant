@@ -153,6 +153,21 @@ const summarize = (matches) =>
 // "000...-1"), a JS number past 2^53 that already lost precision in JSON
 // parsing, or a ticker passed where an address belongs.
 const hex32 = (n) => {
+  // Red-team follow-up: BigInt() (and the ToPrimitive coercion upstream of
+  // it) is far more permissive than "string, number or bigint" - true/false,
+  // [], and single-element arrays all silently coerce to a plausible-looking
+  // amount (1, 0, 0, and the element's own value) instead of being refused,
+  // undermining the whole point of this validation: never build calldata
+  // from a value that wasn't what the caller thought it was. Confirmed live
+  // before this check existed. bigint is allowed (and used internally, by
+  // encodeUintArray's own hex32(arr.length) and per-element calls) - it's
+  // already an exact integer with no coercion ambiguity at all.
+  if (typeof n !== "string" && typeof n !== "number" && typeof n !== "bigint") {
+    // Not JSON.stringify(n): n can itself be a bigint here, which
+    // JSON.stringify refuses to serialize at all ("Do not know how to
+    // serialize a BigInt") - String(n) always works.
+    throw Object.assign(new Error(`${String(n)} is not a number, bigint or a decimal string - pass amounts as a decimal string of base units`), { exitCode: 1 });
+  }
   if (typeof n === "number" && !Number.isSafeInteger(n)) {
     throw Object.assign(new Error(`${n} is not an exact integer - pass large amounts as a decimal string of base units`), { exitCode: 1 });
   }
