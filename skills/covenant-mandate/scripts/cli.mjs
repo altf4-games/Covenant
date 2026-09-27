@@ -95,6 +95,7 @@ const DENIAL_REASONS = [
   "DecisionOpen",
   "ClosedMarketDrift",
   "DailyNotionalExceeded",
+  "InvalidAmount",
 ];
 
 const SIDES = { buy: 0, sell: 1 };
@@ -147,8 +148,24 @@ const PROVIDER_NAME = { 1: "ondo", 2: "xstock", 3: "bstock" };
 const summarize = (matches) =>
   matches.map((t) => `${t.symbol} (provider=${PROVIDER_NAME[t.type] ?? `type${t.type}`}, chainId=${t.chainId}, ${t.contractAddress})`).join("; ");
 
-const hex32 = (n) => BigInt(n).toString(16).padStart(64, "0");
-const addr32 = (a) => a.replace(/^0x/, "").toLowerCase().padStart(64, "0");
+// Both reject bad input instead of emitting broken calldata: a negative or
+// >256-bit number padded straight into a word (hex32(-1) used to produce
+// "000...-1"), a JS number past 2^53 that already lost precision in JSON
+// parsing, or a ticker passed where an address belongs.
+const hex32 = (n) => {
+  if (typeof n === "number" && !Number.isSafeInteger(n)) {
+    throw Object.assign(new Error(`${n} is not an exact integer - pass large amounts as a decimal string of base units`), { exitCode: 1 });
+  }
+  const v = BigInt(n);
+  if (v < 0n || v >= 1n << 256n) throw Object.assign(new Error(`${n} is outside the uint256 range`), { exitCode: 1 });
+  return v.toString(16).padStart(64, "0");
+};
+const addr32 = (a) => {
+  if (typeof a !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(a)) {
+    throw Object.assign(new Error(`"${a}" is not a 0x-prefixed 20-byte address - resolve a ticker to an address first`), { exitCode: 1 });
+  }
+  return a.slice(2).toLowerCase().padStart(64, "0");
+};
 const slot = (data, i) => "0x" + data.replace(/^0x/, "").slice(i * 64, i * 64 + 64);
 const asBool = (data, i) => BigInt(slot(data, i)) !== 0n;
 const asUint = (data, i) => BigInt(slot(data, i));
@@ -331,27 +348,36 @@ const COMMANDS = {
       }
     }
 
-    // Axis 2: chain. Apply the BSC default only if it already narrows to one match.
-    if (matches.length > 1) {
+    // Axis 2: chain. An explicit chainId always filters - even a single
+    // match on another chain is refused rather than returned. Without one,
+    // the BSC default applies only if it alone narrows to one match.
+    if (chainId !== undefined) {
+      matches = matches.filter((t) => t.chainId === String(chainId));
+      if (matches.length === 0) {
+        throw Object.assign(new Error(`resolve: no "${ticker}" token${provider ? ` from ${provider}` : ""} on chain ${chainId}`), { exitCode: 1 });
+      }
+    } else if (matches.length > 1) {
       const distinctChains = new Set(matches.map((t) => t.chainId));
-      if (chainId !== undefined) {
-        matches = matches.filter((t) => t.chainId === String(chainId));
-      } else {
-        const bscOnly = matches.filter((t) => t.chainId === "56");
-        if (bscOnly.length === 1) {
-          matches = bscOnly;
-        } else if (distinctChains.size > 1) {
-          throw Object.assign(
-            new Error(`resolve: "${ticker}" is ambiguous across chains - specify chainId explicitly: ` + summarize(matches)),
-            { exitCode: 2, matches },
-          );
-        }
+      const bscOnly = matches.filter((t) => t.chainId === "56");
+      if (bscOnly.length === 1) {
+        matches = bscOnly;
+      } else if (distinctChains.size > 1) {
+        throw Object.assign(
+          new Error(`resolve: "${ticker}" is ambiguous across chains - specify chainId explicitly: ` + summarize(matches)),
+          { exitCode: 2, matches },
+        );
       }
     }
 
     if (matches.length !== 1) {
       throw Object.assign(
         new Error(`resolve: "${ticker}" still resolves to ${matches.length} candidates after filtering - refusing to guess: ` + summarize(matches)),
+        { exitCode: 2, matches },
+      );
+    }
+    if (chainId === undefined && matches[0].chainId !== "56") {
+      throw Object.assign(
+        new Error(`resolve: "${ticker}" only matched a token on chain ${matches[0].chainId}, not BSC - pass chainId explicitly to accept it: ` + summarize(matches)),
         { exitCode: 2, matches },
       );
     }

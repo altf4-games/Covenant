@@ -1,0 +1,73 @@
+import { expect } from "chai";
+import { COMMANDS } from "../skills/covenant-mandate/scripts/cli.mjs";
+
+// Input validation in the Wallet Skill's CLI, no network: resolve gets a
+// stubbed token list, the calldata builders need none.
+const TOKEN = "0x" + "aa".repeat(20);
+
+describe("covenant-mandate skill CLI (unit, input validation)", function () {
+  describe("resolve's chain axis", function () {
+    const realFetch = globalThis.fetch;
+    before(() => {
+      // One Ondo "FOO" token, and it's on Ethereum, not BSC.
+      globalThis.fetch = (async () => ({
+        status: 200,
+        json: async () => ({ data: [{ ticker: "FOO", symbol: "FOOon", type: 1, chainId: "1", contractAddress: "0x" + "11".repeat(20) }] }),
+      })) as unknown as typeof fetch;
+    });
+    after(() => {
+      globalThis.fetch = realFetch;
+    });
+
+    const outcome = async (args: Record<string, unknown>) => {
+      try {
+        return (await COMMANDS.resolve(args as never)).resolved.chainId as string;
+      } catch (e) {
+        return `refused: ${(e as Error).message}`;
+      }
+    };
+
+    it("refuses a single match on another chain when chainId 56 was asked for explicitly", async function () {
+      expect(await outcome({ ticker: "FOO", provider: "ondo", chainId: 56 })).to.match(/^refused: .*on chain 56/);
+    });
+
+    it("refuses to silently return a non-BSC token when no chainId was given", async function () {
+      expect(await outcome({ ticker: "FOO", provider: "ondo" })).to.match(/^refused: .*not BSC/);
+    });
+
+    it("returns it when that chain is asked for explicitly", async function () {
+      expect(await outcome({ ticker: "FOO", provider: "ondo", chainId: 1 })).to.equal("1");
+    });
+  });
+
+  describe("calldata builders reject bad input instead of emitting broken calldata", function () {
+    const build = async (overrides: Record<string, unknown>) => {
+      try {
+        const { calldata } = await COMMANDS.buildCommitCalldata({ side: "buy", tokenAddress: TOKEN, amountIn: "1000", quotedOut: "5", minOut: "4", ...overrides } as never);
+        return calldata as string;
+      } catch (e) {
+        return `refused: ${(e as Error).message}`;
+      }
+    };
+
+    it("builds valid calldata for valid input", async function () {
+      expect(await build({})).to.match(/^0x[0-9a-f]+$/);
+    });
+
+    it("refuses a negative amount", async function () {
+      expect(await build({ amountIn: "-5" })).to.match(/^refused: .*uint256 range/);
+    });
+
+    it("refuses an amount of 2^256", async function () {
+      expect(await build({ amountIn: (2n ** 256n).toString() })).to.match(/^refused: .*uint256 range/);
+    });
+
+    it("refuses a JS number that already lost precision", async function () {
+      expect(await build({ amountIn: 1234567890123456789 })).to.match(/^refused: .*not an exact integer/);
+    });
+
+    it("refuses a ticker where an address belongs", async function () {
+      expect(await build({ tokenAddress: "NVDA" })).to.match(/^refused: .*not a 0x-prefixed 20-byte address/);
+    });
+  });
+});

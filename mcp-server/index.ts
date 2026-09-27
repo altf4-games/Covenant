@@ -23,6 +23,11 @@ import { z } from "zod";
 import { COMMANDS, ethCall, SELECTORS } from "../skills/covenant-mandate/scripts/cli.mjs";
 import { fetchAssetMarketStatus, isHalted } from "../scripts/lib/rwa-status.js";
 
+// Base-unit amounts as decimal strings only. An 18-decimal amount passed as
+// a JSON number is rounded before it ever reaches us (1234567890123456789
+// arrives as ...768).
+const baseUnits = z.string().regex(/^\d+$/, "a non-negative integer, as a decimal string of 18-decimal base units");
+
 const server = new McpServer({ name: "covenant-mandate", version: "0.2.0" });
 
 const slot = (data: string, i: number) => "0x" + data.replace(/^0x/, "").slice(i * 64, i * 64 + 64);
@@ -133,9 +138,9 @@ server.registerTool(
       covenantAddress: z.string().describe("Deployed Covenant contract address"),
       side: z.enum(["buy", "sell"]).describe("buy spends USDT for the stock; sell spends the stock for USDT"),
       tokenAddress: z.string().describe("Exact stock token address (from resolve_ticker)"),
-      amountIn: z.union([z.string(), z.number()]).describe("What you spend, in 18-decimal base units"),
-      quotedOut: z.union([z.string(), z.number()]).describe("What baw market-order quote says you receive, in 18-decimal base units"),
-      minOut: z.union([z.string(), z.number()]).describe("The least you'll accept, in 18-decimal base units - must sit within the token's slippage bound"),
+      amountIn: baseUnits.describe("What you spend, in 18-decimal base units"),
+      quotedOut: baseUnits.describe("What baw market-order quote says you receive, in 18-decimal base units"),
+      minOut: baseUnits.describe("The least you'll accept, in 18-decimal base units - must sit within the token's slippage bound"),
     },
   },
   async ({ rpcUrl, covenantAddress, side, tokenAddress, amountIn, quotedOut, minOut }) => {
