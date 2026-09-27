@@ -8,29 +8,43 @@ Built for the BNB Hack: Tokenized Stocks Edition. Every claim on this page is ba
 
 The closest verified prior art (Harness, ETHOnline 2026, Ledger's "AI Agents x Ledger" 1st place) enforces a single daily budget with no reasoned per-decision record. Covenant evaluates a richer mandate and records every decision on chain. And unlike an advisory critic agent that rates a decision after the fact, Covenant's decision comes before the trade: a trade without an approved decision committed in advance is a detectable violation.
 
+---
+
 ## Architecture
 
 One contract, [`contracts/Covenant.sol`](contracts/Covenant.sol), and three keys that must all differ: the **owner** sets the mandate, the **oracle updater** posts market status and price, and the **agent** (the Agentic Wallet) commits and settles. The contract rejects any overlap, so the agent can't post its own oracle.
 
 ```mermaid
-flowchart TD
-    Owner(["Owner"]) -- "setMandate<br/>configureToken<br/>setClosedMarketDrift" --> Covenant
-    Updater(["Oracle updater<br/>(scripts/oracle-updater.ts)"]) -- "updateOracle<br/>(price, halt, NYSE session)" --> Covenant
-    BinanceAPI(["Binance RWA / Market APIs"]) -. "live status, price, K-line" .-> Updater
+flowchart LR
+    subgraph Config["Configuration (owner + oracle updater)"]
+        Owner["Owner"]
+        Updater["Oracle updater\n(scripts/oracle-updater.ts)"]
+        BinanceAPI["Binance RWA / Market APIs"]
+        BinanceAPI -->|"live status, price,\nK-line"| Updater
+    end
 
-    Agent(["Agent<br/>(Binance Agentic Wallet)"])
-    Covenant["Covenant.sol<br/>mandate + oracle + guard"]
-    Agent -- "1. commit(side, token,<br/>amountIn, quotedOut, minOut)" --> Covenant
-    Covenant -- "DecisionCommitted<br/>(allowed or denied)" --> Events[("BSC mainnet<br/>event log")]
+    subgraph OnChain["BSC mainnet"]
+        Covenant["Covenant.sol\nmandate + oracle + guard"]
+        Router["PancakeSwap router"]
+        Events[("event log")]
+        Covenant -->|"DecisionCommitted\n(allowed or denied)"| Events
+        Router -->|"real Transfer events"| Events
+    end
 
-    Agent -- "2. baw market-order swap<br/>(native - Covenant never<br/>touches the money)" --> Router["PancakeSwap router"]
-    Router -- "real Transfer events" --> Events
+    subgraph Verification["Trusts nothing but chain state"]
+        Verify["scripts/verify.ts\nevery transfer vs. every\nsettled decision"]
+        Judge["scripts/judge.ts\ndecodes one real tx"]
+        Reads["Wallet Skill / MCP server /\nstatus page & frontend\n(read-only)"]
+    end
 
-    Agent -- "3. settle(...) / cancel(...)" --> Covenant
-
-    Events --> Verify["scripts/verify.ts<br/>every transfer vs. every<br/>settled decision"]
-    Events --> Judge["scripts/judge.ts<br/>decodes one real tx"]
-    Events --> Reads["Wallet Skill / MCP server /<br/>status page & frontend<br/>(read-only)"]
+    Owner -->|"setMandate, configureToken,\nsetClosedMarketDrift"| Covenant
+    Updater -->|"updateOracle\n(price, halt, NYSE session)"| Covenant
+    Agent["Agent\n(Binance Agentic Wallet)"] -->|"1. commit(side, token,\namountIn, quotedOut, minOut)"| Covenant
+    Agent -->|"2. baw market-order swap\n(native - Covenant never\ntouches the money)"| Router
+    Agent -->|"3. settle(...) / cancel(...)"| Covenant
+    Events --> Verify
+    Events --> Judge
+    Events --> Reads
 ```
 
 The loop:
@@ -57,11 +71,15 @@ Around the contract:
 
 The skill's `resolve` refuses to guess on an ambiguous ticker; `survey` reports all three providers (ondo, xstock, bstock) at once, each labeled `not-listed-on-bsc`, `dead` or `live`. "Dead" comes from real on-chain `Transfer` activity, not Binance's reported `volume24h`, which was found to be unreliable (see "Tests, and what they caught").
 
+---
+
 ## Explored, measured, removed: `guardedSwap` and the oracle bond
 
 Covenant v1 was a swap router: `guardedSwap` pulled USDT from the caller, checked the mandate, and swapped on PancakeSwap. A red-team review (`docs/research/opus-2026-09-24/a-redteam.md`) found it was opt-in: the same wallet could call `baw market-order swap` and skip it, and with no guarded sell, even the demo would have had to go around it. It also skipped Binance's aggregator, RFQ fills and MEV protection, and made Covenant the execution layer instead of the wallet. v2 moves execution back to the wallet and makes Covenant the decision record.
 
 Phase 2.5 added a slashable bond for the oracle updater. As built it provided no security: the owner was the updater by default, `updateOracle` didn't require a bond, and the bond could be withdrawn in the same block as a false update. It's out of v2. Both designs remain in git history (`0a13c0b` and earlier), with the spec in `docs/research/slashable-guard-spec.md`.
+
+---
 
 ## Red-team holes closed after the v2 rebuild
 
@@ -71,6 +89,8 @@ Phase 2.5 added a slashable bond for the oracle updater. As built it provided no
 - **H8 (no scheduled oracle updater).** `oracle-updater.ts` was a one-shot script with nothing to run it. `scripts/oracle-updater-cron.sh` (same self-disabling pattern as the existing off-hours cron: it removes its own crontab line once past the Oct 11 deadline) now exists to run it on a schedule. Not installed automatically - it's the one part of this project that would spend real gas on a timer rather than per deliberate action, so it's opt-in via `crontab -e`, documented in the script itself.
 - **H10 (the authenticated Web3 API sits unused).** Every price/status read went through Binance's public, unauthenticated `bapi` endpoints; the HMAC-signed Web3 API key from Phase 0 backed nothing. `scripts/lib/web3-api-client.ts` implements the documented HMAC-SHA256 signing (`authentication.md`, verified live while investigating friction-log A10/A11) and `oracle-updater.ts`'s `readLiveOracle` now cross-checks the token address against Binance's authenticated Market API before trusting a price for it - fail-closed, same as the rest of that function, if the credentials or the listing are missing.
 - **H11 (a decision wasn't provable without replaying history).** `DecisionCommitted` used to carry only the trade and the denial reason; proving a decision was evaluated correctly meant replaying `MandateSet`/`OracleUpdated` history to reconstruct what was in force. The event now also carries the mandate's per-trade cap, trade-count cap and expiry, plus the oracle's `updatedAt`, all snapshotted at commit time - a third party can check one event, no replay required.
+
+---
 
 ## Judge-runnable verification
 
@@ -93,6 +113,8 @@ COVENANT_ADDRESS=0x... VERIFY_FROM_BLOCK=<deployment block> npm run verify
 It flags a trade with no settled decision (`UNMATCHED_TRADE`), a settle pointing at a transaction that moved no stock (`FALSE_SETTLE`), a settled amount that isn't what really arrived (`AMOUNT_MISMATCH`), a fill below the committed minimum (`BELOW_MINIMUM`), a trade before its commit or after its expiry, a wrong token or side, and two decisions claiming one trade. Amounts are compared against the ERC-20 transfers, not Binance's reported fill, which is in share units for bStocks (friction-log C17).
 
 `test/verify.live.ts` proves each verdict with real swaps against live PancakeSwap liquidity on a mainnet fork: an honest buy and an honest sell reconcile clean, and a bypass, a false settle, a settle using Binance's share-unit number, and a swap after expiry are each flagged, with nothing else flagged.
+
+---
 
 ## Chaos-fork demo
 
@@ -117,6 +139,8 @@ A real run from 2026-09-25, with a mandate of NVDAB only, $2 per trade, a $3 pos
 
 `test/chaos-fork.live.ts` runs this exact command as a subprocess and asserts on its real output.
 
+---
+
 ## Try-to-break-it live demo
 
 `scripts/try-to-break-it-demo.ts` (`npm run try-to-break-it`) is the "no trade happens unseen" claim, narrated: one honest commit → swap → settle for contrast, then a real swap with **no commit at all** - exactly what a compromised or careless agent would do - followed by `verify.ts`'s real `reconcile()` catching it live. Pure framing over already fork-tested plumbing (`setupCovenant`, `reconcile`), not new mechanism, so the same script is meant to run unchanged against the real mainnet deploy once that happens.
@@ -126,6 +150,8 @@ npm run try-to-break-it
 ```
 
 `test/try-to-break-it-demo.live.ts` runs this exact command as a subprocess and asserts on its real output, the same pattern as the chaos-fork test above.
+
+---
 
 ## Off-hours logging
 
@@ -145,6 +171,8 @@ crontab -e
 On macOS, `cron` needs Full Disk Access (System Settings → Privacy & Security) to reliably access files outside a few default locations - if the log file isn't growing, check that first before assuming the script is broken.
 
 **Gaps in the data are expected and real, not a bug.** Confirmed live: the very first scheduled fire (11:01) succeeded, but the next one (11:15) was silently skipped because the Mac itself was asleep at that moment (`pmset -g log` showed a wake event at 11:20:41 - cron can't fire while the whole machine is suspended). On a laptop, any stretch where the lid was closed or it idle-slept shows up as a missing entry rather than a steady 15-minute cadence. Left as-is deliberately rather than forcing `caffeinate`/`pmset disablesleep` - the gaps are themselves honest data about running unattended infrastructure on a laptop, not something to paper over.
+
+---
 
 ## Running the tests
 
@@ -187,6 +215,8 @@ Not every test or script here runs the same way. Some need nothing but a public 
 | An archive-capable RPC (`bsc-dataseed`/`1rpc` verified live to work; `publicnode` refuses old receipts) | `scripts/verify.ts` run against a wide historical range, the frontend's snapshot/re-verification mode | A public RPC's own `eth_getLogs` range cap and receipt-pruning window (docs/partner-feedback/friction-log.md) - `bsc-dataseed` returns "limit exceeded" past a few thousand blocks, `publicnode` won't serve receipts for old transactions at all. `status-page/lib.mjs`'s `fetchDecisionEvents` chunks its own `eth_getLogs` calls (`DEFAULT_LOGS_CHUNK_BLOCKS`) for exactly this reason, mirroring the chunking `scripts/verify.ts` already needed. |
 | A forked local node (`hardhat node --fork`) | Every `*.live.ts` and `*.fork.ts` suite, `scripts/chaos-fork.ts`, `scripts/try-to-break-it-demo.ts` | Real on-chain state (the live bStocks contracts, real liquidity) with no risk to the $2 real-mainnet budget. |
 
+---
+
 ## Running the status page
 
 Two versions exist. `frontend/` (React + Vite + Tailwind + Phaser) is the primary one, built for GAMIFICATION-PLAN-2026-09-25.md's presentation layer - boss battles, the Guarded vs. Unguarded Twin, the trading card, and the territory map. `status-page/index.html` is the original zero-build static page; both read the exact same tested logic in `status-page/lib.mjs`, so nothing about the on-chain reads or decision decoding differs between them.
@@ -224,6 +254,8 @@ A real ERC-8004 identity, registered on BSC mainnet (`docs/evidence/erc8004-regi
 GEMINI_API_KEY=... npx tsx scripts/generate-narration.ts <rpcUrl> <covenantAddress> <fromBlock>
 ```
 
+---
+
 ## Running the MCP server
 
 ```bash
@@ -243,6 +275,8 @@ Speaks standard MCP over stdio. To register it with an MCP client (Claude Code, 
   }
 }
 ```
+
+---
 
 ## Tests, and what they caught
 
@@ -305,3 +339,23 @@ Every functional claim on this page is backed by a real bug this project's own t
 ### The one bug only found by running it in a browser
 
 Every bug above was caught by an automated test. This one wasn't: manually driving `status-page/index.html` against a real fork in a real browser found that a query range crossing the fork's boundary makes Hardhat's `eth_getLogs` hang forever (friction-log B16). Fixed properly, not just logged: `fetchAttestations` races the real call against a client-side timeout, and a new live suite (`test/status-page.live.ts`) proves both sides - a safe range returns real events fast, a boundary-crossing one rejects within the timeout instead of hanging. Writing that test caught two more things live: the "safe" boundary is `forkStartBlock + 1`, not `forkStartBlock` itself (still needs the same remote lookup and hangs identically), and one hung `eth_getLogs` call degrades the *whole node* for calls after it - so the suite deliberately runs its node-degrading test last, documented as such in its own comments.
+
+---
+
+## Known limitations
+
+Listed here rather than found by a judge:
+
+- **Covenant is a decision record, not a custodian.** It can't physically stop the wallet from trading outside the mandate; that's Binance's own wallet guardrails (daily limit, token scope, session expiry), not this contract. The claim is a trade without an approved decision is *detectable*, not *impossible* - see "What it claims, and what it doesn't" above.
+- **The oracle depends on the updater actually running.** `oracle-updater.ts` is a script, not a keeper network; if `scripts/oracle-updater-cron.sh` isn't installed (it's opt-in, not automatic, since it's the one part of this project that spends real gas on a timer), the oracle ages past its staleness bound and every commit is denied - fail-closed, but only if someone is watching it happen.
+- **H7's daily-notional cap has a disclosed residual gap.** It's keyed by the UTC calendar day, same as `tradesUsedToday`, so a burst straddling exactly midnight can still clear the cap twice within under a minute. `test/Covenant.unit.ts` has a test that deliberately demonstrates this rather than claiming the cap fixes something it doesn't.
+- **Off-hours logging has real gaps, not synthetic ones.** `data/off-hours-log.jsonl` is missing entries anywhere the laptop running the cron job was asleep - confirmed live (`pmset -g log`), not smoothed over with `caffeinate`. The gaps are themselves honest data about running unattended infrastructure on a laptop.
+- **The trading card's rarity tier is a disclosed heuristic, not a live TypeSafe Jev call.** A real Jev API key needs a new third-party account this session couldn't create; the deterministic classification in `frontend/src/lib/rarity.ts` is a stand-in for that call, not a claim that it *is* one.
+- **The closed-market drift rule is only as good as Binance's status/price feeds.** It can't independently verify the NYSE is actually closed or that a candle's close price is accurate - it trusts the same live endpoints the rest of the oracle does, fail-closed if a read fails, but not fail-closed against a read that succeeds with wrong data.
+- **The Agentic Wallet's developer mode lapses after ~7 days of external-transaction inactivity**, undocumented by Binance and found the hard way (friction-log C14). A fork-heavy dev workflow never touches it, so this needs a deliberate trivial real transaction on a schedule to stay alive through the build window.
+
+---
+
+## Use of AI
+
+AI tools played a substantial role in building Covenant: researching the Binance Web3 API stack and BSC/PancakeSwap integration paths, red-teaming `Covenant.sol` and `verify.ts` (the H12-H16 sequence and its own follow-up rounds above were found this way, each with a live repro before being called a bug), drafting documentation, and assisting with test design and frontend development. Every functional claim in this README is still backed by a real transaction or a real test run, independently re-checked, per the no-dummy-data standard stated at the top - AI assistance changed how fast the work happened, not whether it was verified.
