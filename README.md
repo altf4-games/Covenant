@@ -6,6 +6,14 @@ Built for the BNB Hack: Tokenized Stocks Edition. Every claim on this page is ba
 
 **What it claims.** Binance's own wallet guardrails (daily limit, token scope, session expiry) are the hard, private limit on the wallet itself. Covenant adds a second layer that's market-aware and public: halt status, a closed-market drift rule, exact-address provider pinning, slippage checked against both the agent's quote and an oracle price, a position cap read from the wallet's real balance, and a public record of every decision, allow or deny. Covenant's decision comes before the trade, not after: **no trade can happen unseen.**
 
+<p float="left">
+  <img src="docs/screenshots/how-it-works.png" width="32%" alt="How it works: the agent, shops, and rule battles explained" />
+  <img src="docs/screenshots/trade-blocked.png" width="32%" alt="A denied trade: TRADE BLOCKED, your money is safe" />
+  <img src="docs/screenshots/day-complete.png" width="32%" alt="Day complete summary over the town map" />
+</p>
+
+Screenshots from a real seeded run (`scripts/seed-status-page-demo.ts`) against a local fork of BSC mainnet - real decisions, real numbers, not mockups. More on the game in "Running the status page" below.
+
 ---
 
 ## Architecture
@@ -229,13 +237,7 @@ Open the printed localhost URL and point it at an RPC URL and a deployed Covenan
 
 ### The game
 
-The status page as a small Pokemon-style town, built so a kid could follow what the agent did today. It uses Phaser 3 and Kenney's CC0 "Tiny Town" and "Tiny Dungeon" packs; the license files are in `frontend/public/game/`. Screenshots below are from a real seeded run (`scripts/seed-status-page-demo.ts`) against a local fork - real decisions, real numbers, not mockups.
-
-<p float="left">
-  <img src="docs/screenshots/how-it-works.png" width="32%" alt="How it works: the agent, shops, and rule battles explained" />
-  <img src="docs/screenshots/trade-blocked.png" width="32%" alt="A denied trade: TRADE BLOCKED, your money is safe" />
-  <img src="docs/screenshots/day-complete.png" width="32%" alt="Day complete summary over the town map" />
-</p>
+The status page as a small Pokemon-style town, built so a kid could follow what the agent did today. It uses Phaser 3 and Kenney's CC0 "Tiny Town" and "Tiny Dungeon" packs; the license files are in `frontend/public/game/`. See the screenshots at the top of this page - from a real seeded run (`scripts/seed-status-page-demo.ts`) against a local fork, not mockups.
 
 - **Each house is a shop for one real token.** Houses are assigned by real GeckoTerminal pool reserves (`frontend/src/data/liquidity.ts`, from `docs/research/verified-facts.md` and friction log B8/B9), so the biggest house really is the busiest market. bStocks Town is full of shops. Ondo Village has one small one. The two xStocks shops are ruins marked CLOSED ($324 and $2 in their pools, $0 a day traded).
 - **The agent walks the roads.** Press start and every real decision replays oldest first. The agent walks from home along the streets to that token's shop (`route()` in `frontend/src/game/logic.ts`; a test walks every pair of places and fails if a route leaves the road). A token with no shop in town, like the impersonator from the bypass demo, sends it to a lot marked MYSTERY.
