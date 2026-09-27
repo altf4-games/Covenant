@@ -353,9 +353,3 @@ Listed here rather than found by a judge:
 - **The trading card's rarity tier is a disclosed heuristic, not a live TypeSafe Jev call.** A real Jev API key needs a new third-party account this session couldn't create; the deterministic classification in `frontend/src/lib/rarity.ts` is a stand-in for that call, not a claim that it *is* one.
 - **The closed-market drift rule is only as good as Binance's status/price feeds.** It can't independently verify the NYSE is actually closed or that a candle's close price is accurate - it trusts the same live endpoints the rest of the oracle does, fail-closed if a read fails, but not fail-closed against a read that succeeds with wrong data.
 - **The Agentic Wallet's developer mode lapses after ~7 days of external-transaction inactivity**, undocumented by Binance and found the hard way (friction-log C14). A fork-heavy dev workflow never touches it, so this needs a deliberate trivial real transaction on a schedule to stay alive through the build window.
-
----
-
-## Use of AI
-
-AI tools played a substantial role in building Covenant: researching the Binance Web3 API stack and BSC/PancakeSwap integration paths, red-teaming `Covenant.sol` and `verify.ts` (the H12-H16 sequence and its own follow-up rounds above were found this way, each with a live repro before being called a bug), drafting documentation, and assisting with test design and frontend development. Every functional claim in this README is still backed by a real transaction or a real test run, independently re-checked, per the no-dummy-data standard stated at the top - AI assistance changed how fast the work happened, not whether it was verified.
