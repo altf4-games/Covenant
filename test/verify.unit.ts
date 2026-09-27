@@ -20,6 +20,7 @@ const NVDA = "0x" + "aa".repeat(20);
 const AAPL = "0x" + "bb".repeat(20);
 const OLD = "0x" + "01".repeat(20);
 const NEW = "0x" + "02".repeat(20);
+const THIRD = "0x" + "03".repeat(20);
 const DEX = "0x" + "de".repeat(20);
 const UPDATER = "0x" + "09".repeat(20);
 const E18 = 10n ** 18n;
@@ -206,6 +207,29 @@ describe("verify.ts reconcile() (unit, mock RPC, crafted logs)", function () {
     chain.transfer(NVDA, DEX, NEW, 5n * 10n ** 15n, 12, h(12));
     chain.settle(1, h(12), 5n * 10n ** 15n, 13);
     expect(kinds(await run())).to.include("AGENT_MISMATCH");
+  });
+
+  it("H14 follow-up: a wallet that held the agent role twice is scoped against its most recent handover, not its first", async function () {
+    // Red-team follow-up on H14: inScope() used to pick tenures.find()'s
+    // FIRST matching handover for a wallet, not the most recent one. OLD
+    // holds the role, hands to NEW, gets it back, then hands to THIRD -
+    // OLD's real, relevant handover for anything it does afterward is the
+    // one to THIRD, not the much older one to NEW. A trade just after that
+    // real handover, well inside TTL, used to be measured against the
+    // stale one to NEW instead and wrongly reported as a violation once
+    // enough real time had passed since it (proven live before this fix).
+    chain.agentChanged(NEW, 20);
+    chain.agentChanged(OLD, 800);
+    chain.agentChanged(THIRD, 820);
+    chain.agent = THIRD;
+
+    chain.commit(1, NVDA, 0, E18, 5n * 10n ** 15n, 49n * 10n ** 14n, 810); // committed while OLD legitimately held the role again
+    chain.transfer(USDT, OLD, DEX, E18, 825, h(825)); // 5 blocks after OLD's real (second) handover - well inside TTL=600
+    chain.transfer(NVDA, DEX, OLD, 5n * 10n ** 15n, 825, h(825));
+    chain.settle(1, h(825), 5n * 10n ** 15n, 826);
+
+    chain.tip = 2000;
+    expect((await run()).violations).to.deep.equal([]);
   });
 
   it("a swap after the mandate was revoked, under an approval from before, is flagged", async function () {

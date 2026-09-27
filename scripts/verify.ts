@@ -226,7 +226,20 @@ export async function reconcile(opts: ReconcileOptions) {
   // after it lost it (an approval it committed can still be live).
   const inScope = async (m: TxMovement) => {
     if (agentAt(m) === m.wallet) return true;
-    const handover = tenures.find((t, i) => i > 0 && tenures[i - 1].agent === m.wallet && !before(m, t) && t.agent !== m.wallet);
+    // The most recent point at-or-before m where this wallet lost the role -
+    // not the first one it ever lost it. A wallet that held the agent role
+    // across two separate, non-contiguous tenures (rotated away, later
+    // rotated back in, then rotated away again) needs its latest handover
+    // here: tenures is sorted ascending, so scanning forward and keeping
+    // the last match finds it, where Array.find's "first match" would lock
+    // onto a much older, irrelevant handover whose TTL window may have long
+    // since closed even though the real, recent one hasn't.
+    let handover: { blockNumber: number; txIndex: number } | undefined;
+    for (let i = 1; i < tenures.length; i++) {
+      if (tenures[i - 1].agent === m.wallet && !before(m, tenures[i]) && tenures[i].agent !== m.wallet) {
+        handover = tenures[i];
+      }
+    }
     if (!handover) return false;
     return (await blockTime(m.blockNumber)) <= (await blockTime(handover.blockNumber)) + decisionTtl;
   };
