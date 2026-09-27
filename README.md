@@ -12,6 +12,27 @@ The closest verified prior art (Harness, ETHOnline 2026, Ledger's "AI Agents x L
 
 One contract, [`contracts/Covenant.sol`](contracts/Covenant.sol), and three keys that must all differ: the **owner** sets the mandate, the **oracle updater** posts market status and price, and the **agent** (the Agentic Wallet) commits and settles. The contract rejects any overlap, so the agent can't post its own oracle.
 
+```mermaid
+flowchart TD
+    Owner(["Owner"]) -- "setMandate<br/>configureToken<br/>setClosedMarketDrift" --> Covenant
+    Updater(["Oracle updater<br/>(scripts/oracle-updater.ts)"]) -- "updateOracle<br/>(price, halt, NYSE session)" --> Covenant
+    BinanceAPI(["Binance RWA / Market APIs"]) -. "live status, price, K-line" .-> Updater
+
+    Agent(["Agent<br/>(Binance Agentic Wallet)"])
+    Covenant["Covenant.sol<br/>mandate + oracle + guard"]
+    Agent -- "1. commit(side, token,<br/>amountIn, quotedOut, minOut)" --> Covenant
+    Covenant -- "DecisionCommitted<br/>(allowed or denied)" --> Events[("BSC mainnet<br/>event log")]
+
+    Agent -- "2. baw market-order swap<br/>(native - Covenant never<br/>touches the money)" --> Router["PancakeSwap router"]
+    Router -- "real Transfer events" --> Events
+
+    Agent -- "3. settle(...) / cancel(...)" --> Covenant
+
+    Events --> Verify["scripts/verify.ts<br/>every transfer vs. every<br/>settled decision"]
+    Events --> Judge["scripts/judge.ts<br/>decodes one real tx"]
+    Events --> Reads["Wallet Skill / MCP server /<br/>status page & frontend<br/>(read-only)"]
+```
+
 The loop:
 
 1. **`commit(side, token, amountIn, quotedOut, minOut, quoteRef, researchRef)`**, agent only. Covenant checks the mandate (active, not expired), the token (allowed by exact address), that no other approved decision is in flight, the oracle (fresh, not halted), the notional (buys in USDT, sells through the oracle price), the day's trade count, the slippage bound (`minOut` against both the quote and the oracle price), and for buys, the position cap. While the NYSE is closed it also applies the closed-market drift rule. It records the decision and emits `DecisionCommitted`, allowed or denied.
