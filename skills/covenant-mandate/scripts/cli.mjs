@@ -171,6 +171,16 @@ const hex32 = (n) => {
   if (typeof n === "number" && !Number.isSafeInteger(n)) {
     throw Object.assign(new Error(`${n} is not an exact integer - pass large amounts as a decimal string of base units`), { exitCode: 1 });
   }
+  // Red-team follow-up: BigInt(string) natively parses 0x/0b/0o-prefixed
+  // strings as hex/binary/octal, not decimal - "0x10" silently becomes 16,
+  // not a refusal. Nothing above catches this: it's a string, so the
+  // Number.isSafeInteger check doesn't apply, and BigInt("0x10") doesn't
+  // throw. Confirmed live before this check existed. Rejecting up front
+  // rather than relying on BigInt's own parsing keeps "pass amounts as a
+  // decimal string" an actual guarantee, not just documentation.
+  if (typeof n === "string" && !/^[+-]?\d+$/.test(n)) {
+    throw Object.assign(new Error(`"${n}" is not a plain decimal integer string - pass amounts as a decimal string of base units, not hex/binary/octal`), { exitCode: 1 });
+  }
   let v;
   try {
     v = BigInt(n);

@@ -69,7 +69,7 @@ describe("status-page/lib.mjs resolveFromBlock - input validation", function () 
   });
 
   it("refuses NaN input instead of silently scanning from block NaN", function () {
-    expect(() => resolveFromBlock("not-a-number", 10_000)).to.throw(/not a valid block number/);
+    expect(() => resolveFromBlock("not-a-number", 10_000)).to.throw(/not a plain decimal integer string/);
   });
 
   it("refuses a negative block number", function () {
@@ -77,7 +77,16 @@ describe("status-page/lib.mjs resolveFromBlock - input validation", function () 
   });
 
   it("refuses a non-integer block number", function () {
-    expect(() => resolveFromBlock("12.5", 10_000)).to.throw(/not a valid block number/);
+    expect(() => resolveFromBlock("12.5", 10_000)).to.throw(/not a plain decimal integer string/);
+  });
+
+  it("refuses a hex/binary/octal-prefixed string instead of silently reinterpreting it in the wrong base", function () {
+    // Red-team follow-up: Number(string) natively parses 0x/0b/0o-prefixed
+    // strings as hex/binary/octal, not decimal - Number("0x10") is silently
+    // 16, not a refusal. Confirmed live before this check existed.
+    expect(() => resolveFromBlock("0x10", 10_000)).to.throw(/not a plain decimal integer string/);
+    expect(() => resolveFromBlock("0b101", 10_000)).to.throw(/not a plain decimal integer string/);
+    expect(() => resolveFromBlock("0o17", 10_000)).to.throw(/not a plain decimal integer string/);
   });
 
   it("refuses a block number past Number.MAX_SAFE_INTEGER instead of silently rounding it", function () {

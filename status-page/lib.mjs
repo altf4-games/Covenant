@@ -261,6 +261,12 @@ export function resolveFromBlock(explicitFromBlock, latestBlock) {
       // all. String() always works, for any type this branch might see.
       throw new Error(`resolveFromBlock: ${String(explicitFromBlock)} is not a number or a decimal string.`);
     }
+    // Red-team follow-up: Number(string) natively parses 0x/0b/0o-prefixed
+    // strings as hex/binary/octal, not decimal - Number("0x10") is silently
+    // 16, not a refusal. Confirmed live before this check existed.
+    if (typeof explicitFromBlock === "string" && !/^[+-]?\d+$/.test(explicitFromBlock)) {
+      throw new Error(`resolveFromBlock: "${explicitFromBlock}" is not a plain decimal integer string - not hex/binary/octal.`);
+    }
     const n = Number(explicitFromBlock);
     // isSafeInteger, not isInteger: same precision-loss class the CLI's
     // hex32/addr32 were hardened against - Number.isInteger(Number("9007199254740993"))

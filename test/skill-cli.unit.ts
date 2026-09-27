@@ -76,8 +76,19 @@ describe("covenant-mandate skill CLI (unit, input validation)", function () {
       // "Cannot convert not-a-number to a BigInt", no exitCode - breaking
       // the clean-refusal contract every other case here relies on.
       const result = await build({ amountIn: "not-a-number" });
-      expect(result).to.match(/^refused: .*not a valid integer/);
+      expect(result).to.match(/^refused: .*not a plain decimal integer string/);
       expect(result).to.not.match(/SyntaxError|Cannot convert/);
+    });
+
+    it("refuses a hex/binary/octal-prefixed string instead of silently reinterpreting it in the wrong base", async function () {
+      // Red-team follow-up: BigInt(string) natively parses 0x/0b/0o-prefixed
+      // strings as hex/binary/octal, not decimal - BigInt("0x10") is
+      // silently 16n, not a refusal, even though "0x10" isn't the plain
+      // decimal string this CLI's own docs say to pass. Confirmed live
+      // before this check existed.
+      expect(await build({ amountIn: "0x10" })).to.match(/^refused: .*not a plain decimal integer string/);
+      expect(await build({ amountIn: "0b101" })).to.match(/^refused: .*not a plain decimal integer string/);
+      expect(await build({ amountIn: "0o17" })).to.match(/^refused: .*not a plain decimal integer string/);
     });
 
     it("refuses booleans and arrays instead of silently coercing them into a made-up amount", async function () {
