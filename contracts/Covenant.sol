@@ -490,10 +490,19 @@ contract Covenant {
     /// the agent's claim; verify.ts checks them against the swap's real
     /// transfers. Settling after `expiresAt` is allowed (the swap may have
     /// landed in time), and verify.ts checks the swap's block timestamp.
-    function settle(uint256 id, bytes32 swapTxHash, uint256 amountOut, ExecutionMode executionMode)
-        external
-        onlyAgent
-    {
+    ///
+    /// @dev Deliberately not `onlyAgent`: only the address that actually
+    /// committed this decision (`d.agent`) may settle or cancel it, whether
+    /// or not it's still the *current* agent. `onlyAgent` here used to mean
+    /// that once the role rotated away from the committing agent, nobody
+    /// could ever call settle/cancel on their still-open decision again -
+    /// not even the agent who legitimately committed it - permanently
+    /// orphaning it (never settled, never cancelled) and making verify.ts
+    /// misreport its real, later trade as UNMATCHED_TRADE. The `d.agent`
+    /// check alone is already strictly correct: it can never match a
+    /// stranger, and it still blocks a new agent from touching an old
+    /// agent's decision (red-team H14).
+    function settle(uint256 id, bytes32 swapTxHash, uint256 amountOut, ExecutionMode executionMode) external {
         Decision storage d = _existing(id);
         if (d.agent != msg.sender) revert NotDecisionAgent();
         if (!d.allowed) revert DecisionNotAllowed();
@@ -511,7 +520,8 @@ contract Covenant {
 
     /// @notice Abandon an approved decision without trading. It still
     /// counts toward the day, so commit/cancel can't be used to churn.
-    function cancel(uint256 id) external onlyAgent {
+    /// @dev Not `onlyAgent` either - see settle()'s @dev note just above.
+    function cancel(uint256 id) external {
         Decision storage d = _existing(id);
         if (d.agent != msg.sender) revert NotDecisionAgent();
         if (!d.allowed) revert DecisionNotAllowed();

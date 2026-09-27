@@ -729,7 +729,9 @@ describe("Covenant v2 (unit, mocked tokens)", function () {
       const denied = await commit(f, Side.Buy, buyArgs(E18), IMPERSONATOR_BSTOCKS);
       const ok = await commit(f, Side.Buy, buyArgs(E18));
 
-      await expect(f.covenant.connect(f.stranger).settle(ok.id, SWAP_TX, 1n, Mode.Rfq)).to.be.revertedWithCustomError(f.covenant, "NotAgent");
+      // Not onlyAgent (see settle()'s @dev note): a stranger is still
+      // rejected, now by the d.agent check itself rather than the modifier.
+      await expect(f.covenant.connect(f.stranger).settle(ok.id, SWAP_TX, 1n, Mode.Rfq)).to.be.revertedWithCustomError(f.covenant, "NotDecisionAgent");
       await expect(f.covenant.connect(f.agent).settle(0n, SWAP_TX, 1n, Mode.Rfq)).to.be.revertedWithCustomError(f.covenant, "DecisionDoesNotExist");
       await expect(f.covenant.connect(f.agent).settle(99n, SWAP_TX, 1n, Mode.Rfq)).to.be.revertedWithCustomError(f.covenant, "DecisionDoesNotExist");
       await expect(f.covenant.connect(f.agent).settle(denied.id, SWAP_TX, 1n, Mode.Rfq)).to.be.revertedWithCustomError(f.covenant, "DecisionNotAllowed");
@@ -751,7 +753,7 @@ describe("Covenant v2 (unit, mocked tokens)", function () {
       const f = await networkHelpers.loadFixture(deployFixture);
       await makeTradeable(f, { maxTrades: 1n });
       const ev = await commit(f, Side.Buy, buyArgs(E18));
-      await expect(f.covenant.connect(f.stranger).cancel(ev.id)).to.be.revertedWithCustomError(f.covenant, "NotAgent");
+      await expect(f.covenant.connect(f.stranger).cancel(ev.id)).to.be.revertedWithCustomError(f.covenant, "NotDecisionAgent");
       await expect(f.covenant.connect(f.agent).cancel(ev.id)).to.emit(f.covenant, "DecisionCancelled").withArgs(ev.id);
       expect(await f.covenant.openDecisionId()).to.equal(0n);
       await expect(f.covenant.connect(f.agent).cancel(ev.id)).to.be.revertedWithCustomError(f.covenant, "DecisionClosed");
@@ -788,6 +790,32 @@ describe("Covenant v2 (unit, mocked tokens)", function () {
       expect(mine.allowed).to.equal(true);
       await f.covenant.connect(f.other).settle(mine.id, SWAP_TX, 1n, Mode.Pool);
       expect((await f.covenant.getDecision(mine.id)).agent).to.equal(f.other.address);
+    });
+
+    it("H14 follow-up: the agent who actually committed a decision can still settle or cancel it after being rotated out", async function () {
+      // Not onlyAgent by design (see settle()'s @dev note in Covenant.sol):
+      // a red-team pass on H14 itself found that requiring the CURRENT
+      // agent, on top of d.agent == msg.sender, made a rotated-out agent's
+      // still-open decision permanently un-settleable and un-cancelable by
+      // anyone - the old agent fails onlyAgent, the new agent fails the
+      // d.agent check. That silently orphaned a real, on-chain-approved
+      // decision and made verify.ts misreport its eventual real trade as
+      // UNMATCHED_TRADE ("no approved decision") when one genuinely existed.
+      const f = await networkHelpers.loadFixture(deployFixture);
+      await makeTradeable(f);
+      const old = await commit(f, Side.Buy, buyArgs(E18));
+      await f.covenant.setAgent(f.other.address);
+
+      // f.agent is no longer the current agent (onlyAgent would reject it),
+      // but it's still d.agent for this specific decision - it must still
+      // be able to close it out.
+      await f.covenant.connect(f.agent).settle(old.id, SWAP_TX, 1n, Mode.Pool);
+      expect((await f.covenant.getDecision(old.id)).settled).to.equal(true);
+
+      const old2 = await commit(f, Side.Sell, sellArgs((2n * E18) / 100n), f.stockAddress, f.other);
+      await f.covenant.setAgent(f.agent.address); // rotate away from f.other too
+      await f.covenant.connect(f.other).cancel(old2.id);
+      expect((await f.covenant.getDecision(old2.id)).cancelled).to.equal(true);
     });
   });
 
