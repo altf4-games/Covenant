@@ -28,6 +28,7 @@ const Reason = {
   DecisionOpen: 10n,
   ClosedMarketDrift: 11n,
   DailyNotionalExceeded: 12n,
+  InvalidAmount: 13n,
 };
 const Side = { Buy: 0, Sell: 1 };
 const Mode = { Unknown: 0, Pool: 1, Rfq: 2, Aggregator: 3 };
@@ -541,26 +542,41 @@ describe("Covenant v2 (unit, mocked tokens)", function () {
       await expect(f.covenant.connect(f.updater).updateOracle(f.stockAddress, false, 200n * E18, false, 0n)).to.be.revertedWithCustomError(f.covenant, "ZeroPrice");
     });
 
-    it("while closed, a buy priced over the bound above the last close is denied; within it, allowed", async function () {
+    it("while closed, a buy whose worst fill (minOut) is over the bound above the last close is denied; within it, allowed", async function () {
       const f = await networkHelpers.loadFixture(deployFixture);
       await makeTradeable(f, { slippageBps: 100 });
       await f.covenant.setClosedMarketDrift(f.stockAddress, 100); // 1%
+      const preview = (price: bigint) =>
+        f.covenant.previewDecision(Side.Buy, f.stockAddress, ...(Object.values(buyArgs(E18, price)) as [bigint, bigint, bigint]));
 
-      await closedMarket(f, 203n * E18, 200n * E18); // +1.5% since the close
+      // buyArgs sets minOut 0.5% under the quote, so the worst fill is
+      // price / 0.995, about 0.5% above the price itself.
+      await closedMarket(f, 203n * E18, 200n * E18); // worst ~+2.0%
       expect((await commit(f, Side.Buy, buyArgs(E18, 203n * E18))).reason).to.equal(Reason.ClosedMarketDrift);
 
-      await closedMarket(f, 201n * E18, 200n * E18); // +0.5%
-      expect(await f.covenant.previewDecision(Side.Buy, f.stockAddress, ...Object.values(buyArgs(E18, 201n * E18)) as [bigint, bigint, bigint])).to.equal(Reason.None);
+      await closedMarket(f, 2008n * E18 / 10n, 200n * E18); // price +0.4%, worst ~+0.9%
+      expect(await preview(2008n * E18 / 10n)).to.equal(Reason.None);
 
-      // Just inside +1%: allowed.
-      await closedMarket(f, 20199n * E18 / 100n, 200n * E18);
-      expect(await f.covenant.previewDecision(Side.Buy, f.stockAddress, ...Object.values(buyArgs(E18, 20199n * E18 / 100n)) as [bigint, bigint, bigint])).to.equal(Reason.None);
+      await closedMarket(f, 20098n * E18 / 100n, 200n * E18); // worst ~+0.995%: just inside
+      expect(await preview(20098n * E18 / 100n)).to.equal(Reason.None);
 
-      // Exactly +1% is denied: quotedOut truncates, which puts the implied
-      // price 20,200 wei (about 1e-16) over the bound. Rounding errs toward
-      // denial, the safe direction for a guard; asserted so it stays that way.
+      await closedMarket(f, 2011n * E18 / 10n, 200n * E18); // worst ~+1.06%: just outside
+      expect(await preview(2011n * E18 / 10n)).to.equal(Reason.ClosedMarketDrift);
+    });
+
+    it("H16: drift and slippage no longer stack - a quote inside the bound with a loose minimum is denied", async function () {
+      const f = await networkHelpers.loadFixture(deployFixture);
+      await makeTradeable(f, { slippageBps: 100 });
+      await f.covenant.setClosedMarketDrift(f.stockAddress, 100); // 1%
+      // The red-team case: last close 200, oracle 202, quote implying ~202
+      // (+1%), minimum at the full 1% slippage floor. Measured at the quote
+      // this was allowed with a worst fill ~204.04 (+2.02%).
       await closedMarket(f, 202n * E18, 200n * E18);
-      expect(await f.covenant.previewDecision(Side.Buy, f.stockAddress, ...Object.values(buyArgs(E18, 202n * E18)) as [bigint, bigint, bigint])).to.equal(Reason.ClosedMarketDrift);
+      const quotedOut = (E18 * E18) / (202n * E18);
+      // A hair above the 1% floor - exactly at it rounds under (README,
+      // "A minimum exactly at the slippage floor rounds under it").
+      const minOut = (quotedOut * 9901n) / 10_000n;
+      expect(await f.covenant.previewDecision(Side.Buy, f.stockAddress, E18, quotedOut, minOut)).to.equal(Reason.ClosedMarketDrift);
     });
 
     it("while closed, a sell priced over the bound below the last close is denied", async function () {
@@ -606,17 +622,45 @@ describe("Covenant v2 (unit, mocked tokens)", function () {
       expect(await f.covenant.previewDecision(Side.Buy, f.stockAddress, a.amountIn, a.quotedOut, a.minOut)).to.equal(Reason.None);
     });
 
-    it("H12: a zero-size sell no longer panics on division by zero while the market is closed", async function () {
+    it("H12 + H15: a zero-size sell is denied as InvalidAmount instead of panicking on division by zero", async function () {
       const f = await networkHelpers.loadFixture(deployFixture);
       await makeTradeable(f, { slippageBps: 100 });
       await f.covenant.setClosedMarketDrift(f.stockAddress, 100);
       await closedMarket(f, 200n * E18, 200n * E18);
 
-      // amountIn = 0 makes oracleOut (and notional) 0 too, so quotedOut/minOut
-      // only need to satisfy the slippage ratio against each other -
-      // 9_900/10_000 clears a 1% (100 bps) slippage bound exactly.
-      expect(await f.covenant.previewDecision(Side.Sell, f.stockAddress, 0n, 10_000n, 9_900n)).to.equal(Reason.None);
-      expect((await commit(f, Side.Sell, { amountIn: 0n, quotedOut: 10_000n, minOut: 9_900n })).reason).to.equal(Reason.None);
+      // The exact input that panicked (0x12) before H12: amountIn = 0 makes
+      // oracleOut and notional 0, so the slippage ratio alone is satisfied.
+      expect(await f.covenant.previewDecision(Side.Sell, f.stockAddress, 0n, 10_000n, 9_900n)).to.equal(Reason.InvalidAmount);
+      expect((await commit(f, Side.Sell, { amountIn: 0n, quotedOut: 10_000n, minOut: 9_900n })).reason).to.equal(Reason.InvalidAmount);
+    });
+  });
+
+  describe("H15: absurd amounts are denied, never a panic", function () {
+    it("denies amounts above MAX_AMOUNT on every field and both sides, and records the denial", async function () {
+      const f = await networkHelpers.loadFixture(deployFixture);
+      await makeTradeable(f);
+      const huge = 2n ** 250n;
+      // Each of these reverted with panic 0x11 (overflow) before H15.
+      expect((await commit(f, Side.Sell, { amountIn: huge, quotedOut: E18, minOut: E18 })).reason).to.equal(Reason.InvalidAmount);
+      expect((await commit(f, Side.Buy, { amountIn: E18, quotedOut: 2n ** 255n, minOut: E18 })).reason).to.equal(Reason.InvalidAmount);
+      expect((await commit(f, Side.Buy, { amountIn: E18, quotedOut: E18, minOut: 2n ** 255n })).reason).to.equal(Reason.InvalidAmount);
+      expect((await commit(f, Side.Buy, { amountIn: 0n, quotedOut: E18, minOut: E18 })).reason).to.equal(Reason.InvalidAmount);
+      // Exactly MAX_AMOUNT is still evaluated on its merits, not rejected as invalid.
+      const max = await f.covenant.MAX_AMOUNT();
+      expect(await f.covenant.previewDecision(Side.Buy, f.stockAddress, max, E18, E18)).to.equal(Reason.NotionalExceeded);
+    });
+
+    it("updateOracle rejects a price or last close above MAX_AMOUNT", async function () {
+      const f = await networkHelpers.loadFixture(deployFixture);
+      const tooBig = 2n ** 129n;
+      await expect(f.covenant.connect(f.updater).updateOracle(f.stockAddress, false, tooBig, true, E18)).to.be.revertedWithCustomError(
+        f.covenant,
+        "InvalidBound",
+      );
+      await expect(f.covenant.connect(f.updater).updateOracle(f.stockAddress, false, E18, true, tooBig)).to.be.revertedWithCustomError(
+        f.covenant,
+        "InvalidBound",
+      );
     });
   });
 
@@ -724,6 +768,26 @@ describe("Covenant v2 (unit, mocked tokens)", function () {
       await expect(
         f.covenant.connect(f.agent).commit(Side.Buy, f.stockAddress, E18, 1n, 1n, QUOTE_REF, RESEARCH_REF),
       ).to.be.revertedWithCustomError(f.covenant, "NotAgent");
+    });
+
+    it("H14: the new agent can't settle or cancel the old agent's live approval", async function () {
+      const f = await networkHelpers.loadFixture(deployFixture);
+      await makeTradeable(f);
+      const old = await commit(f, Side.Buy, buyArgs(E18));
+      expect((await f.covenant.getDecision(old.id)).agent).to.equal(f.agent.address);
+
+      await f.covenant.setAgent(f.other.address);
+      await expect(f.covenant.connect(f.other).settle(old.id, SWAP_TX, 1n, Mode.Pool)).to.be.revertedWithCustomError(
+        f.covenant,
+        "NotDecisionAgent",
+      );
+      await expect(f.covenant.connect(f.other).cancel(old.id)).to.be.revertedWithCustomError(f.covenant, "NotDecisionAgent");
+
+      // The new agent's own decisions work normally.
+      const mine = await commit(f, Side.Buy, buyArgs(E18), f.stockAddress, f.other);
+      expect(mine.allowed).to.equal(true);
+      await f.covenant.connect(f.other).settle(mine.id, SWAP_TX, 1n, Mode.Pool);
+      expect((await f.covenant.getDecision(mine.id)).agent).to.equal(f.other.address);
     });
   });
 

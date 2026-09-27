@@ -59,7 +59,11 @@ contract Covenant {
         // Red-team H7: a cumulative cap on top of the per-trade notional cap,
         // so "maxNotionalPerTrade x maxTradesPerDay" isn't the real daily
         // exposure. Appended last to keep the list append-only.
-        DailyNotionalExceeded
+        DailyNotionalExceeded,
+        // Red-team H15: a zero amount, or an amount so large the policy math
+        // would overflow. Denied here rather than letting a panic revert
+        // break commit()'s never-reverts-on-denial contract.
+        InvalidAmount
     }
 
     /// @notice How the real fill was executed, as reported by the agent at
@@ -123,6 +127,10 @@ contract Covenant {
         bytes32 swapTxHash;
         uint256 amountOut;
         ExecutionMode executionMode;
+        /// @dev Red-team H14: the agent that committed this decision. Only it
+        /// may settle or cancel it, so rotating the agent can't hand the new
+        /// key someone else's live approval.
+        address agent;
     }
 
     // ---------------------------------------------------------------------
@@ -152,6 +160,12 @@ contract Covenant {
     mapping(address => TokenConfig) public tokenConfig;
     mapping(address => OracleStatus) public oracleStatus;
     mapping(uint256 => Decision) internal _decisions;
+
+    /// @notice Red-team H15: the largest amount or price the policy math
+    /// accepts. Any two such values multiply to less than 2^256, so no
+    /// check in _evaluate can overflow; anything larger is denied with
+    /// InvalidAmount (amounts) or rejected by updateOracle (prices).
+    uint256 public constant MAX_AMOUNT = type(uint128).max;
 
     uint256 public nextDecisionId = 1;
     /// @notice The single approved decision still in flight, or 0.
@@ -224,6 +238,9 @@ contract Covenant {
     error DecisionNotAllowed();
     error DecisionClosed();
     error ZeroTxHash();
+    /// @notice Red-team H14: settle/cancel by an agent other than the one
+    /// that committed the decision.
+    error NotDecisionAgent();
     /// @notice Feature 2: setMandateForTokens's per-token array arguments
     /// must all be the same length as `tokens`.
     error ArrayLengthMismatch();
@@ -357,6 +374,10 @@ contract Covenant {
         if (newAgent == address(0)) revert ZeroAddress();
         if (newAgent == owner || newAgent == oracleUpdater) revert RolesNotDistinct();
         agent = newAgent;
+        // The old agent's open approval can no longer be settled or
+        // cancelled by anyone (H14: settle/cancel require the committing
+        // agent), so it doesn't block the new agent; any swap the old wallet
+        // makes under it surfaces in verify.ts as unmatched.
         openDecisionId = 0;
         emit AgentChanged(newAgent);
     }
@@ -382,6 +403,8 @@ contract Covenant {
         onlyOracleUpdater
     {
         if (priceUsd == 0 || lastCloseUsd == 0) revert ZeroPrice();
+        // Red-team H15: keeps every product in _evaluate below 2^256.
+        if (priceUsd > MAX_AMOUNT || lastCloseUsd > MAX_AMOUNT) revert InvalidBound();
         oracleStatus[token] = OracleStatus({
             halted: halted,
             priceUsd: priceUsd,
@@ -431,15 +454,18 @@ contract Covenant {
         d.expiresAt = expiresAt;
         d.quoteRef = quoteRef;
         d.researchRef = researchRef;
+        d.agent = msg.sender;
 
         if (allowed) {
             _recordTrade(notional);
             openDecisionId = id;
         }
 
-        // Red-team H11: snapshot what was in force for this decision, so
-        // the event alone (no history replay) can prove it was evaluated
-        // correctly.
+        // Red-team H11: snapshot the mandate in force for this decision and
+        // the oracle's updatedAt. The oracle's price, session flag and last
+        // close aren't in this event - they're in the OracleUpdated event
+        // whose timestamp matches, which identifies it unless two updates
+        // for the token landed in the same block.
         Mandate memory m = mandate;
         emit DecisionCommitted(
             id,
@@ -469,6 +495,7 @@ contract Covenant {
         onlyAgent
     {
         Decision storage d = _existing(id);
+        if (d.agent != msg.sender) revert NotDecisionAgent();
         if (!d.allowed) revert DecisionNotAllowed();
         if (d.settled || d.cancelled) revert DecisionClosed();
         if (swapTxHash == bytes32(0)) revert ZeroTxHash();
@@ -486,6 +513,7 @@ contract Covenant {
     /// counts toward the day, so commit/cancel can't be used to churn.
     function cancel(uint256 id) external onlyAgent {
         Decision storage d = _existing(id);
+        if (d.agent != msg.sender) revert NotDecisionAgent();
         if (!d.allowed) revert DecisionNotAllowed();
         if (d.settled || d.cancelled) revert DecisionClosed();
 
@@ -546,6 +574,13 @@ contract Covenant {
         view
         returns (DenialReason, uint256)
     {
+        // Red-team H15: before any arithmetic. A zero amount has nothing to
+        // evaluate, and an amount this large would overflow the checks
+        // below and panic instead of denying.
+        if (amountIn == 0 || amountIn > MAX_AMOUNT || quotedOut > MAX_AMOUNT || minOut > MAX_AMOUNT) {
+            return (DenialReason.InvalidAmount, 0);
+        }
+
         Mandate memory m = mandate;
         if (!m.active) return (DenialReason.MandateInactive, 0);
         if (block.timestamp > m.expiry) return (DenialReason.MandateExpired, 0);
@@ -583,37 +618,28 @@ contract Covenant {
             return (DenialReason.SlippageTooLoose, 0);
         }
 
-        // Feature 1: the closed-market drift rule. The implied price is
-        // from the agent's own quote; the slippage check above already ties
-        // the quote to both the minimum and the oracle, so an inflated quote
-        // can't hide a bad fill. Both sides of the comparison are the token's
-        // own price, so no token-to-share normalisation is needed here.
+        // Feature 1: the closed-market drift rule, measured at the worst
+        // fill the agent will accept (minOut), not at the quote. Red-team
+        // H16: measuring the quote let drift and slippage stack - with a 1%
+        // drift bound and a 1% slippage bound, a buy quoted just inside the
+        // drift bound could legally fill ~2% over the last close. Both sides
+        // of the comparison are the token's own price, so no token-to-share
+        // normalisation is needed here.
         //
-        // Red-team H12: a sell with amountIn == 0 divided by amountIn here
-        // and panicked (0x12, division by zero) instead of denying cleanly -
-        // confirmed live, since nothing upstream rejects a zero amount (a
-        // zero-size sell trivially clears the notional/daily/slippage
-        // checks too, since everything it's compared against scales with
-        // amountIn). That broke commit()'s own contract of never reverting
-        // on a policy denial. quotedOut == 0 is already caught by the
-        // slippage check above and can't reach the buy branch below, but
-        // guarding both sides explicitly here doesn't depend on that
-        // ordering holding forever. A zero-size trade has no implied price
-        // to measure drift against, so it's treated as passing this check
-        // rather than assigned a new denial reason - the append-only
-        // DenialReason list every off-chain decoder indexes into doesn't
-        // need a new value for "there was nothing to check".
+        // Red-team H12 (sell with amountIn == 0 divided by zero here) is now
+        // denied earlier as InvalidAmount (H15); the zero checks below stay
+        // so this block never depends on that ordering.
         if (!o.sessionOpen && cfg.maxClosedMarketDriftBps > 0) {
             if (side == Side.Buy) {
-                if (quotedOut > 0) {
-                    uint256 implied = (amountIn * 1e18) / quotedOut;
-                    if (implied * 10_000 > o.lastCloseUsd * (10_000 + uint256(cfg.maxClosedMarketDriftBps))) {
-                        return (DenialReason.ClosedMarketDrift, 0);
-                    }
+                // minOut == 0 means no worst price at all: deny.
+                if (minOut == 0) return (DenialReason.ClosedMarketDrift, 0);
+                uint256 worstPrice = (amountIn * 1e18) / minOut;
+                if (worstPrice * 10_000 > o.lastCloseUsd * (10_000 + uint256(cfg.maxClosedMarketDriftBps))) {
+                    return (DenialReason.ClosedMarketDrift, 0);
                 }
             } else if (amountIn > 0) {
-                uint256 implied = (quotedOut * 1e18) / amountIn;
-                if (implied * 10_000 < o.lastCloseUsd * (10_000 - uint256(cfg.maxClosedMarketDriftBps))) {
+                uint256 worstPrice = (minOut * 1e18) / amountIn;
+                if (worstPrice * 10_000 < o.lastCloseUsd * (10_000 - uint256(cfg.maxClosedMarketDriftBps))) {
                     return (DenialReason.ClosedMarketDrift, 0);
                 }
             }
