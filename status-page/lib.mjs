@@ -250,7 +250,10 @@ export function joinDecisions(events) {
 export function resolveFromBlock(explicitFromBlock, latestBlock) {
   if (explicitFromBlock !== undefined && explicitFromBlock !== null && explicitFromBlock !== "") {
     const n = Number(explicitFromBlock);
-    if (!Number.isInteger(n) || n < 0) {
+    // isSafeInteger, not isInteger: same precision-loss class the CLI's
+    // hex32/addr32 were hardened against - Number.isInteger(Number("9007199254740993"))
+    // is true even though that string's own value was already rounded away.
+    if (!Number.isSafeInteger(n) || n < 0) {
       throw new Error(`resolveFromBlock: "${explicitFromBlock}" is not a valid block number (expected a non-negative integer).`);
     }
     return n;

@@ -156,7 +156,18 @@ const hex32 = (n) => {
   if (typeof n === "number" && !Number.isSafeInteger(n)) {
     throw Object.assign(new Error(`${n} is not an exact integer - pass large amounts as a decimal string of base units`), { exitCode: 1 });
   }
-  const v = BigInt(n);
+  let v;
+  try {
+    v = BigInt(n);
+  } catch {
+    // BigInt() throws its own uncaught, unformatted SyntaxError on garbage
+    // ("Cannot convert not-a-number to a BigInt") with no exitCode -
+    // inconsistent with every other refusal here, which all give a clean
+    // Error and exitCode: 1. Reachable directly through this CLI (unlike
+    // mcp-server, whose zod schema already rejects non-digit strings before
+    // this is ever called).
+    throw Object.assign(new Error(`"${n}" is not a valid integer - pass amounts as a decimal string of base units`), { exitCode: 1 });
+  }
   if (v < 0n || v >= 1n << 256n) throw Object.assign(new Error(`${n} is outside the uint256 range`), { exitCode: 1 });
   return v.toString(16).padStart(64, "0");
 };

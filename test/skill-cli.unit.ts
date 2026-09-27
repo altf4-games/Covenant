@@ -69,5 +69,15 @@ describe("covenant-mandate skill CLI (unit, input validation)", function () {
     it("refuses a ticker where an address belongs", async function () {
       expect(await build({ tokenAddress: "NVDA" })).to.match(/^refused: .*not a 0x-prefixed 20-byte address/);
     });
+
+    it("refuses non-numeric garbage with a clean error, not BigInt()'s raw native SyntaxError", async function () {
+      // Red-team follow-up: hex32(n) used to let BigInt(n) throw straight
+      // through uncaught on anything that isn't parseable at all -
+      // "Cannot convert not-a-number to a BigInt", no exitCode - breaking
+      // the clean-refusal contract every other case here relies on.
+      const result = await build({ amountIn: "not-a-number" });
+      expect(result).to.match(/^refused: .*not a valid integer/);
+      expect(result).to.not.match(/SyntaxError|Cannot convert/);
+    });
   });
 });

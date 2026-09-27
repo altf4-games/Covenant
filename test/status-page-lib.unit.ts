@@ -79,4 +79,12 @@ describe("status-page/lib.mjs resolveFromBlock - input validation", function () 
   it("refuses a non-integer block number", function () {
     expect(() => resolveFromBlock("12.5", 10_000)).to.throw(/not a valid block number/);
   });
+
+  it("refuses a block number past Number.MAX_SAFE_INTEGER instead of silently rounding it", function () {
+    // Red-team follow-up: Number.isInteger("9007199254740993") returns true
+    // even though that string's value already lost precision converting to
+    // a Number - the same class of bug hex32/addr32 were hardened against,
+    // just left unfixed here originally.
+    expect(() => resolveFromBlock("9007199254740993", 10_000)).to.throw(/not a valid block number/);
+  });
 });
