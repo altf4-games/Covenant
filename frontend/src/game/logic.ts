@@ -26,6 +26,7 @@ export const MONSTER: Record<string, { frame: number; name: string }> = {
   NotionalExceeded: { frame: 109, name: "SPENDING CAP" },
   PositionLimit: { frame: 109, name: "SPENDING CAP" },
   DailyNotionalExceeded: { frame: 109, name: "SPENDING CAP" },
+  InvalidAmount: { frame: 111, name: "BROKEN-NUMBER GHOUL" },
   DailyLimitExceeded: { frame: 120, name: "BEDTIME BAT" },
   OracleStale: { frame: 108, name: "OLD-NEWS GHOST" },
   OracleHalted: { frame: 124, name: "MARKET-CLOSED RAT" },
@@ -48,6 +49,7 @@ const ATTACK_NAME: Record<string, string> = {
   NotionalExceeded: "OVERDRAFT SLAM",
   PositionLimit: "OVERDRAFT SLAM",
   DailyNotionalExceeded: "OVERDRAFT SLAM",
+  InvalidAmount: "OVERFLOW GUARD",
   DailyLimitExceeded: "RATE LIMIT WALL",
   OracleStale: "STALE FOG",
   OracleHalted: "HALT FIELD",
@@ -234,11 +236,35 @@ export function route(from: Spot, to: Spot): { col: number; row: number }[] {
 // ---------------------------------------------------------------------------
 // Battles, in words a kid can follow.
 
-/** Trims "1.000000000000000000" to "1", "0.004412345" to "0.004412". */
+/**
+ * Trims "1.000000000000000000" to "1", "0.004412345" to "0.004412".
+ *
+ * Deliberately stays in string-land throughout: `String(Number(x.toPrecision(4)))`
+ * looks equivalent but isn't - JS renders any Number below 1e-6 or at/above
+ * 1e21 in exponential form ("1.235e-8"), and H15's own MAX_AMOUNT
+ * (type(uint128).max wei) is large enough in USDT-scale decimal form to
+ * land in that range, same as a real dust-sized trade on the small end.
+ * A kid-facing battle log should never show "e-8".
+ */
 export function prettyAmount(wei: bigint): string {
-  const n = Number(fmtAmount(wei));
-  if (n === 0) return "0";
-  return String(Number(n.toPrecision(4)));
+  const s = fmtAmount(wei); // plain decimal string, e.g. "0.004412345" or "340282366920938.463463374607431768211455"
+  if (/^0\.?0*$/.test(s)) return "0";
+
+  const [whole, frac = ""] = s.split(".");
+  if (whole !== "0") {
+    if (whole.length > 4) {
+      // Truncate to the first 4 significant digits, zero-padded back out to
+      // the real magnitude ("123456789" -> "123400000"), never exponential.
+      return whole.slice(0, 4).padEnd(whole.length, "0");
+    }
+    // 4 or fewer whole digits: spend the remaining significant digits on the fraction.
+    const fracDigits = frac.slice(0, 4 - whole.length).replace(/0+$/, "");
+    return fracDigits ? `${whole}.${fracDigits}` : whole;
+  }
+  // < 1: keep the first 4 significant digits after the leading zeros.
+  const leadingZeros = frac.match(/^0*/)?.[0].length ?? 0;
+  const sig = frac.slice(leadingZeros, leadingZeros + 4).replace(/0+$/, "");
+  return sig ? `0.${"0".repeat(leadingZeros)}${sig}` : "0";
 }
 
 type Commit = NonNullable<Decision["commit"]>;
@@ -274,6 +300,8 @@ export function kidExplanation(reason: string, c?: Commit): string {
       return "The real market is closed, and this price is too far from where it closed.";
     case "PositionLimit":
       return "The agent would own too much of this one stock.";
+    case "InvalidAmount":
+      return "The trade amount made no sense - zero, or impossibly huge.";
     default:
       return `A safety rule said no (${reason}).`;
   }

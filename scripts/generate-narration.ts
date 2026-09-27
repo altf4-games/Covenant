@@ -41,23 +41,27 @@ export function buildPrompt(d: Decision): string | null {
   const name = tokenName(c.token);
   const verb = c.side === "buy" ? "buy" : "sell";
   const amount = fmt(c.amountIn);
+  // amountIn is USDT for a buy but the token itself for a sell (Covenant.sol's
+  // own Decision.amountIn semantics) - "$amount of name" only makes sense for
+  // a buy. Mirrors the same fix in status-page/lib.mjs's describeDecision.
+  const order = c.side === "buy" ? `buy order for $${amount} of ${name}` : `sell order for ${amount} ${name}`;
 
   if (!c.allowed) {
     const boss = bossFor(c.reason);
     return (
-      `Write one excited sportscaster sentence (under 30 words) narrating a trading bot's ${verb} order for ` +
-      `$${amount} of ${name} getting DENIED by an on-chain rule called "${boss?.name ?? c.reason}" (technical reason: ${c.reason}). ` +
+      `Write one excited sportscaster sentence (under 30 words) narrating a trading bot's ${order} ` +
+      `getting DENIED by an on-chain rule called "${boss?.name ?? c.reason}" (technical reason: ${c.reason}). ` +
       `The denial is the good outcome - a safety mandate held. Real enthusiasm, no hedging, no disclaimers, just the call.`
     );
   }
   if (d.settle) {
     return (
-      `Write one excited sportscaster sentence (under 30 words) narrating a trading bot's ${verb} order for ` +
-      `$${amount} of ${name} getting approved and filled via ${d.settle.executionMode}` +
+      `Write one excited sportscaster sentence (under 30 words) narrating a trading bot's ${order} ` +
+      `getting approved and filled via ${d.settle.executionMode}` +
       `${d.settle.belowMin ? ", though the fill landed just below the minimum accepted" : ""}. Real enthusiasm, no disclaimers.`
     );
   }
-  return `Write one excited sportscaster sentence (under 30 words) narrating a trading bot's ${verb} order for $${amount} of ${name} getting approved and waiting to settle. Real enthusiasm, no disclaimers.`;
+  return `Write one excited sportscaster sentence (under 30 words) narrating a trading bot's ${order} getting approved and waiting to settle. Real enthusiasm, no disclaimers.`;
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -114,13 +118,19 @@ async function main() {
   const events = await fetchDecisionEvents(covenant, { fromBlock: Number(fromBlockArg) });
   const decisions = joinDecisions(events);
 
+  // Keyed by the commit's txHash, not the decision id: a decision id is only
+  // unique within one Covenant deployment, and a redeploy (routine during
+  // fork-based dev, see PLAN.md) resets ids back to 1. Keying on the id
+  // would silently show a previous deployment's narration line against an
+  // unrelated real decision after any redeploy. A txHash is globally unique.
   const narration: Record<string, string> = {};
   for (const d of decisions) {
     const prompt = buildPrompt(d);
     if (!prompt) continue;
-    console.log(`Narrating decision #${d.id}...`);
-    narration[d.id] = await narrate(apiKey, prompt);
-    console.log(`  "${narration[d.id]}"`);
+    const txHash = d.commit!.txHash;
+    console.log(`Narrating decision #${d.id} (${txHash})...`);
+    narration[txHash] = await narrate(apiKey, prompt);
+    console.log(`  "${narration[txHash]}"`);
   }
 
   const outPath = fileURLToPath(new URL("../frontend/src/data/narration.json", import.meta.url));

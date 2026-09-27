@@ -81,6 +81,22 @@ describe("monsters, moves, and explanations", () => {
     expect(prettyAmount(4_412_345_000_000_000n)).toBe("0.004412");
     expect(prettyAmount(0n)).toBe("0");
   });
+
+  // H15 (Covenant.sol) now lets amountIn range all the way up to
+  // type(uint128).max wei; on the small end a real dust trade can be far
+  // below one token. Both extremes used to come out in exponential notation
+  // ("1.235e-8", "3.403e+20") because the old implementation round-tripped
+  // through toPrecision(4) and Number(), and JS itself renders any Number
+  // outside [1e-6, 1e21) that way regardless of toPrecision's own output.
+  it("never renders scientific notation, even at H15's amount extremes", () => {
+    const dust = 12n; // 12 wei = 0.000000000000000012 tokens
+    expect(prettyAmount(dust)).not.toMatch(/e[+-]/i);
+    expect(prettyAmount(dust)).toBe("0.000000000000000012");
+
+    const max128 = (2n ** 128n - 1n) * ONE; // MAX_AMOUNT wei, scaled to a whole-token count
+    expect(prettyAmount(max128)).not.toMatch(/e[+-]/i);
+    expect(prettyAmount(max128)).toBe("3402" + "0".repeat(35));
+  });
 });
 
 describe("the town", () => {

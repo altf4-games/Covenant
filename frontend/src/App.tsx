@@ -18,8 +18,16 @@ function readUrlParams() {
   };
 }
 
+// JS Date is only meaningful up to +275760-09-13 (8.64e15 ms since epoch).
+// A mandate expiry is a uint256 and can legitimately be set to something
+// absurdly large (e.g. type(uint256).max) as a "doesn't really expire"
+// sentinel; Number() on that silently rounds to Infinity and new Date()
+// then prints "Invalid Date" instead of failing loudly.
+const MAX_SAFE_UNIX_SECONDS = 8_640_000_000_000n / 1000n;
+
 function fmtTime(unixSeconds: bigint): string {
   if (unixSeconds === 0n) return "never";
+  if (unixSeconds > MAX_SAFE_UNIX_SECONDS) return "effectively never (far past year 9999)";
   return new Date(Number(unixSeconds) * 1000).toISOString().replace("T", " ").slice(0, 19) + " UTC";
 }
 
@@ -67,8 +75,8 @@ function DecisionRow({ d }: { d: Decision }) {
         <StatusBadge d={d} />
       </div>
       <p className="mt-1 text-xs text-slate-600">{plain}</p>
-      {(narration as Record<string, string>)[d.id] && (
-        <p className="mt-1 text-xs font-semibold text-amber-700">🎙️ {(narration as Record<string, string>)[d.id]}</p>
+      {c && (narration as Record<string, string>)[c.txHash] && (
+        <p className="mt-1 text-xs font-semibold text-amber-700">🎙️ {(narration as Record<string, string>)[c.txHash]}</p>
       )}
       {twin && <p className="mt-1.5 rounded-md border-2 border-green-200 bg-green-50 px-2 py-1 text-xs text-green-800">{twin}</p>}
       {boss && (
@@ -151,6 +159,13 @@ export default function App() {
       {/* The game fills the entire screen; the menu floats on top of it. */}
       {snapshot ? (
         <GameCanvas
+          // Force a remount on every new LOAD: Phaser owns its own internal
+          // scene state (sprite positions, which decisions it's already
+          // animated), and reusing the same canvas instance across a second
+          // fetchSnapshot() call (a different contract, or the same one re-
+          // scanned) would leave stale sprites from the previous snapshot
+          // mixed in with the new one instead of starting clean.
+          key={`${rpc}:${contract}:${fromBlock}`}
           decisions={snapshot.decisions}
           rightInset={rightInset}
           onStart={() => {
