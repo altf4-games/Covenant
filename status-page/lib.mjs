@@ -24,13 +24,19 @@ export const DENIAL_REASONS = [
   "None", "MandateInactive", "MandateExpired", "TokenNotAllowed",
   "NotionalExceeded", "DailyLimitExceeded", "OracleStale", "OracleHalted",
   "SlippageTooLoose", "PositionLimit", "DecisionOpen", "ClosedMarketDrift",
-  "DailyNotionalExceeded",
+  "DailyNotionalExceeded", "InvalidAmount",
 ];
 export const SIDES = ["buy", "sell"];
 export const EXECUTION_MODES = ["unknown", "pool", "rfq", "aggregator"];
 
 export const DEFAULT_LOOKBACK_BLOCKS = 500;
 export const DEFAULT_LOGS_TIMEOUT_MS = 8_000;
+// Public BSC RPCs cap eth_getLogs range (bsc-dataseed refuses "limit
+// exceeded" past a few thousand blocks - docs/partner-feedback/friction-log.md).
+// scripts/verify.ts already chunks its raw eth_getLogs calls at this same
+// size; mirrored here so ethers' queryFilter, which has no chunking of its
+// own, doesn't hit the same wall on a wide fromBlock.
+export const DEFAULT_LOGS_CHUNK_BLOCKS = 5_000;
 
 // "Boss battles" (GAMIFICATION-PLAN-2026-09-25.md item 1): a name and icon
 // per real DenialReason, so a denial reads as "the mandate held" rather
@@ -54,6 +60,7 @@ export const BOSSES = {
   DecisionOpen: { name: "One Battle at a Time", icon: "⚔️" },
   ClosedMarketDrift: { name: "Weekend Gap Boss", icon: "🌉", flagship: true },
   DailyNotionalExceeded: { name: "The Spending Cap", icon: "💰" },
+  InvalidAmount: { name: "The Broken Number", icon: "🔢" },
 };
 
 /** `{ name, icon }` for a denial reason, or null for "None" / an unknown value. */
@@ -101,8 +108,9 @@ export function describeDecision(d, fmtAmount) {
 
   const name = tokenName(c.token);
   const spendLabel = c.side === "buy" ? "USDT" : name;
+  const receiveLabelForBase = c.side === "buy" ? name : "USDT";
   const verb = c.side === "buy" ? "Buy" : "Sell";
-  const base = `${verb} order: spend ${fmtAmount(c.amountIn)} ${spendLabel} for ${name}`;
+  const base = `${verb} order: spend ${fmtAmount(c.amountIn)} ${spendLabel} for ${receiveLabelForBase}`;
 
   if (!c.allowed) {
     const boss = bossFor(c.reason);
@@ -148,33 +156,47 @@ export function guardedVsUnguarded(d, fmtAmount) {
  * timeout, so the call is raced against one that fails with an explanation
  * instead of leaving the page spinning.
  *
+ * Chunked at `DEFAULT_LOGS_CHUNK_BLOCKS`-block boundaries so a wide range
+ * doesn't trip a public RPC's own eth_getLogs range cap (bsc-dataseed:
+ * "limit exceeded" - docs/partner-feedback/friction-log.md).
+ *
  * @param {import("ethers").Contract} covenant
- * @param {{fromBlock: number, toBlock?: number | "latest", timeoutMs?: number}} options
+ * @param {{fromBlock: number, toBlock?: number | "latest", timeoutMs?: number, chunkBlocks?: number}} options
  * @returns {Promise<import("ethers").EventLog[]>}
  */
-export async function fetchDecisionEvents(covenant, { fromBlock, toBlock = "latest", timeoutMs = DEFAULT_LOGS_TIMEOUT_MS }) {
-  let timer;
-  const timeout = new Promise((_, reject) => {
-    timer = setTimeout(() => {
-      reject(
-        new Error(
-          `eth_getLogs timed out after ${timeoutMs}ms. If this RPC is a forked node ` +
-            `(e.g. "hardhat node --fork"), this almost always means fromBlock=${fromBlock} ` +
-            `is before the fork's own starting block - Hardhat's fork provider hangs ` +
-            `instead of erroring in that case. Pass a fromBlock at or after the actual ` +
-            `fork/deployment block. See docs/partner-feedback/friction-log.md B16.`,
-        ),
-      );
-    }, timeoutMs);
-  });
+export async function fetchDecisionEvents(covenant, { fromBlock, toBlock = "latest", timeoutMs = DEFAULT_LOGS_TIMEOUT_MS, chunkBlocks = DEFAULT_LOGS_CHUNK_BLOCKS }) {
+  const resolvedToBlock = toBlock === "latest" ? await covenant.runner.provider.getBlockNumber() : Number(toBlock);
+  const wanted = new Set(["DecisionCommitted", "DecisionSettled", "DecisionCancelled"]);
+  const all = [];
 
-  try {
-    const events = await Promise.race([covenant.queryFilter("*", fromBlock, toBlock), timeout]);
-    const wanted = new Set(["DecisionCommitted", "DecisionSettled", "DecisionCancelled"]);
-    return events.filter((e) => wanted.has(e.fragment?.name ?? e.eventName));
-  } finally {
-    clearTimeout(timer);
+  for (let start = fromBlock; start <= resolvedToBlock; start += chunkBlocks) {
+    const end = Math.min(resolvedToBlock, start + chunkBlocks - 1);
+    let timer;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        reject(
+          new Error(
+            `eth_getLogs timed out after ${timeoutMs}ms on range [${start}, ${end}]. If this RPC is a ` +
+              `forked node (e.g. "hardhat node --fork"), this almost always means the range starts ` +
+              `before the fork's own starting block - Hardhat's fork provider hangs instead of ` +
+              `erroring in that case. Pass a fromBlock at or after the actual fork/deployment block. ` +
+              `See docs/partner-feedback/friction-log.md B16.`,
+          ),
+        );
+      }, timeoutMs);
+    });
+
+    try {
+      const events = await Promise.race([covenant.queryFilter("*", start, end), timeout]);
+      for (const e of events) {
+        if (wanted.has(e.fragment?.name ?? e.eventName)) all.push(e);
+      }
+    } finally {
+      clearTimeout(timer);
+    }
   }
+
+  return all;
 }
 
 /**
@@ -227,7 +249,11 @@ export function joinDecisions(events) {
 
 export function resolveFromBlock(explicitFromBlock, latestBlock) {
   if (explicitFromBlock !== undefined && explicitFromBlock !== null && explicitFromBlock !== "") {
-    return Number(explicitFromBlock);
+    const n = Number(explicitFromBlock);
+    if (!Number.isInteger(n) || n < 0) {
+      throw new Error(`resolveFromBlock: "${explicitFromBlock}" is not a valid block number (expected a non-negative integer).`);
+    }
+    return n;
   }
   return Math.max(0, latestBlock - DEFAULT_LOOKBACK_BLOCKS);
 }
