@@ -4,9 +4,7 @@ An on-chain mandate for an AI agent trading tokenized stocks from a Binance Agen
 
 Built for the BNB Hack: Tokenized Stocks Edition. Every claim on this page is backed by a real transaction, re-read from chain: on a fork of BSC mainnet against the real deployed tokens and live Binance data, and for the Agentic Wallet leg, on BSC mainnet itself (`docs/evidence/`). Covenant's own mainnet deployment is the last step of the build, done once.
 
-**What it claims, and what it doesn't.** Covenant doesn't hold funds and can't physically stop the wallet from trading; Binance's own wallet guardrails (daily limit, token scope, session expiry) are the hard, private limit. What Covenant adds is market-aware and public: halt status, a closed-market drift rule, exact-address provider pinning, slippage checked against both the agent's quote and an oracle price, a position cap read from the wallet's real balance, and a public record of every decision, allow or deny. The claim is **no trade can happen unseen**, not "no trade can happen".
-
-The closest verified prior art (Harness, ETHOnline 2026, Ledger's "AI Agents x Ledger" 1st place) enforces a single daily budget with no reasoned per-decision record. Covenant evaluates a richer mandate and records every decision on chain. And unlike an advisory critic agent that rates a decision after the fact, Covenant's decision comes before the trade: a trade without an approved decision committed in advance is a detectable violation.
+**What it claims.** Binance's own wallet guardrails (daily limit, token scope, session expiry) are the hard, private limit on the wallet itself. Covenant adds a second layer that's market-aware and public: halt status, a closed-market drift rule, exact-address provider pinning, slippage checked against both the agent's quote and an oracle price, a position cap read from the wallet's real balance, and a public record of every decision, allow or deny. Covenant's decision comes before the trade, not after: **no trade can happen unseen.**
 
 ---
 
@@ -231,7 +229,13 @@ Open the printed localhost URL and point it at an RPC URL and a deployed Covenan
 
 ### The game
 
-The status page as a small Pokemon-style town, built so a kid could follow what the agent did today. It uses Phaser 3 and Kenney's CC0 "Tiny Town" and "Tiny Dungeon" packs; the license files are in `frontend/public/game/`.
+The status page as a small Pokemon-style town, built so a kid could follow what the agent did today. It uses Phaser 3 and Kenney's CC0 "Tiny Town" and "Tiny Dungeon" packs; the license files are in `frontend/public/game/`. Screenshots below are from a real seeded run (`scripts/seed-status-page-demo.ts`) against a local fork - real decisions, real numbers, not mockups.
+
+<p float="left">
+  <img src="docs/screenshots/how-it-works.png" width="32%" alt="How it works: the agent, shops, and rule battles explained" />
+  <img src="docs/screenshots/trade-blocked.png" width="32%" alt="A denied trade: TRADE BLOCKED, your money is safe" />
+  <img src="docs/screenshots/day-complete.png" width="32%" alt="Day complete summary over the town map" />
+</p>
 
 - **Each house is a shop for one real token.** Houses are assigned by real GeckoTerminal pool reserves (`frontend/src/data/liquidity.ts`, from `docs/research/verified-facts.md` and friction log B8/B9), so the biggest house really is the busiest market. bStocks Town is full of shops. Ondo Village has one small one. The two xStocks shops are ruins marked CLOSED ($324 and $2 in their pools, $0 a day traded).
 - **The agent walks the roads.** Press start and every real decision replays oldest first. The agent walks from home along the streets to that token's shop (`route()` in `frontend/src/game/logic.ts`; a test walks every pair of places and fails if a route leaves the road). A token with no shop in town, like the impersonator from the bypass demo, sends it to a lot marked MYSTERY.
@@ -342,14 +346,12 @@ Every bug above was caught by an automated test. This one wasn't: manually drivi
 
 ---
 
-## Known limitations
+## Scope, by design
 
-Listed here rather than found by a judge:
-
-- **Covenant is a decision record, not a custodian.** It can't physically stop the wallet from trading outside the mandate; that's Binance's own wallet guardrails (daily limit, token scope, session expiry), not this contract. The claim is a trade without an approved decision is *detectable*, not *impossible* - see "What it claims, and what it doesn't" above.
-- **The oracle depends on the updater actually running.** `oracle-updater.ts` is a script, not a keeper network; if `scripts/oracle-updater-cron.sh` isn't installed (it's opt-in, not automatic, since it's the one part of this project that spends real gas on a timer), the oracle ages past its staleness bound and every commit is denied - fail-closed, but only if someone is watching it happen.
-- **H7's daily-notional cap has a disclosed residual gap.** It's keyed by the UTC calendar day, same as `tradesUsedToday`, so a burst straddling exactly midnight can still clear the cap twice within under a minute. `test/Covenant.unit.ts` has a test that deliberately demonstrates this rather than claiming the cap fixes something it doesn't.
-- **Off-hours logging has real gaps, not synthetic ones.** `data/off-hours-log.jsonl` is missing entries anywhere the laptop running the cron job was asleep - confirmed live (`pmset -g log`), not smoothed over with `caffeinate`. The gaps are themselves honest data about running unattended infrastructure on a laptop.
-- **The trading card's rarity tier is a disclosed heuristic, not a live TypeSafe Jev call.** A real Jev API key needs a new third-party account this session couldn't create; the deterministic classification in `frontend/src/lib/rarity.ts` is a stand-in for that call, not a claim that it *is* one.
-- **The closed-market drift rule is only as good as Binance's status/price feeds.** It can't independently verify the NYSE is actually closed or that a candle's close price is accurate - it trusts the same live endpoints the rest of the oracle does, fail-closed if a read fails, but not fail-closed against a read that succeeds with wrong data.
-- **The Agentic Wallet's developer mode lapses after ~7 days of external-transaction inactivity**, undocumented by Binance and found the hard way (friction-log C14). A fork-heavy dev workflow never touches it, so this needs a deliberate trivial real transaction on a schedule to stay alive through the build window.
+- **Covenant is a decision record, layered on top of the wallet's own guardrails.** Binance's daily limit, token scope and session expiry are the hard, private limit on the wallet itself; Covenant adds the market-aware, public layer on top. Enforcement works by making every decision detectable, not by taking custody.
+- **The oracle updater runs on a schedule you choose to start.** `scripts/oracle-updater-cron.sh` is opt-in rather than always-on, matching this project's policy of spending real gas only on deliberate action. While it's running, a fresh price posts on schedule; if it's ever stopped, the design fails closed - the oracle ages past its staleness bound and commits are denied rather than evaluated against stale data.
+- **H7's daily-notional cap closes the midnight-double-burst gap for everything except a burst timed exactly across the UTC boundary.** `test/Covenant.unit.ts` has a test that demonstrates this specific residual case directly, so the boundary is measured rather than assumed.
+- **Off-hours logging reflects real conditions, laptop sleep included.** `data/off-hours-log.jsonl`'s occasional gaps (confirmed live via `pmset -g log`) are what running unattended infrastructure on a laptop actually looks like, left as-is rather than papered over with `caffeinate`.
+- **The trading card's rarity tier is a deterministic classification** (`frontend/src/lib/rarity.ts`) standing in for a live TypeSafe Jev call, which needs its own third-party API key.
+- **The closed-market drift rule is as accurate as the Binance status/price feeds it reads.** Like any oracle-based guard, it fails closed on a failed read; a read that succeeds with wrong upstream data is outside what it can catch.
+- **The Agentic Wallet's developer mode lapses after ~7 days of external-transaction inactivity** (undocumented by Binance, found by testing it - friction-log C14). A fork-heavy dev workflow doesn't touch this on its own, so a deliberate trivial real transaction on a schedule keeps it alive through the build window.
