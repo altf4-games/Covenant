@@ -77,3 +77,41 @@ describe("classifyRarity", () => {
     expect(classifyRarity({ total: 0, denied: 0, settled: 0, longestDenialStreak: 0, sawFlagshipDenial: false })).toBe("Bronze");
   });
 });
+
+describe("computeTrackRecord: what mutation testing showed was untested", () => {
+  it("a denial streak ends when an allowed trade comes between two denials", () => {
+    // oldest first: deny, deny, allow, deny  -> longest streak is 2, not 3
+    const newestFirst: Decision[] = [
+      decision("4", { allowed: false, reason: "NotionalExceeded" }),
+      decision("3", { allowed: true }),
+      decision("2", { allowed: false, reason: "NotionalExceeded" }),
+      decision("1", { allowed: false, reason: "NotionalExceeded" }),
+    ];
+    expect(computeTrackRecord(newestFirst).longestDenialStreak).toBe(2);
+  });
+
+  it("counts a settle only when the decision was allowed and has a settle", () => {
+    const newestFirst: Decision[] = [
+      decision("3", { allowed: true }, false), // allowed, never settled
+      decision("2", { allowed: false, reason: "TokenNotAllowed" }, true), // denied: can't have a real settle, and mustn't count
+      decision("1", { allowed: true }, true),
+    ];
+    expect(computeTrackRecord(newestFirst).settled).toBe(1);
+  });
+
+  it("reads the list newest-first: a streak is measured through time, not through the array", () => {
+    // newest-first [deny, deny, allow]: oldest is the allow, so the two denials are one streak of 2
+    const a = computeTrackRecord([decision("3", { allowed: false }), decision("2", { allowed: false }), decision("1", { allowed: true })]);
+    expect(a.longestDenialStreak).toBe(2);
+    // newest-first [allow, deny, deny, allow, deny]: chronologically deny, allow, deny, deny, allow -> streak 2
+    const b = computeTrackRecord([
+      decision("5", { allowed: true }),
+      decision("4", { allowed: false }),
+      decision("3", { allowed: false }),
+      decision("2", { allowed: true }),
+      decision("1", { allowed: false }),
+    ]);
+    expect(b.longestDenialStreak).toBe(2);
+    expect(b.total).toBe(5);
+  });
+});

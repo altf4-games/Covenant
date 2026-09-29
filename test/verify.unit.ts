@@ -505,4 +505,93 @@ describe("verify.ts reconcile() (unit, mock RPC, crafted logs)", function () {
     });
   });
 
+
+  // Randomized, seeded scenarios: two tokens, buys and sells with random amounts, refunds,
+  // strangers' dust and payments. Honest histories must reconcile clean, and one corrupted
+  // trade among honest ones must be flagged as exactly the expected kind, on exactly that
+  // trade, with every other trade still matched.
+  describe("randomized scenarios", function () {
+    let seed = 0xdeadbeefcafef00dn;
+    const rnd = () => { seed ^= (seed << 13n) & ((1n << 64n) - 1n); seed ^= seed >> 7n; seed ^= (seed << 17n) & ((1n << 64n) - 1n); return seed; };
+    const between = (lo: bigint, hi: bigint) => lo + (rnd() % (hi - lo + 1n));
+    const TOKENS = [NVDA, AAPL];
+
+    interface Trade { id: number; token: string; side: 0 | 1; amountIn: bigint; quoted: bigint; minOut: bigint; commitBlock: number; swapBlock: number; received: bigint; spent: bigint; stockMoved: bigint; settled: bigint }
+
+    function makeHonest(n: number): Trade[] {
+      const trades: Trade[] = [];
+      let block = 10;
+      for (let i = 1; i <= n; i++) {
+        const side = Number(rnd() % 2n) as 0 | 1;
+        const token = TOKENS[Number(rnd() % 2n)];
+        const amountIn = between(1000n, 10n ** 18n);
+        const quoted = between(1000n, 10n ** 16n);
+        const minOut = (quoted * 99n) / 100n;
+        const received = side === 0 ? between(minOut, (quoted * 10500n) / 10000n) : between(minOut, quoted * 3n);
+        const spent = side === 0 ? between(1n, amountIn) : 0n;
+        const stockMoved = side === 0 ? 0n : between(1n, amountIn);
+        trades.push({ id: i, token, side, amountIn, quoted, minOut, commitBlock: block, swapBlock: block + 1, received, spent, stockMoved, settled: received });
+        block += 5;
+      }
+      return trades;
+    }
+
+    function play(trades: Trade[], skipSettle = -1, extra?: (t: Trade) => void) {
+      for (const t of trades) {
+        chain.commit(t.id, t.token, t.side, t.amountIn, t.quoted, t.minOut, t.commitBlock);
+        const tx = h(2000 + t.id);
+        if (t.side === 0) {
+          chain.transfer(USDT, OLD, DEX, t.spent, t.swapBlock, tx);
+          chain.transfer(t.token, DEX, OLD, t.received, t.swapBlock, tx);
+        } else {
+          chain.transfer(t.token, OLD, DEX, t.stockMoved, t.swapBlock, tx);
+          chain.transfer(USDT, DEX, OLD, t.received, t.swapBlock, tx);
+        }
+        extra?.(t);
+        if (t.id !== skipSettle) chain.settle(t.id, tx, t.settled, t.swapBlock + 1);
+      }
+    }
+
+    beforeEach(() => chain.configure(AAPL, true, 3));
+
+    it("200 random honest histories (buys, sells, two tokens, strangers' dust, payments) reconcile clean", async function () {
+      for (let round = 0; round < 200; round++) {
+        chain = new Chain(); chain.deploy(1); chain.configure(NVDA); chain.configure(AAPL, true, 3);
+        const trades = makeHonest(Number(between(1n, 6n)));
+        play(trades);
+        if (rnd() % 2n === 0n) { chain.transfer(NVDA, THIRD, OLD, 1n, 500, h(9000)); chain.txFrom[h(9000)] = THIRD; }
+        if (rnd() % 2n === 0n) { chain.transfer(USDT, OLD, THIRD, 5n, 501, h(9001)); }
+        const r = await run(1, 100_000);
+        expect(r.violations, `round ${round}`).to.deep.equal([]);
+        expect(r.matched).to.have.length(trades.length);
+      }
+    });
+
+    const MUTATIONS: Array<{ kind: string; apply: (trades: Trade[], k: number) => void; skip?: boolean; extra?: (t: Trade) => void }> = [
+      { kind: "AMOUNT_MISMATCH", apply: (ts, k) => { ts[k].settled = ts[k].received + 1n; } },
+      { kind: "BELOW_MINIMUM", apply: (ts, k) => { const t = ts[k]; t.received = t.minOut - 1n; t.settled = t.received; } },
+      { kind: "SWAP_BEFORE_COMMIT", apply: (ts, k) => { const t = ts[k]; t.swapBlock = t.commitBlock - 1; } },
+      { kind: "SWAP_AFTER_EXPIRY", apply: (ts, k) => { const t = ts[k]; t.swapBlock = t.commitBlock + TTL + 5; } },
+      { kind: "AMOUNT_IN_EXCEEDED", apply: (ts, k) => { const t = ts[k]; if (t.side === 0) t.spent = t.amountIn + 1n; else t.stockMoved = t.amountIn + 1n; } },
+      { kind: "UNMATCHED_TRADE", apply: () => {}, skip: true },
+    ];
+
+    for (const m of MUTATIONS) {
+      it(`one corrupted trade among honest ones is flagged as exactly ${m.kind}, on exactly that trade`, async function () {
+        for (let round = 0; round < 60; round++) {
+          chain = new Chain(); chain.deploy(1); chain.configure(NVDA); chain.configure(AAPL, true, 3);
+          const trades = makeHonest(Number(between(2n, 5n)));
+          const k = Number(rnd() % BigInt(trades.length));
+          m.apply(trades, k);
+          play(trades, m.skip ? trades[k].id : -1);
+          const r = await run(1, 100_000);
+          const bad = r.violations.filter((v) => v.kind !== m.kind);
+          expect(bad, `round ${round}, trade ${trades[k].id} (${JSON.stringify(trades[k], (_, v) => typeof v === "bigint" ? v.toString() : v)})`).to.deep.equal([]);
+          expect(r.violations.filter((v) => v.kind === m.kind).map((v) => v.txHash!.toLowerCase()), `round ${round}`).to.deep.equal([h(2000 + trades[k].id).toLowerCase()]);
+          expect(r.matched).to.have.length(trades.length - 1);
+        }
+      });
+    }
+  });
+
 });

@@ -331,8 +331,9 @@ async function countRecentTransfers(tokenAddress, { blocksBack = 15_000, chunk =
       // dead over a short window - `blocksScanned` says how short.
       let transferCount = 0;
       let blocksScanned = 0;
-      for (let end = tip; end >= fromBigInt; end -= BigInt(chunk)) {
-        const start = end - BigInt(chunk) + 1n > fromBigInt ? end - BigInt(chunk) + 1n : fromBigInt;
+      // The window is (fromBigInt, tip]: `blocksBack` blocks, no more.
+      for (let end = tip; end > fromBigInt; end -= BigInt(chunk)) {
+        const start = end - BigInt(chunk) + 1n > fromBigInt + 1n ? end - BigInt(chunk) + 1n : fromBigInt + 1n;
         let logs;
         try {
           logs = await jsonRpc(rpcUrl, "eth_getLogs", [{ fromBlock: "0x" + start.toString(16), toBlock: "0x" + end.toString(16), address: tokenAddress, topics: [TRANSFER_TOPIC] }]);

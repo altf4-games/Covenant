@@ -11,9 +11,8 @@ export interface TrackRecord {
 }
 
 export function computeTrackRecord(decisions: Decision[]): TrackRecord {
-  // Decisions are newest-first (App.tsx reverses joinDecisions' oldest-first
-  // order) - walk oldest-first here so "streak" reads left-to-right in time.
-  const chronological = [...decisions].reverse();
+  // Every figure below is the same whichever way the list is walked (a longest
+  // run of denials doesn't depend on direction), so no reordering is needed.
   let total = 0;
   let denied = 0;
   let settled = 0;
@@ -21,7 +20,7 @@ export function computeTrackRecord(decisions: Decision[]): TrackRecord {
   let currentStreak = 0;
   let sawFlagshipDenial = false;
 
-  for (const d of chronological) {
+  for (const d of decisions) {
     if (!d.commit) continue;
     total++;
     if (!d.commit.allowed) {

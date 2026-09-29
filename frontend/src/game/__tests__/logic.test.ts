@@ -10,6 +10,8 @@ import {
   attackNameFor,
   kidExplanation,
   prettyAmount,
+  doorCol,
+  battleLines,
   HOME,
   HOME_STAND,
   UNKNOWN_STAND,
@@ -252,5 +254,55 @@ describe("buildQuest", () => {
     const settleOnly: Decision = { id: "9", commit: null, settle: { swapTxHash: "0x1", amountOut: 1n, executionMode: "pool", belowMin: false, txHash: "0x1" }, cancelled: false };
     expect(buildQuest([settleOnly])).toEqual([]);
     expect(buildQuest([])).toEqual([]);
+  });
+});
+
+// Mutation testing (changing a digit count, a rounding direction, a case
+// comparison) showed these behaviours had no test.
+describe("prettyAmount: four significant digits, never exponential", () => {
+  const wei = (s: string) => BigInt(Math.round(Number(s) * 1e6)) * 10n ** 12n;
+  it("keeps four significant digits on either side of the point", () => {
+    expect(prettyAmount(wei("1.5"))).toBe("1.5");
+    expect(prettyAmount(wei("12.3456"))).toBe("12.34");
+    expect(prettyAmount(wei("123.456"))).toBe("123.4");
+    expect(prettyAmount(wei("1234.56"))).toBe("1234");
+    expect(prettyAmount(wei("0.004412345"))).toBe("0.004412");
+  });
+  it("shortens a five-digit or longer whole number to four digits, zero-padded to its magnitude", () => {
+    expect(prettyAmount(12345n * 10n ** 18n)).toBe("12340");
+    expect(prettyAmount(123456789n * 10n ** 18n)).toBe("123400000");
+  });
+});
+
+describe("the town's geometry and lookups", () => {
+  it("a shop's door is the middle tile of an odd-width house, and the left of the middle pair on an even one", () => {
+    expect(doorCol({ x: 7, width: 5 } as never)).toBe(9);
+    expect(doorCol({ x: 2, width: 4 } as never)).toBe(4);
+    expect(doorCol({ x: 2, width: 3 } as never)).toBe(3);
+  });
+
+  it("finds a shop whatever the case of the address the chain gave, and never sends a known token to the mystery lot", () => {
+    const checksummed = "0x02FCA66C1D1AFB4E2A7884261EB00F63598A7436";
+    const steps = buildQuest([{ id: "1", commit: commit({ token: checksummed }), settle: null, cancelled: false }]);
+    const walk = steps.find((s) => s.kind === "walk") as { placeLabel: string };
+    expect(walk.placeLabel).toBe("NVIDIA");
+  });
+});
+
+describe("battle wording", () => {
+  it("a sell talks about shares of the stock, not dollars", () => {
+    const lines = battleLines({ id: "1", commit: commit({ side: "sell", amountIn: ONE }), settle: null, cancelled: false }, "NVIDIA");
+    expect(lines[1].text).toBe("AGENT wants to sell 1 NVIDIA shares.");
+    expect(lines[1].text).not.toContain("$");
+  });
+
+  it("says when a fill came in under the promised minimum, and when the agent changed its mind", () => {
+    const settle = { swapTxHash: "0x1", amountOut: ONE, executionMode: "pool", belowMin: true, txHash: "0x1" };
+    const below = battleLines({ id: "1", commit: commit({}), settle, cancelled: false }, "NVIDIA").map((l) => l.text).join(" ");
+    expect(below).toContain("less than promised");
+    const fine = battleLines({ id: "1", commit: commit({}), settle: { ...settle, belowMin: false }, cancelled: false }, "NVIDIA").map((l) => l.text).join(" ");
+    expect(fine).not.toContain("less than promised");
+    const cancelled = battleLines({ id: "1", commit: commit({}), settle: null, cancelled: true }, "NVIDIA").map((l) => l.text).join(" ");
+    expect(cancelled).toContain("changed its mind");
   });
 });

@@ -1,5 +1,5 @@
 import { expect } from "chai";
-import { describeDecision, resolveFromBlock, guardedVsUnguarded, DEFAULT_LOOKBACK_BLOCKS, groupDecimal } from "../status-page/lib.mjs";
+import { describeDecision, resolveFromBlock, guardedVsUnguarded, DEFAULT_LOOKBACK_BLOCKS, groupDecimal, tokenName, bossFor } from "../status-page/lib.mjs";
 
 // Pure-function coverage for status-page/lib.mjs, no network, no fork: the
 // live suite (test/status-page.live.ts) already exercises these against
@@ -125,5 +125,39 @@ describe("status-page/lib.mjs groupDecimal", function () {
     const big = "340282366920938463463374607431768211455.0";
     expect(groupDecimal(big)).to.equal("340,282,366,920,938,463,463,374,607,431,768,211,455");
     expect(Number(big).toLocaleString("en-US")).to.not.equal(groupDecimal(big));
+  });
+});
+
+describe("status-page/lib.mjs wording and lookups that mutation testing showed were untested", function () {
+  it("an allowed decision the agent abandoned is described as abandoned, not as awaiting settlement", function () {
+    const d = { ...decision({}), cancelled: true };
+    expect(describeDecision(d, fmt)).to.match(/allowed, then abandoned without trading\.$/);
+  });
+
+  it("a fill below the minimum says so, and one at or above it doesn't", function () {
+    const settle = { amountOut: 3_000_000_000_000_000_000n, executionMode: "pool", belowMin: true, txHash: "0xabc", swapTxHash: "0xabc" };
+    expect(describeDecision({ ...decision({}), settle }, fmt)).to.contain("(below the minimum accepted)");
+    expect(describeDecision({ ...decision({}), settle: { ...settle, belowMin: false } }, fmt)).to.not.contain("below the minimum");
+  });
+
+  it("the unguarded counterfactual exists only for a real denial", function () {
+    expect(guardedVsUnguarded(decision({ allowed: true }), fmt)).to.equal(null);
+    expect(guardedVsUnguarded({ ...decision({ allowed: false, reason: "NotionalExceeded" }) }, fmt)).to.contain("Unguarded");
+  });
+
+  it("block 0 is a valid explicit start, and 0 as a number too", function () {
+    expect(resolveFromBlock("0", 10_000)).to.equal(0);
+    expect(resolveFromBlock(0, 10_000)).to.equal(0);
+  });
+
+  it("names a known token whatever the case of its address, and shortens an unknown one to six and four characters", function () {
+    expect(tokenName("0x02FCA66C1D1AFB4E2A7884261EB00F63598A7436")).to.equal("NVIDIA (NVDAB)");
+    expect(tokenName("0x2F701b108a9aF5558960325A0239D0a13c2C4444")).to.equal("0x2F70…4444");
+  });
+
+  it("has no boss for an unknown reason or for an allowed decision", function () {
+    expect(bossFor("SomethingNew")).to.equal(null);
+    expect(bossFor("None")).to.equal(null);
+    expect(bossFor("ClosedMarketDrift")?.flagship).to.equal(true);
   });
 });

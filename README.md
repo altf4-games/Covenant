@@ -193,7 +193,7 @@ npm install
 npx hardhat test
 ```
 
-Twenty-one suites in `test/` (223 tests, one full `npm test` run, all passing), plus two in `frontend/` (26 tests, `cd frontend && npm test`). Several suites run live against a fork or Binance's real endpoints; a hosted CI runner can be geo-blocked from Binance's API, in which case those tests skip rather than fail. Also checked in CI: `npm run typecheck` (types for the scripts, tests and MCP server) and the frontend's lint and build.
+Twenty-three suites in `test/` (263 tests, one full `npm test` run, all passing), plus two in `frontend/` (35 tests, `cd frontend && npm test`). Several suites run live against a fork or Binance's real endpoints; a hosted CI runner can be geo-blocked from Binance's API, in which case those tests skip rather than fail. Also checked in CI: `npm run typecheck` (types for the scripts, tests and MCP server) and the frontend's lint and build.
 
 The suites that deploy the contract, use a fork, or call live endpoints:
 
@@ -213,16 +213,18 @@ The suites that deploy the contract, use a fork, or call live endpoints:
 
 The live suites share `scripts/lib/local-fork.ts`, which deploys with the real `scripts/deploy.ts` and posts the oracle with the real `scripts/oracle-updater.ts`, so every one of them also exercises the path the mainnet deployment will run. They're slower than a typical Hardhat suite; see below for why.
 
-Eight more suites are pure-function or mock-RPC coverage, with no fork, no network and no contract deployment: fast checks of logic the suites above only exercise on the happy path, or don't touch:
+Ten more suites are pure-function or mock-RPC coverage, with no fork, no network and no contract deployment: fast checks of logic the suites above only exercise on the happy path, or don't touch:
 
-- `test/verify.unit.ts` (38): `reconcile()` against a mock JSON-RPC server with crafted logs - H13's overspend repro (a $1-approved buy that really moved $10,000), H14's agent-rotation scoping, a multi-token trade, a revoke, a token disallowed mid-approval, a missed deployment block, `getLogs` chunk boundaries, a stock dusted into the wallet by a stranger (with and without USDT bundled in), a quote-token spend on an unconfigured stock, USDT leaving the wallet with nothing coming back, and one scan per direction however many tokens are configured. Every violation kind has its own crafted case, and every boundary (a fill exactly at the minimum, a swap in the decision's last second, a wallet's last second in scope) is tested on both sides. The live suite only ever reconciles one honest trade at a time; this is where the actual violation-detection logic gets tested against something trying to slip past it.
+- `test/verify.unit.ts` (45): `reconcile()` against a mock JSON-RPC server with crafted logs - H13's overspend repro (a $1-approved buy that really moved $10,000), H14's agent-rotation scoping, a multi-token trade, a revoke, a token disallowed mid-approval, a missed deployment block, `getLogs` chunk boundaries, a stock dusted into the wallet by a stranger (with and without USDT bundled in), a quote-token spend on an unconfigured stock, USDT leaving the wallet with nothing coming back, and one scan per direction however many tokens are configured. Every violation kind has its own crafted case, 200 random honest histories must reconcile clean, and one corrupted trade among honest ones must be flagged as exactly the expected kind on exactly that trade. Every boundary (a fill exactly at the minimum, a swap in the decision's last second, a wallet's last second in scope) is tested on both sides. The live suite only ever reconciles one honest trade at a time; this is where the actual violation-detection logic gets tested against something trying to slip past it.
 - `test/skill-cli.unit.ts` (17): the Wallet Skill CLI's own input validation. `resolve` refuses ambiguous chains, the calldata builders refuse a negative amount, a `2^256` amount, a JS number that already lost precision, and a ticker where an address belongs, `compile-mandate` refuses two themes or a bound over 100%, and a stalled response body times out.
 - `test/erc8004-update.unit.ts` (3): the identity-update script's document builder, which adds the deployed contract and the agent's own id without duplicating on a re-run.
-- `test/oracle-guards.unit.ts` (7): the price-versus-candle sanity check and the multi-token oracle spec (`theme:<key>` or a comma list), no network.
+- `test/oracle-guards.unit.ts` (13): the price-versus-candle sanity check and the multi-token oracle spec (`theme:<key>` or a comma list), no network.
 - `test/drift.unit.ts` (6): every copy of a contract fact matches the compiled contract: the CLI's selectors, the event topics in `judge.ts` and `verify.ts`, and the `DenialReason` list in the contract, the CLI, the status page and the game's monster, attack and explanation tables.
-- `test/web3-api-clock.unit.ts` (3): the signed Web3 API client when this machine's clock is outside Binance's receive window: it corrects once from the server's own time and retries, then gives up rather than looping, and doesn't retry any other error.
+- `test/skill-cli-logic.unit.ts` (15): the skill CLI's plain-English mandate compiler (defaults, regexes, rounding, the 100% bounds), `resolve`'s chain and provider disambiguation and `survey`'s dead, live and unknown verdicts against a stubbed network, the bytes32 and address refusals, the router table and the execution-mode enum.
+- `test/cli-encoding.fuzz.unit.ts` (3): the CLI's hand-rolled ABI encoder against ethers on random inputs (every amount from 0 to 2^256-1 as a bigint, a decimal string or a number; arrays of every length), the input refusals, and `judge.ts`'s event decoder against ethers-encoded logs.
+- `test/web3-api-clock.unit.ts` (6): the signed Web3 API client when this machine's clock is outside Binance's receive window: it corrects once from the server's own time and retries, then gives up rather than looping, and doesn't retry any other error.
 - `test/Covenant.fuzz.unit.ts` (1): a seeded differential fuzz of `previewDecision` against an independent BigInt model of the rules, over amounts up to the `2^128` limit; it asserts there is never a revert (a panic instead of a denial) and never a disagreement, and that it reaches the late checks. 12,000 cases at development time found no mismatch.
-- `test/status-page-lib.unit.ts` (15): the sell-side wording in `describeDecision`/`guardedVsUnguarded` (the live suite only ever commits buy-side decisions), and `resolveFromBlock`'s input validation (NaN, negative, non-integer).
+- `test/status-page-lib.unit.ts` (21): the sell-side wording in `describeDecision`/`guardedVsUnguarded` (the live suite only ever commits buy-side decisions), and `resolveFromBlock`'s input validation (NaN, negative, non-integer).
 
 ### What needs a secret, and what needs an archive RPC
 
@@ -429,6 +431,23 @@ Line coverage says a line ran, not that a test would fail if it were wrong. So t
 | The daily trade counter could count each trade twice, or fail to reset on a new UTC day, and no test noticed | A test for a running count and notional, and for the new UTC day |
 
 The full run also failed the live suites once for a reason unrelated to any of this: this laptop's clock was 19 seconds behind Binance's, and the signed Web3 API rejects a timestamp outside its receive window (HTTP 401, code 40103). The client now reads the server's time from that error, corrects once and retries (friction log A12).\n\nAfter the new tests, all 33 breaks in each file are caught. A separate differential fuzz found nothing wrong in the contract itself: the gaps were in the tests. The pass also caught two mistakes of mine from the previous one: the CI typecheck step failed on a clean checkout (it needed the compiled artifacts) and the Cancun pin covered only the production profile.
+
+### A tenth pass: the rest of the code, mutation-tested and fuzzed
+
+The ninth pass did this for the contract and `verify.ts`. This one covered everything else that can be unit-tested: the skill CLI, the status-page library, the NYSE calendar, the oracle guards, the Web3 API client and the game logic (114 breaks: 37 in the CLI and 77 elsewhere; 21 of the CLI's and 27 of the others survived the existing unit tests). The same two lenses also ran as fuzzers: the CLI's calldata against ethers on random inputs, and random honest histories through `verify.ts`.
+
+| Finding | Fix |
+|---|---|
+| `compile-mandate`'s defaults, regexes and rounding, `resolve`'s disambiguation, `survey`'s verdicts, the bytes32 anchor and the router table were exercised only by live suites, or not at all | `test/skill-cli-logic.unit.ts`, with no network (the network is stubbed) |
+| A real off-by-one: `survey` scanned a fourth, one-block range past its window and reported 15,001 blocks | The window is exactly the blocks it says |
+| Price-string parsing, `isHalted`, the last-close lookup, and the deviation boundary were tested only in a live file that needs a fork | Pure unit tests, including exactly 10% and one wei past it |
+| The Web3 API client's signature, its refusal to retry other errors, and an HTTP error with a code-0 body had no test | Three tests, including the HMAC recomputed independently |
+| The game's number formatting, door position, mixed-case address lookup and sell wording; the trading card's streak and settle counting | Tests for each |
+| `computeTrackRecord` reversed its list first, but no figure depends on the direction | The dead reordering is gone, with a note on why |
+| Whether the hand-rolled encoder and decoder agree with ethers on inputs nobody wrote by hand | They do: 3,000 random cases byte for byte, and 2,000 random events. The one difference found is judge-side: `expiresAt`, `mandateExpiry` and `oracleUpdatedAt` are decoded through `Number`, exact only below 2^53. Real timestamps are far below it. |
+| Whether `verify.ts` handles history it wasn't written against | 200 random honest histories reconcile clean, and each of six corruptions is flagged as exactly the right kind on exactly that trade |
+
+After the new tests, every break is caught except one in the CLI that turned out to be equivalent to the original.
 
 ### The one bug only found by running it in a browser
 
