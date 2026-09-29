@@ -9,6 +9,8 @@
   },
   "scripts": {
     "test": "hardhat test",
+    "build:production": "hardhat build --build-profile production",
+    "deploy": "hardhat build --build-profile production && tsx scripts/deploy.ts",
     "mcp-server": "tsx mcp-server/index.ts",
     "judge": "tsx scripts/judge.ts",
     "verify": "tsx scripts/verify.ts",

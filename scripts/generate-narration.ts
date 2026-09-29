@@ -27,8 +27,9 @@ import { fileURLToPath } from "node:url";
 import { ABI, fetchDecisionEvents, joinDecisions, bossFor, tokenName, type Decision } from "../status-page/lib.mjs";
 
 const GEMINI_MODEL = "gemini-2.5-flash"; // cheap/fast tier; free-tier-eligible per ai.google.dev's own model list
-const GEMINI_URL = (key: string) =>
-  `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${key}`;
+// The key goes in a header, not the query string, so it can't end up in a URL
+// that gets logged or pasted into an error message.
+const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
 
 function fmt(wei: bigint): string {
   return ethers.formatUnits(wei, 18);
@@ -78,9 +79,10 @@ async function narrate(apiKey: string, prompt: string, attempts = 4): Promise<st
   let lastError: unknown;
   for (let i = 0; i < attempts; i++) {
     if (i > 0) await sleep(2 ** i * 1000);
-    const res = await fetch(GEMINI_URL(apiKey), {
+    const res = await fetch(GEMINI_URL, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", "x-goog-api-key": apiKey },
+      signal: AbortSignal.timeout(30_000),
       body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
     });
     const body = await res.json();

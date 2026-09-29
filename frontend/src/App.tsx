@@ -222,7 +222,7 @@ export default function App() {
           {snapshot && (
             <>
               <section className="flex justify-center">
-                <TradingCard decisions={snapshot.decisions} />
+                <TradingCard record={snapshot.trackRecord} contract={snapshot.contractAddress} />
               </section>
 
               <PokeBox title="THE RULES">
@@ -237,7 +237,7 @@ export default function App() {
                 </div>
               </PokeBox>
 
-              <PokeBox title="TRADE LOG (NEWEST FIRST)">
+              <PokeBox title={snapshot.totalDecisions > snapshot.decisions.length ? `TRADE LOG (NEWEST ${snapshot.decisions.length} OF ${snapshot.totalDecisions})` : "TRADE LOG (NEWEST FIRST)"}>
                 {snapshot.decisions.length === 0 ? (
                   <p className="text-xs italic text-slate-500">No decisions found in the scanned block range.</p>
                 ) : (

@@ -98,6 +98,12 @@ Phase 2.5 added a slashable bond for the oracle updater. As built it provided no
 
 ---
 
+## Deploying
+
+`npm run deploy` builds with the production profile (optimizer on) and then runs `scripts/deploy.ts`. The default profile the tests use leaves the optimizer off and produces about 17 KB of runtime bytecode against about 7 KB, so it costs more gas to deploy and wouldn't match a BscScan verification done with the production settings. `deploy.ts` deploys whatever was built last, so it refuses an artifact that looks unoptimized unless `ALLOW_UNOPTIMIZED_DEPLOY=1`. It prints the deployment block; `verify.ts` and the status page both want it. The EVM version is pinned to Cancun in `hardhat.config.ts`.
+
+---
+
 ## Judge-runnable verification
 
 A judge doesn't have this project's Agentic Wallet, developer mode or bStock jurisdiction clearance, so they can't reproduce a trade. They don't need to. Two scripts check this project's claims against chain state and trust nothing else.
@@ -116,7 +122,7 @@ It reads hashes from `JUDGE_TX_HASHES` (comma-separated) or [`data/judge-tx-hash
 COVENANT_ADDRESS=0x... VERIFY_FROM_BLOCK=<deployment block> npm run verify
 ```
 
-It flags a trade with no settled decision (`UNMATCHED_TRADE`), a settle pointing at a transaction that moved no stock (`FALSE_SETTLE`), a settled amount that isn't what really arrived (`AMOUNT_MISMATCH`), a fill below the committed minimum (`BELOW_MINIMUM`), a trade before its commit or after its expiry, a wrong token or side, two decisions claiming one trade, and quote-token spend that brings back a token the owner never configured (`UNTRACKED_SWAP`). A stock sent to the wallet by a stranger who paid nothing is a notice (`INBOUND_TRANSFER`), not a violation, so nobody can turn the reconciliation red by dusting the address. Amounts are compared against the ERC-20 transfers, not Binance's reported fill, which is in share units for bStocks (friction-log C17).
+It flags a trade with no settled decision (`UNMATCHED_TRADE`), a settle pointing at a transaction that moved no stock (`FALSE_SETTLE`), a settled amount that isn't what really arrived (`AMOUNT_MISMATCH`), a fill below the committed minimum (`BELOW_MINIMUM`), a trade before its commit or after its expiry, a wrong token or side, two decisions claiming one trade, and quote-token spend that brings back a token the owner never configured (`UNTRACKED_SWAP`). Two things are listed as notices, not violations: a stock sent to the wallet by a stranger who paid nothing (`INBOUND_TRANSFER`, so nobody can turn the reconciliation red by dusting the address, even with a bit of USDT bundled in), and the quote token leaving the wallet in a transaction that moved no stock (`QUOTE_OUTFLOW`, which can be a legitimate payment but is also the first thing a stolen key does). Amounts are compared against the ERC-20 transfers, not Binance's reported fill, which is in share units for bStocks (friction-log C17).
 
 `test/verify.live.ts` proves each verdict with real swaps against live PancakeSwap liquidity on a mainnet fork: an honest buy and an honest sell reconcile clean, and a bypass, a false settle, a settle using Binance's share-unit number, and a swap after expiry are each flagged, with nothing else flagged.
 
@@ -187,7 +193,7 @@ npm install
 npx hardhat test
 ```
 
-Sixteen suites:
+Seventeen suites:
 
 - `test/Covenant.unit.ts` (50): in-memory chain with a mock ERC20. Every denial reason, including Feature 1's drift rule (with the real NVDAB numbers from 2026-09-25) and the red-team H7 daily-notional cap (with a test that deliberately demonstrates its disclosed midnight-boundary limitation rather than hiding it), the three-distinct-roles rule, agent-only commit/settle/cancel (a stranger, the owner and the updater all revert), the settle and cancel lifecycle, the understated-quote attack, Feature 3's position cap, red-team H11's self-describing `DecisionCommitted` event, Feature 2's `setMandateForTokens` batch setter, preview/commit agreement, and H14/H15/H16's fixes (agent-scoped settle/cancel, absurd-amount denials, and the drift-at-worst-price rewrite).
 - `test/Covenant.fork.ts` (7): a real fork of BSC mainnet with the real Agentic Wallet impersonated as the agent, so the position cap reads the NVDAB it really bought on Day 1. Includes a full commit, real swap and settle loop against live PancakeSwap liquidity.
@@ -205,8 +211,9 @@ The live suites share `scripts/lib/local-fork.ts`, which deploys with the real `
 
 Four more suites need no fork and no network at all - fast, pure-function coverage for logic the live suites above only exercise on the happy path, or don't touch:
 
-- `test/verify.unit.ts` (17): `reconcile()` against a mock JSON-RPC server with crafted logs - H13's overspend repro (a $1-approved buy that really moved $10,000), H14's agent-rotation scoping, a multi-token trade, a revoke, a token disallowed mid-approval, a missed deployment block, `getLogs` chunk boundaries, a stock dusted into the wallet by a stranger, and a quote-token spend on an unconfigured stock. The live suite only ever reconciles one honest trade at a time; this is where the actual violation-detection logic gets tested against something trying to slip past it.
+- `test/verify.unit.ts` (21): `reconcile()` against a mock JSON-RPC server with crafted logs - H13's overspend repro (a $1-approved buy that really moved $10,000), H14's agent-rotation scoping, a multi-token trade, a revoke, a token disallowed mid-approval, a missed deployment block, `getLogs` chunk boundaries, a stock dusted into the wallet by a stranger (with and without USDT bundled in), a quote-token spend on an unconfigured stock, USDT leaving the wallet with nothing coming back, and one scan per direction however many tokens are configured. The live suite only ever reconciles one honest trade at a time; this is where the actual violation-detection logic gets tested against something trying to slip past it.
 - `test/skill-cli.unit.ts` (14): the Wallet Skill CLI's own input validation. `resolve` refuses ambiguous chains, the calldata builders refuse a negative amount, a `2^256` amount, a JS number that already lost precision, and a ticker where an address belongs, `compile-mandate` refuses two themes or a bound over 100%, and a stalled response body times out.
+- `test/erc8004-update.unit.ts` (3): the identity-update script's document builder, which adds the deployed contract and the agent's own id without duplicating on a re-run.
 - `test/oracle-guards.unit.ts` (7): the price-versus-candle sanity check and the multi-token oracle spec (`theme:<key>` or a comma list), no network.
 - `test/status-page-lib.unit.ts` (10): the sell-side wording in `describeDecision`/`guardedVsUnguarded` (the live suite only ever commits buy-side decisions), and `resolveFromBlock`'s input validation (NaN, negative, non-integer).
 
@@ -216,7 +223,7 @@ Not every test or script here runs the same way. Some need nothing but a public 
 
 | Needs | Examples | Why |
 |---|---|---|
-| Nothing (public RPC only) | `test/Covenant.unit.ts`, `test/verify.unit.ts`, `test/skill-cli.unit.ts`, `test/status-page-lib.unit.ts`, `test/oracle-guards.unit.ts`, `test/nyse-calendar.ts` | Pure logic, or a mock chain/RPC - no real network call. |
+| Nothing (public RPC only) | `test/Covenant.unit.ts`, `test/verify.unit.ts`, `test/skill-cli.unit.ts`, `test/status-page-lib.unit.ts`, `test/oracle-guards.unit.ts`, `test/erc8004-update.unit.ts`, `test/nyse-calendar.ts` | Pure logic, or a mock chain/RPC - no real network call. |
 | `WEB3_API_KEY` / `WEB3_API_SECRET` | `test/oracle-updater.live.ts`, `test/skill-cli.live.ts`, `scripts/oracle-updater.ts` | Reads Binance's RWA Data/Market APIs (real price, real market status). |
 | `GEMINI_API_KEY` | `scripts/generate-narration.ts` | Batch play-by-play narration - see "Running the status page" below. |
 | An archive-capable RPC (`bsc-dataseed`/`1rpc` verified live to work; `publicnode` refuses old receipts) | `scripts/verify.ts` run against a wide historical range, the frontend's snapshot/re-verification mode | A public RPC's own `eth_getLogs` range cap and receipt-pruning window (docs/partner-feedback/friction-log.md) - `bsc-dataseed` returns "limit exceeded" past a few thousand blocks, `publicnode` won't serve receipts for old transactions at all. `status-page/lib.mjs`'s `fetchDecisionEvents` chunks its own `eth_getLogs` calls (`DEFAULT_LOGS_CHUNK_BLOCKS`) for exactly this reason, mirroring the chunking `scripts/verify.ts` already needed. |
@@ -251,7 +258,7 @@ Still shown in the decision list for every real denial: what the wallet would ha
 
 ### Trading card
 
-A real ERC-8004 identity, registered on BSC mainnet (`docs/evidence/erc8004-registration.json`: agentId 358509, tx `0x34fbf9...591f1b`, ~$0.05 real gas, ahead of the single final mainnet deploy pass by explicit choice, since this card needed a real identity to show). The card's rarity tier is a real classification from the loaded decisions' actual track record (`frontend/src/lib/rarity.ts`) - Legendary the moment a real `ClosedMarketDrift` denial lands, Gold once a real denial and a real settle both exist, Silver for real activity short of that, Bronze otherwise. That's exactly the kind of task TypeSafe's Jev model (a classifier, not a text generator - confirmed by reading its own docs, not assumed) is built for; it's wired as a disclosed, deterministic heuristic instead of a live Jev call because a real API key needs a new third-party account this session can't create on your behalf, the same constraint as Gemini's key below.
+A real ERC-8004 identity, registered on BSC mainnet (`docs/evidence/erc8004-registration.json`: agentId 358509, tx `0x34fbf9...591f1b`, ~$0.05 real gas, ahead of the single final mainnet deploy pass by explicit choice, since this card needed a real identity to show). The card names the contract its numbers came from, and its track record covers every decision in the scanned range, not just the newest 50 the list shows, so its tier doesn't change when old decisions scroll off. The registration was made before the contract existed, so after the mainnet deploy `scripts/update-erc8004.ts` (a dry run unless `CONFIRM=1`) sets a new agent URI that links the identity to the deployed contract. The rarity tier is a real classification from the actual track record (`frontend/src/lib/rarity.ts`) - Legendary the moment a real `ClosedMarketDrift` denial lands, Gold once a real denial and a real settle both exist, Silver for real activity short of that, Bronze otherwise. That's exactly the kind of task TypeSafe's Jev model (a classifier, not a text generator - confirmed by reading its own docs, not assumed) is built for; it's wired as a disclosed, deterministic heuristic instead of a live Jev call because a real API key needs a new third-party account this session can't create on your behalf, the same constraint as Gemini's key below.
 
 ### Play-by-play narration (needs your own key)
 
@@ -358,6 +365,18 @@ Each one was reproduced with a throwaway test first, then fixed and covered by a
 | One hanging RPC stalled `verify` and `judge` instead of failing over | No fetch timeout, and failover only advances on a thrown error | Timeouts on every RPC and upstream call |
 | `survey` called a quiet token dead from a ~3000-block window | A window of minutes | Scans as far back as the free RPC serves, reports `blocksScanned`; TSLAx, previously "dead", shows 4 transfers to its bStock's 185 |
 | A live price with a fresh on-chain timestamp could be stale upstream | Nothing compared the price feed to anything else | The updater refuses a price more than 10% from the latest hourly candle |
+
+### A sixth pass, on the fixes themselves
+
+| Bug | Cause | Fix |
+|---|---|---|
+| The dust fix didn't hold | A stranger bundling 1 wei of USDT with the stock made `quoteIn` non-zero, so the "inbound only" test failed and the reconciliation went red again | The test now only asks whether the wallet paid anything |
+| A compromised agent sending all its USDT away reconciled clean | Nothing looked at quote-token outflows that weren't a trade | Listed as a `QUOTE_OUTFLOW` notice |
+| `verify.ts` would be slow on a real deployment | One sequential scan per token, per direction | One address-array scan per direction, so two per wallet |
+| The deploy could ship the unoptimized build | `deploy.ts` uses whatever artifact was built last, and the default profile has the optimizer off | `npm run deploy`, a size guard, and the EVM version pinned to Cancun |
+| The UI said "today's trades" for a multi-day, capped list; the card's tier depended on that cap | The list is the whole scanned range, newest 50 | Wording fixed; the track record covers every decision; the card names its contract |
+| The `SlippageTooLoose` explanation was wrong for the new quote ceiling | Written before the ceiling existed | Covers both cases |
+| The ERC-8004 identity named no contract | Registered before the deploy | `scripts/update-erc8004.ts`, dry-run tested against the live registry (about 316k gas) |
 
 ### The one bug only found by running it in a browser
 

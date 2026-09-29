@@ -148,7 +148,7 @@ export function GameCanvas({ decisions, rightInset, onStart }: GameCanvasProps) 
             <h2 className="font-pixel mb-4 text-center text-sm">{finished ? "DAY COMPLETE!" : "HOW IT WORKS"}</h2>
             {finished ? (
               <p className="mb-4 text-center text-sm">
-                The agent tried <b>{trades}</b> trades today. <b className="text-green-700">{score.allowed} followed the rules</b> and went ahead.{" "}
+                The agent tried <b>{trades}</b> trades in this replay. <b className="text-green-700">{score.allowed} followed the rules</b> and went ahead.{" "}
                 <b className="text-red-700">{score.blocked} broke a rule</b> and were blocked, so that money stayed safe.
               </p>
             ) : (
@@ -186,7 +186,7 @@ export function GameCanvas({ decisions, rightInset, onStart }: GameCanvasProps) 
               disabled={trades === 0}
               className="font-pixel w-full rounded-lg border-4 border-slate-800 bg-yellow-300 px-4 py-3 text-xs text-slate-900 shadow-[0_4px_0_#1e293b] transition hover:bg-yellow-200 active:translate-y-1 active:shadow-none disabled:opacity-50"
             >
-              {trades === 0 ? "NO TRADES FOUND" : finished ? "▶ WATCH AGAIN" : `▶ WATCH TODAY'S ${trades} TRADES`}
+              {trades === 0 ? "NO TRADES FOUND" : finished ? "▶ WATCH AGAIN" : `▶ WATCH THE ${trades} TRADES`}
             </button>
           </div>
         </div>

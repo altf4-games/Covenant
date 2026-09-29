@@ -68,6 +68,7 @@ export default defineConfig({
         version: "0.8.34",
         settings: {
           viaIR: true,
+          evmVersion: "cancun",
           optimizer: {
             enabled: true,
             runs: 200,

@@ -41,6 +41,11 @@
  *                       attempt, not a trade. Without this, anyone could send
  *                       1 wei of a stock to the wallet and turn the public
  *                       reconciliation red for good.
+ *   QUOTE_OUTFLOW       the wallet paid out the quote token in a transaction that
+ *                       moved no configured stock and brought no token back: a
+ *                       plain payment or transfer. It can be legitimate (paying for
+ *                       research), but it is also what a stolen agent key does
+ *                       first, so it is listed rather than left invisible.
  *
  * Every wallet that held the agent role is reconciled (from Covenant's own
  * AgentChanged events), over the blocks it held it plus the decision TTL
@@ -95,7 +100,7 @@ export type ViolationKind =
   | "INCOMPLETE_RANGE";
 
 export interface Notice {
-  kind: "INBOUND_TRANSFER";
+  kind: "INBOUND_TRANSFER" | "QUOTE_OUTFLOW";
   txHash: string;
   detail: string;
 }
@@ -123,7 +128,7 @@ async function rpc(rpcUrls: string[], method: string, params: unknown[]) {
 }
 
 /** eth_getLogs over [from, to] in fixed-size chunks, because public RPCs cap the range. */
-async function getLogs(rpcUrls: string[], filter: { address: string; topics: (string | null)[] }, from: number, to: number, chunk: number): Promise<Log[]> {
+async function getLogs(rpcUrls: string[], filter: { address: string | string[]; topics: (string | null)[] }, from: number, to: number, chunk: number): Promise<Log[]> {
   const out: Log[] = [];
   for (let start = from; start <= to; start += chunk) {
     const end = Math.min(to, start + chunk - 1);
@@ -222,22 +227,22 @@ export async function reconcile(opts: ReconcileOptions) {
     if (!movements.has(key)) movements.set(key, { wallet, ...pos(log), stock: new Map(), quoteIn: 0n, quoteOut: 0n });
     return movements.get(key)!;
   };
+  // One address-array filter per direction, not one per token: eth_getLogs
+  // accepts a list of addresses, so this is two scans per wallet however many
+  // tokens the mandate covers (an 8-token theme was 18).
+  const watched = [...stockTokens, quoteToken];
   for (const wallet of wallets) {
-    for (const token of stockTokens) {
-      for (const log of await getLogs(rpcUrls, { address: token, topics: [TRANSFER_TOPIC, null, topicAddr(wallet)] }, fromBlock, toBlock, chunk)) {
-        const m = touch(log, wallet);
-        m.stock.set(token, (m.stock.get(token) ?? 0n) + BigInt(log.data));
-      }
-      for (const log of await getLogs(rpcUrls, { address: token, topics: [TRANSFER_TOPIC, topicAddr(wallet)] }, fromBlock, toBlock, chunk)) {
-        const m = touch(log, wallet);
-        m.stock.set(token, (m.stock.get(token) ?? 0n) - BigInt(log.data));
-      }
+    for (const log of await getLogs(rpcUrls, { address: watched, topics: [TRANSFER_TOPIC, null, topicAddr(wallet)] }, fromBlock, toBlock, chunk)) {
+      const token = log.address.toLowerCase();
+      const m = touch(log, wallet);
+      if (token === quoteToken) m.quoteIn += BigInt(log.data);
+      else m.stock.set(token, (m.stock.get(token) ?? 0n) + BigInt(log.data));
     }
-    for (const log of await getLogs(rpcUrls, { address: quoteToken, topics: [TRANSFER_TOPIC, null, topicAddr(wallet)] }, fromBlock, toBlock, chunk)) {
-      touch(log, wallet).quoteIn += BigInt(log.data);
-    }
-    for (const log of await getLogs(rpcUrls, { address: quoteToken, topics: [TRANSFER_TOPIC, topicAddr(wallet)] }, fromBlock, toBlock, chunk)) {
-      touch(log, wallet).quoteOut += BigInt(log.data);
+    for (const log of await getLogs(rpcUrls, { address: watched, topics: [TRANSFER_TOPIC, topicAddr(wallet)] }, fromBlock, toBlock, chunk)) {
+      const token = log.address.toLowerCase();
+      const m = touch(log, wallet);
+      if (token === quoteToken) m.quoteOut += BigInt(log.data);
+      else m.stock.set(token, (m.stock.get(token) ?? 0n) - BigInt(log.data));
     }
   }
 
@@ -300,11 +305,15 @@ export async function reconcile(opts: ReconcileOptions) {
           txHash,
           detail: `${m.wallet} spent ${m.quoteOut - m.quoteIn} of the quote token and received a token that isn't configured on Covenant`,
         });
+      } else if (m.quoteOut > m.quoteIn) {
+        notices.push({ kind: "QUOTE_OUTFLOW", txHash, detail: `${m.wallet} paid out ${m.quoteOut - m.quoteIn} of the quote token in a transaction that moved no configured stock` });
       }
       continue;
     }
     // Inbound-only, unpaid, and sent by someone else: not a trade.
-    const inboundOnly = [...m.stock.values()].every((d) => d >= 0n) && m.quoteIn === 0n && m.quoteOut === 0n;
+    // Quote-token *received* doesn't matter: a stranger can bundle 1 wei of
+    // USDT with the dust. What makes it not a trade is that the wallet paid nothing.
+    const inboundOnly = [...m.stock.values()].every((d) => d >= 0n) && m.quoteOut === 0n;
     if (inboundOnly && !settlesBySwap.has(txHash)) {
       const tx = await rpc(rpcUrls, "eth_getTransactionByHash", [txHash]);
       if (tx && String(tx.from).toLowerCase() !== m.wallet) {

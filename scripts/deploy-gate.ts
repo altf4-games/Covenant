@@ -19,6 +19,12 @@
 import { ethers } from "ethers";
 import gateArtifact from "../artifacts/contracts/Gate.sol/Gate.json" with { type: "json" };
 
+try {
+  process.loadEnvFile();
+} catch {
+  // no .env - real environment variables only
+}
+
 const RPC_URL = process.env.BSC_RPC_URL || "https://bsc-mainnet.public.blastapi.io";
 
 async function main() {

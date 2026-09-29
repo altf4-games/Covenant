@@ -12,8 +12,15 @@
  * signer: on this RPC a contract-creation receipt comes back with `to: ""`,
  * which crashes the wrapper after a successful deploy (friction-log.md C16).
  *
+ * Build first with the production profile (the optimizer on), which is
+ * what `npm run deploy` does: the default profile leaves the optimizer off
+ * and produces bytecode more than twice the size (about 17 KB against 7 KB),
+ * which costs more gas to deploy and won't match a BscScan verification done
+ * with the production settings. This script deploys whatever artifact was
+ * built last, so it warns when that looks like the default profile.
+ *
  * Usage:
- *   npx tsx scripts/deploy.ts
+ *   npm run deploy      (builds with the production profile, then runs this)
  * Env:
  *   DEPLOYER_PRIVATE_KEY, ORACLE_UPDATER_ADDRESS, AGENT_ADDRESS   required
  *   BSC_RPC_URL                    default https://bsc-mainnet.public.blastapi.io
@@ -32,6 +39,9 @@ import { ethers } from "ethers";
 import covenantArtifact from "../artifacts/contracts/Covenant.sol/Covenant.json" with { type: "json" };
 
 export const BSC_USDT = "0x55d398326f99059fF775485246999027B3197955";
+/** The optimized build is ~7.4 KB and the unoptimized one ~17 KB; anything over this is the latter. */
+const UNOPTIMIZED_BYTECODE_BYTES = 12_000;
+
 export const NVDAB = "0x02fca66c1d1afb4e2a7884261eb00f63598a7436";
 
 export interface DeployOptions {
@@ -148,6 +158,14 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       process.loadEnvFile();
     } catch {
       // no .env - real environment variables only
+    }
+    const runtimeBytes = (covenantArtifact.deployedBytecode.length - 2) / 2;
+    if (runtimeBytes > UNOPTIMIZED_BYTECODE_BYTES && !process.env.ALLOW_UNOPTIMIZED_DEPLOY) {
+      throw new Error(
+        `artifacts/ holds ${runtimeBytes} bytes of runtime bytecode - that's the unoptimized default profile ` +
+          `(the production build is about 7,400). Run \`npm run deploy\`, or \`npm run build:production\` first, ` +
+          `or set ALLOW_UNOPTIMIZED_DEPLOY=1 to deploy it anyway.`,
+      );
     }
     const key = process.env.DEPLOYER_PRIVATE_KEY;
     const oracleUpdater = process.env.ORACLE_UPDATER_ADDRESS;

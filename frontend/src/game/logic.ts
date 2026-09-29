@@ -295,7 +295,7 @@ export function kidExplanation(reason: string, c?: Commit): string {
     case "DailyNotionalExceeded":
       return "The agent already spent its whole allowance for today.";
     case "SlippageTooLoose":
-      return "The agent would have accepted a much worse price. Too risky!";
+      return "The price the agent expected doesn't match the market, or it would have accepted a much worse one. Too risky!";
     case "ClosedMarketDrift":
       return "The real market is closed, and this price is too far from where it closed.";
     case "PositionLimit":

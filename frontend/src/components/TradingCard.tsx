@@ -1,12 +1,13 @@
-import { useMemo } from "react";
 import identityEvidence from "../../../docs/evidence/erc8004-registration.json";
-import type { Decision } from "../lib/covenant";
-import { computeTrackRecord, classifyRarity, RARITY_STYLE } from "../lib/rarity";
+import { classifyRarity, RARITY_STYLE, type TrackRecord } from "../lib/rarity";
 import { HERO_FRAME } from "../game/logic";
 import { Sprite } from "./Sprite";
 
 interface TradingCardProps {
-  decisions: Decision[];
+  /** Over every decision in the scanned range (see CovenantSnapshot.trackRecord). */
+  record: TrackRecord;
+  /** The Covenant contract these numbers were read from. */
+  contract: string;
 }
 
 function Move({ name, detail, value }: { name: string; detail: string; value: number }) {
@@ -26,10 +27,9 @@ function Move({ name, detail, value }: { name: string; detail: string; value: nu
  * The agent's real ERC-8004 identity (registered on BSC mainnet - see
  * docs/evidence/erc8004-registration.json, written by
  * scripts/register-erc8004.ts at registration time) drawn as a Pokemon-style
- * trading card. Every number on it comes from the loaded decisions.
+ * trading card. Every number on it comes from the decisions of the contract that is loaded (named on the card).
  */
-export function TradingCard({ decisions }: TradingCardProps) {
-  const record = useMemo(() => computeTrackRecord(decisions), [decisions]);
+export function TradingCard({ record, contract }: TradingCardProps) {
   const rarity = classifyRarity(record);
   const style = RARITY_STYLE[rarity];
 
@@ -69,6 +69,9 @@ export function TradingCard({ decisions }: TradingCardProps) {
             </div>
             <div className="truncate" title={identityEvidence.txHash}>
               Minted {identityEvidence.txHash.slice(0, 10)}…
+            </div>
+            <div className="truncate" title={contract}>
+              Stats from {contract.slice(0, 6)}…{contract.slice(-4)}
             </div>
           </div>
           <span className="font-pixel text-[7px] text-slate-800" title={`Rarity: ${style.label}`}>

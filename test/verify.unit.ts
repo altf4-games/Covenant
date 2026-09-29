@@ -99,7 +99,7 @@ class Chain {
       const to = parseInt(f.toBlock, 16);
       return this.logs.filter((l) => {
         const b = parseInt(l.blockNumber, 16);
-        return l.address === f.address.toLowerCase() && b >= from && b <= to && (f.topics ?? []).every((t: string | null, i: number) => t === null || l.topics[i] === t.toLowerCase());
+        return (Array.isArray(f.address) ? f.address.map((a: string) => a.toLowerCase()).includes(l.address) : l.address === f.address.toLowerCase()) && b >= from && b <= to && (f.topics ?? []).every((t: string | null, i: number) => t === null || l.topics[i] === t.toLowerCase());
       });
     }
     throw new Error(`unexpected method ${method}`);
@@ -309,6 +309,38 @@ describe("verify.ts reconcile() (unit, mock RPC, crafted logs)", function () {
     chain.transfer(USDT, OLD, DEX, E18, 10, h(4200));
     const r = await run();
     expect(r.violations).to.deep.equal([]);
+  });
+
+
+  it("dust bundled with 1 wei of the quote token is still just a notice", async function () {
+    honestBuy();
+    chain.transfer(NVDA, THIRD, OLD, 1n, 30, h(3000));
+    chain.transfer(USDT, THIRD, OLD, 1n, 30, h(3000));
+    chain.txFrom[h(3000)] = THIRD;
+    const r = await run();
+    expect(r.violations).to.deep.equal([]);
+    expect(r.notices.map((n) => n.kind)).to.deep.equal(["INBOUND_TRANSFER"]);
+  });
+
+  it("the quote token leaving the wallet with nothing coming back is listed as a notice, not invisible", async function () {
+    chain.transfer(USDT, OLD, THIRD, 1000n * E18, 30, h(3100));
+    const r = await run();
+    expect(r.violations).to.deep.equal([]);
+    expect(r.notices.map((n) => n.kind)).to.deep.equal(["QUOTE_OUTFLOW"]);
+    expect(r.notices[0].detail).to.contain((1000n * E18).toString());
+  });
+
+  it("scans each direction once however many tokens are configured", async function () {
+    for (const t of [AAPL, "0x" + "cc".repeat(20), "0x" + "dd".repeat(20)]) chain.configure(t, true, 3);
+    const seen: number[] = [];
+    const orig = chain.handle.bind(chain);
+    chain.handle = (method: string, params: any[]) => {
+      if (method === "eth_getLogs" && Array.isArray(params[0].address)) seen.push(params[0].address.length);
+      return orig(method, params);
+    };
+    await run(1, 100_000);
+    // one wallet: an inbound and an outbound scan, each over 4 stocks + the quote token
+    expect(seen).to.deep.equal([5, 5]);
   });
 
 });

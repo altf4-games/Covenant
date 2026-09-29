@@ -9,6 +9,7 @@ import { ethers } from "ethers";
 // @ts-expect-error - see the comment above; types are supplied by hand just below
 import { ABI, DENIAL_REASONS, fetchDecisionEvents, joinDecisions, resolveFromBlock, describeDecision, guardedVsUnguarded, bossFor, tokenName } from "../../../status-page/lib.mjs";
 import type { Decision, Boss } from "./status-page-lib-types.ts";
+import { computeTrackRecord, type TrackRecord } from "./rarity";
 
 export type { Decision, Boss };
 export { bossFor, tokenName, describeDecision, guardedVsUnguarded, DENIAL_REASONS };
@@ -21,6 +22,8 @@ export interface Mandate {
 }
 
 export interface CovenantSnapshot {
+  /** The contract this snapshot was read from (the input box can change afterward). */
+  contractAddress: string;
   mandate: Mandate;
   tradesUsedToday: bigint;
   stalenessBound: bigint;
@@ -28,7 +31,12 @@ export interface CovenantSnapshot {
   agent: string;
   maxDailyNotionalUsd: bigint;
   notionalUsedToday: bigint;
+  /** The newest `maxDecisions` decisions, newest first - what the list and the replay show. */
   decisions: Decision[];
+  /** Computed over every decision in the scanned range, not just the ones shown, so the card doesn't change tier when old decisions scroll off the list. */
+  trackRecord: TrackRecord;
+  /** How many decisions the scanned range held in total. */
+  totalDecisions: number;
   latestBlock: number;
 }
 
@@ -66,9 +74,11 @@ export async function fetchSnapshot(
 
   const fromBlock = resolveFromBlock(fromBlockInput || undefined, latestBlock);
   const events = await fetchDecisionEvents(covenant, { fromBlock });
-  const decisions = joinDecisions(events).slice(-maxDecisions).reverse();
+  const all = joinDecisions(events).reverse();
+  const decisions = all.slice(0, maxDecisions);
 
   return {
+    contractAddress,
     mandate: {
       active: mandateRaw.active,
       maxNotionalPerTradeUsd: mandateRaw.maxNotionalPerTradeUsd,
@@ -82,6 +92,8 @@ export async function fetchSnapshot(
     maxDailyNotionalUsd,
     notionalUsedToday,
     decisions,
+    trackRecord: computeTrackRecord(all),
+    totalDecisions: all.length,
     latestBlock,
   };
 }
