@@ -8,6 +8,9 @@ on:
 jobs:
   contracts:
     runs-on: ubuntu-latest
+    # A run that hangs (a fork or public RPC that stops answering, seen once on a
+    # runner) would otherwise hold the job for GitHub's six-hour default.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -44,6 +47,7 @@ jobs:
 
   frontend:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
