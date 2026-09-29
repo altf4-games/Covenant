@@ -62,6 +62,11 @@ export default defineConfig({
         // event fields.
         settings: {
           viaIR: true,
+          // Pinned in both profiles: solc 0.8.34 defaults to Osaka, and BSC's
+          // supported opcode set is what the contract has to run on. The tests
+          // use this profile, so they must compile for the same target the
+          // deployed (production) build does.
+          evmVersion: "cancun",
         },
       },
       production: {

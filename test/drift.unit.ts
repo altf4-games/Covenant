@@ -53,6 +53,10 @@ describe("copies of contract facts match the compiled contract (drift guard)", f
     }
   });
 
+  it("both build profiles compile for Cancun, the target BSC supports, not solc's default", function () {
+    expect(read("hardhat.config.ts").match(/evmVersion: "cancun"/g)?.length).to.equal(2);
+  });
+
   it("the status page's ABI fragments describe events and views the contract really has", function () {
     for (const fragment of STATUS_PAGE_ABI) {
       const parsed = ethers.Fragment.from(fragment);
