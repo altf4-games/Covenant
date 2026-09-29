@@ -1,7 +1,7 @@
 import { expect } from "chai";
 import { ethers } from "ethers";
 import covenantArtifact from "../artifacts/contracts/Covenant.sol/Covenant.json" with { type: "json" };
-import { COMMANDS, hex32, addr32 } from "../skills/covenant-mandate/scripts/cli.mjs";
+import { COMMANDS, hex32, addr32, DENIAL_REASONS } from "../skills/covenant-mandate/scripts/cli.mjs";
 import { decodeCovenantLog, TOPICS } from "../scripts/judge.js";
 
 const iface = new ethers.Interface(covenantArtifact.abi);
@@ -51,13 +51,19 @@ describe("hand-rolled ABI encoding and decoding vs ethers (differential fuzz)", 
       expect(dec.kind).to.equal("commit");
       expect(BigInt(dec.id)).to.equal(id); expect(dec.token.toLowerCase()).to.equal(token.toLowerCase());
       expect(dec.side).to.equal(side ? "sell" : "buy"); expect(dec.allowed).to.equal(allowed);
+      expect(dec.reason).to.equal(DENIAL_REASONS[reason]);
       expect(BigInt(dec.amountIn)).to.equal(args[5]); expect(BigInt(dec.quotedOut)).to.equal(args[6]); expect(BigInt(dec.minOut)).to.equal(args[7]);
       expect(dec.quoteRef).to.equal(args[8]); expect(dec.researchRef).to.equal(args[9]); expect(BigInt(dec.expiresAt)).to.equal(args[10]);
       expect(BigInt(dec.mandateMaxNotionalPerTradeUsd)).to.equal(args[11]); expect(BigInt(dec.mandateMaxTradesPerDay)).to.equal(args[12]);
       expect(BigInt(dec.mandateExpiry)).to.equal(args[13]); expect(BigInt(dec.oracleUpdatedAt)).to.equal(args[14]);
-      const sl = iface.encodeEventLog("DecisionSettled", [id, b32(), big(), Number(rnd() % 4n), allowed]);
+      const swapHash = b32(), out = big(), mode = Number(rnd() % 4n);
+      const sl = iface.encodeEventLog("DecisionSettled", [id, swapHash, out, mode, allowed]);
       const d2: any = decodeCovenantLog({ address: "0x0", topics: sl.topics as string[], data: sl.data });
       expect(d2.kind).to.equal("settle"); expect(BigInt(d2.id)).to.equal(id); expect(d2.belowMin).to.equal(allowed);
+      expect(d2.swapTxHash).to.equal(swapHash); expect(BigInt(d2.amountOut)).to.equal(out);
+      expect(d2.executionMode).to.equal(["unknown", "pool", "rfq", "aggregator"][mode]); // the contract's ExecutionMode enum, written out
+      const cl: any = decodeCovenantLog({ address: "0x0", ...(() => { const e = iface.encodeEventLog("DecisionCancelled", [id]); return { topics: e.topics as string[], data: e.data }; })() });
+      expect(cl).to.deep.equal({ kind: "cancel", id: id.toString() });
     }
     expect(TOPICS.DecisionCommitted).to.equal(iface.getEvent("DecisionCommitted")!.topicHash);
   });
