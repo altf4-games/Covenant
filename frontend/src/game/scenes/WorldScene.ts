@@ -330,10 +330,14 @@ export class WorldScene extends Phaser.Scene {
     for (const [c, r] of [[26, 10], [22, 16], [31, 9], [25, 16]]) put(c, r, F.deadPine);
     for (const [c, r] of [[23, 15], [28, 16]]) put(c, r, F.log);
     for (const [c, r] of [[24, 17], [29, 14], [27, 15]]) put(c, r, F.mushrooms);
-    // A shop that isn't in town: where trades on unknown tokens get fought.
+    // Shops that aren't in town: where trades on tokens with no shop get
+    // fought. That covers an impersonator the mandate refuses, but also a real
+    // token the mandate allows that simply has no lot on the map (the theme
+    // mandate lists twelve of them), so the sign says "off the map", not "not
+    // allowed": the battle itself says whether the trade was.
     put(UNKNOWN_SIGN.col, UNKNOWN_SIGN.row, F.sign);
     const s = tileCenter(UNKNOWN_SIGN.col, UNKNOWN_SIGN.row);
-    this.plate(s.x - 10, s.y - 13, MYSTERY_LABEL, { size: 5, bg: 0x7f1d1d, line2: "NOT ALLOWED", line2Color: "#fecaca" }).setDepth(6);
+    this.plate(s.x - 10, s.y - 13, MYSTERY_LABEL, { size: 5, bg: 0x44403c, line2: "OFF THE MAP", line2Color: "#e5e7eb" }).setDepth(6);
   }
 
   private drawBuilding(b: Building) {
@@ -459,7 +463,10 @@ export class WorldScene extends Phaser.Scene {
     const p = tileCenter(this.heroSpot.col, this.heroSpot.row);
     // On the shop wall just left of the door - clear of the name sign above
     // the roof and of the MYSTERY lot's sign to its right.
-    const badge = this.plate(p.x - 12, p.y - 10, won ? "OK" : "NO", { size: 6, bg: won ? 0x15803d : 0xb91c1c }).setDepth(8);
+    // The off-the-map lot has its sign right beside the doorstep, so its badge
+    // goes below the stand instead, where it doesn't cover the sign's text.
+    const offMap = this.heroSpot.col === UNKNOWN_STAND.col && this.heroSpot.row === UNKNOWN_STAND.row;
+    const badge = this.plate(p.x - 12, p.y + (offMap ? 12 : -10), won ? "OK" : "NO", { size: 6, bg: won ? 0x15803d : 0xb91c1c }).setDepth(8);
     this.stamps.set(k, badge);
     this.tweens.add({ targets: badge, scale: { from: 1.8, to: 1 }, duration: 300, ease: "Back.easeOut" });
   }

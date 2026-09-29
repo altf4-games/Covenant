@@ -4,6 +4,7 @@ import { WorldScene } from "../game/scenes/WorldScene";
 import { HERO_FRAME, RULE_CHECKER_FRAME, MONSTER, type QuestStep } from "../game/logic";
 import type { Decision } from "../lib/covenant";
 import { Sprite } from "./Sprite";
+import { LIQUIDITY_AS_OF } from "../data/liquidity";
 
 interface GameCanvasProps {
   decisions: Decision[];
@@ -162,7 +163,7 @@ export function GameCanvas({ decisions, rightInset, onStart }: GameCanvasProps) 
                 <li className="flex items-center gap-3">
                   <Sprite sheet="town" frame={63} />
                   <span>
-                    Each house is a <b>SHOP</b> for one stock. Bigger house = more money traded there.
+                    Each house is a <b>SHOP</b> for one stock. Bigger house = more money in that market (a {LIQUIDITY_AS_OF} snapshot).
                   </span>
                 </li>
                 <li className="flex items-center gap-3">

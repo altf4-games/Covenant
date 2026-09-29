@@ -1,5 +1,5 @@
 import { expect } from "chai";
-import { describeDecision, resolveFromBlock, guardedVsUnguarded, DEFAULT_LOOKBACK_BLOCKS } from "../status-page/lib.mjs";
+import { describeDecision, resolveFromBlock, guardedVsUnguarded, DEFAULT_LOOKBACK_BLOCKS, groupDecimal } from "../status-page/lib.mjs";
 
 // Pure-function coverage for status-page/lib.mjs, no network, no fork: the
 // live suite (test/status-page.live.ts) already exercises these against
@@ -111,5 +111,19 @@ describe("status-page/lib.mjs default window", function () {
     expect(DEFAULT_LOOKBACK_BLOCKS).to.be.greaterThan(10_000);
     expect(resolveFromBlock(undefined, 1_000_000)).to.equal(1_000_000 - DEFAULT_LOOKBACK_BLOCKS);
     expect(resolveFromBlock(undefined, 10)).to.equal(0);
+  });
+});
+
+describe("status-page/lib.mjs groupDecimal", function () {
+  it("groups the whole part and keeps up to six decimals", function () {
+    expect(groupDecimal("1234567.1234567891")).to.equal("1,234,567.123456");
+    expect(groupDecimal("0.5")).to.equal("0.5");
+    expect(groupDecimal("2.000000")).to.equal("2");
+    expect(groupDecimal("0.0000001")).to.equal("0");
+  });
+  it("doesn't lose digits on a value past 2^53, where Number() would", function () {
+    const big = "340282366920938463463374607431768211455.0";
+    expect(groupDecimal(big)).to.equal("340,282,366,920,938,463,463,374,607,431,768,211,455");
+    expect(Number(big).toLocaleString("en-US")).to.not.equal(groupDecimal(big));
   });
 });

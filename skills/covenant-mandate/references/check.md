@@ -26,7 +26,7 @@ Units: every amount is an 18-decimal integer string (BSC USDT and every bStock h
 
 ## Example
 
-Real output from a local fork of BSC mainnet, 2026-09-25: a $0.50 NVDAB buy at the live oracle price, minimum 0.5% below the quote.
+Real output from a local fork of BSC mainnet, 2026-09-25: a $0.50 NVDAB buy at the live oracle price, minimum 0.5% below the quote. It is abridged: the command now also returns `token.maxClosedMarketDriftBps`, `mandate.maxDailyNotionalUsd`, `mandate.notionalUsedToday`, and `oracle.sessionOpen` and `oracle.lastCloseUsd`, which this early capture predates.
 
 ```bash
 $ node scripts/cli.mjs check '{"rpcUrl":"http://127.0.0.1:8996","covenantAddress":"0x...","side":"buy","tokenAddress":"0x02fca66c1d1afb4e2a7884261eb00f63598a7436","amountIn":"500000000000000000","quotedOut":"...","minOut":"..."}'
@@ -63,8 +63,8 @@ These mirror `Covenant.sol`'s `DenialReason`. Tell the user the reason in plain 
 | `OracleHalted` | The market or the asset is halted or closed. | Stop. Tell the user the market status. |
 | `NotionalExceeded` | The trade is bigger than the per-trade cap (sells are valued at the oracle price). | Offer a smaller trade. |
 | `DailyLimitExceeded` | The day's trade count is used up. | It resets at the next UTC midnight. Say when. |
-| `SlippageTooLoose` | `minOut` is too far below the quote or the oracle price, or the quote is zero. | Re-quote and set `minOut` within `token.maxSlippageBps`. |
+| `SlippageTooLoose` | `minOut` is too far below the quote or the oracle price, the quote is zero, or the quote itself sits more than `token.maxSlippageBps` above the oracle price (a quote that good doesn't line up with the market, and without this bound it could be used to stretch the per-trade cap). | Re-quote and set `minOut` within `token.maxSlippageBps`. If the quote is far from the oracle either way, the oracle or the quote is stale: don't trade on it. |
 | `PositionLimit` | After this buy the wallet's real holding would exceed `token.maxPositionUsd`. | Offer a smaller buy, or stop. |
 | `ClosedMarketDrift` | The NYSE's regular session is closed (`oracle.sessionOpen` is false) and this buy is priced more than `token.maxClosedMarketDriftBps` above the last close (`oracle.lastCloseUsd`), or this sell that far below it. | Tell the user the market is closed and the token is trading at a premium (or discount) to its last close. Wait for the open, or stop. |
-| `DailyNotionalExceeded` | Red-team fix H7: today's cumulative notional (across every settled and cancelled decision, `mandate.notionalUsedToday`) plus this trade would exceed `mandate.maxDailyNotionalUsd`. Independent of `maxNotionalPerTradeUsd` and `maxTradesPerDay` - this bounds total daily exposure, not just per-trade size or trade count. 0 means the cap is off for this deployment. | Offer a smaller trade, or wait for the next UTC day. |
+| `DailyNotionalExceeded` | Red-team fix H7: today's cumulative notional (across every approved decision, whether settled, cancelled or still open, `mandate.notionalUsedToday`) plus this trade would exceed `mandate.maxDailyNotionalUsd`. Independent of `maxNotionalPerTradeUsd` and `maxTradesPerDay` - this bounds total daily exposure, not just per-trade size or trade count. 0 means the cap is off for this deployment. | Offer a smaller trade, or wait for the next UTC day. |
 | `InvalidAmount` | Red-team fix H15: `amountIn` is zero, or `amountIn`, `quotedOut` or `minOut` is above `MAX_AMOUNT` (2^128 - 1), where the policy math could overflow. | A bug in the caller's amount handling - check units (wei, 18 decimals). Don't retry the same numbers. |

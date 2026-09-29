@@ -5,6 +5,12 @@
  * estimated: these are the same numbers the project's own written research
  * already committed to disk before this map existed.
  */
+/**
+ * When these reserves were read. They are a snapshot, not a live feed, so the
+ * game says so wherever it shows them ("Sep 20").
+ */
+export const LIQUIDITY_AS_OF = "Sep 20";
+
 export type Platform = "bstock" | "ondo" | "xstock";
 
 export interface TerritoryToken {
@@ -35,7 +41,7 @@ export const TERRITORY_TOKENS: TerritoryToken[] = [
   { ticker: "NVDAon", name: "NVIDIA", platform: "ondo", reservesUsd: 13_500, volume24hUsd: 1_300, address: "0xa9ee28c80f960b889dfbd1902055218cba016f75", note: "~200x thinner than NVDAB" },
 
   // xStocks wasteland - friction-log B8, "commercially dead"
-  { ticker: "TSLAx", name: "TESLA", platform: "xstock", reservesUsd: 324, volume24hUsd: 0, address: "0x8ad3c73f833d3f9a523ab01476625f269aeb7cf0", note: "$0.00 24h volume - genuinely deployed, not tradeable" },
+  { ticker: "TSLAx", name: "TESLA", platform: "xstock", reservesUsd: 324, volume24hUsd: 0, address: "0x8ad3c73f833d3f9a523ab01476625f269aeb7cf0", note: "$0.00 24h volume on 2026-09-20 - deployed and barely traded" },
   // AAPLx: verified-facts.md only reports "pools hold under $2" in prose, no
   // per-pool address was recorded - not invented here.
   { ticker: "AAPLx", name: "APPLE", platform: "xstock", reservesUsd: 2, volume24hUsd: 0, note: "pools hold under $2; address not independently verified" },
@@ -44,7 +50,7 @@ export const TERRITORY_TOKENS: TerritoryToken[] = [
 export const PLATFORM_LABEL: Record<Platform, { name: string; blurb: string; color: string }> = {
   bstock: { name: "bSTOCKS TOWN", blurb: "Busy shops", color: "#3ecf8e" },
   ondo: { name: "ONDO VILLAGE", blurb: "One tiny shop", color: "#6ea8fe" },
-  xstock: { name: "xSTOCKS WASTELAND", blurb: "Nobody trades here", color: "#e7c98f" },
+  xstock: { name: "xSTOCKS WASTELAND", blurb: "Almost no trades", color: "#e7c98f" },
 };
 
 /** "$8.9M", "$13.5K", "$324" - short enough for a shop sign. */

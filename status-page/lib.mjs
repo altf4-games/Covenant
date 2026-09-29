@@ -250,6 +250,18 @@ export function joinDecisions(events) {
   return [...byId.values()].sort((x, y) => Number(BigInt(x.id) - BigInt(y.id)));
 }
 
+/**
+ * "1234567.1234567891" -> "1,234,567.123456": groups the whole part and keeps
+ * up to 6 decimals, working on the decimal string so no digit passes through a
+ * float (Number() loses precision past 2^53). Display only.
+ */
+export function groupDecimal(decimal) {
+  const [whole, frac = ""] = String(decimal).split(".");
+  const grouped = BigInt(whole).toLocaleString("en-US");
+  const trimmed = frac.slice(0, 6).replace(/0+$/, "");
+  return trimmed ? `${grouped}.${trimmed}` : grouped;
+}
+
 export function resolveFromBlock(explicitFromBlock, latestBlock) {
   if (explicitFromBlock !== undefined && explicitFromBlock !== null && explicitFromBlock !== "") {
     // Same class of gap as the CLI's hex32(): Number() coerces far more than

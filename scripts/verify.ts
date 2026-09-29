@@ -310,7 +310,11 @@ export async function reconcile(opts: ReconcileOptions) {
       }
       continue;
     }
-    // Inbound-only, unpaid, and sent by someone else: not a trade.
+    // Inbound-only, unpaid, and sent by someone else: not a trade. This leans
+    // on the wallet sending its own transactions (the Day-1 swap's `from` is
+    // the wallet, docs/evidence/day1-gate-swap.json). A stock bought with
+    // native BNB in a transaction some sponsor sent on the wallet's behalf
+    // would look like a gift here and be listed as a notice, not a trade.
     // Quote-token *received* doesn't matter: a stranger can bundle 1 wei of
     // USDT with the dust. What makes it not a trade is that the wallet paid nothing.
     const inboundOnly = [...m.stock.values()].every((d) => d >= 0n) && m.quoteOut === 0n;

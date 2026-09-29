@@ -215,7 +215,7 @@ Four more suites need no fork and no network at all - fast, pure-function covera
 - `test/skill-cli.unit.ts` (14): the Wallet Skill CLI's own input validation. `resolve` refuses ambiguous chains, the calldata builders refuse a negative amount, a `2^256` amount, a JS number that already lost precision, and a ticker where an address belongs, `compile-mandate` refuses two themes or a bound over 100%, and a stalled response body times out.
 - `test/erc8004-update.unit.ts` (3): the identity-update script's document builder, which adds the deployed contract and the agent's own id without duplicating on a re-run.
 - `test/oracle-guards.unit.ts` (7): the price-versus-candle sanity check and the multi-token oracle spec (`theme:<key>` or a comma list), no network.
-- `test/status-page-lib.unit.ts` (10): the sell-side wording in `describeDecision`/`guardedVsUnguarded` (the live suite only ever commits buy-side decisions), and `resolveFromBlock`'s input validation (NaN, negative, non-integer).
+- `test/status-page-lib.unit.ts` (12): the sell-side wording in `describeDecision`/`guardedVsUnguarded` (the live suite only ever commits buy-side decisions), and `resolveFromBlock`'s input validation (NaN, negative, non-integer).
 
 ### What needs a secret, and what needs an archive RPC
 
@@ -377,6 +377,18 @@ Each one was reproduced with a throwaway test first, then fixed and covered by a
 | The UI said "today's trades" for a multi-day, capped list; the card's tier depended on that cap | The list is the whole scanned range, newest 50 | Wording fixed; the track record covers every decision; the card names its contract |
 | The `SlippageTooLoose` explanation was wrong for the new quote ceiling | Written before the ceiling existed | Covers both cases |
 | The ERC-8004 identity named no contract | Registered before the deploy | `scripts/update-erc8004.ts`, dry-run tested against the live registry (about 316k gas) |
+
+### A seventh pass
+
+| Bug | Cause | Fix |
+|---|---|---|
+| Allowed trades were fought at a sign reading "NOT ALLOWED" | Twelve of the theme mandate's tokens have no shop on the map, and every token without one used the impersonator lot's hard-coded sign | The sign says "OFF THE MAP"; the battle says whether the trade was allowed |
+| The map showed a 20 Sep snapshot as current, and described it wrongly | Shop size comes from pool reserves, but the copy said "money traded there"; the xStocks banner said nobody trades | The copy says "money in that market (a Sep 20 snapshot)"; the banner says "Almost no trades" |
+| The "NO" badge covered the off-map lot's sign, so it read "NO ALLOWED" | The badge sits beside the doorstep, and that lot's sign sits there too | The badge goes below the stand on that lot |
+| The reference docs described the old `survey` window and omitted the quote ceiling | Written before those changes | `survey.md` and `check.md` updated |
+| The settle instructions and `verify.ts` used different amounts | The skill said "the Transfer to the wallet"; `verify.ts` uses the wallet's net movement across the transaction | The skill says net movement |
+| The status page pulled a floating `ethers@6` from a CDN | An unpinned version can change under a judge | Pinned to the installed version |
+| The status page's amounts went through `Number` | Precision loss on large values (display only) | Formatted from the decimal string |
 
 ### The one bug only found by running it in a browser
 

@@ -105,8 +105,8 @@
 </main>
 
 <script type="module">
-import { ethers } from "https://cdn.jsdelivr.net/npm/ethers@6/+esm";
-import { ABI, fetchDecisionEvents, joinDecisions, resolveFromBlock, describeDecision, bossFor, guardedVsUnguarded } from "./lib.mjs";
+import { ethers } from "https://cdn.jsdelivr.net/npm/ethers@6.17.0/+esm";
+import { ABI, fetchDecisionEvents, joinDecisions, resolveFromBlock, describeDecision, bossFor, guardedVsUnguarded, groupDecimal } from "./lib.mjs";
 
 const MAX_DECISIONS = 50;
 
@@ -132,7 +132,7 @@ function fmtAddr(addr) {
 function fmtAmount(wei) {
   // Display-only, assumes 18 decimals (true for USDT and every tokenized
   // stock this project touches - see docs/research/verified-facts.md).
-  return Number(ethers.formatUnits(wei, 18)).toLocaleString(undefined, { maximumFractionDigits: 6 });
+  return groupDecimal(ethers.formatUnits(wei, 18));
 }
 
 function fmtTime(unixSeconds) {

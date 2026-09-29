@@ -77,10 +77,10 @@ async function main() {
     await pause(400);
 
     await (await new ethers.Contract(USDT, ERC20, env.agent).approve(PANCAKE_V3_SWAP_ROUTER, a.amountIn)).wait();
-    const latest = (await new ethers.JsonRpcProvider(node.rpcUrl).getBlock("latest"))!.timestamp;
+    const deadlineFromNow = async () => (await new ethers.JsonRpcProvider(node.rpcUrl).getBlock("latest"))!.timestamp + 300;
     const honestSwap = await (
       await new ethers.Contract(PANCAKE_V3_SWAP_ROUTER, ROUTER_ABI, env.agent).exactInputSingle({
-        tokenIn: USDT, tokenOut: NVDAB, fee: FEE, recipient: env.agentAddress, deadline: latest + 300, amountIn: a.amountIn, amountOutMinimum: a.minOut, sqrtPriceLimitX96: 0n,
+        tokenIn: USDT, tokenOut: NVDAB, fee: FEE, recipient: env.agentAddress, deadline: await deadlineFromNow(), amountIn: a.amountIn, amountOutMinimum: a.minOut, sqrtPriceLimitX96: 0n,
       })
     ).wait();
     // Settle with the real ERC-20 Transfer amount, never the quote - the
@@ -104,7 +104,7 @@ async function main() {
     await (await new ethers.Contract(USDT, ERC20, env.agent).approve(PANCAKE_V3_SWAP_ROUTER, a.amountIn)).wait();
     const bypassSwap = await (
       await new ethers.Contract(PANCAKE_V3_SWAP_ROUTER, ROUTER_ABI, env.agent).exactInputSingle({
-        tokenIn: USDT, tokenOut: NVDAB, fee: FEE, recipient: env.agentAddress, deadline: latest + 300, amountIn: a.amountIn, amountOutMinimum: a.minOut, sqrtPriceLimitX96: 0n,
+        tokenIn: USDT, tokenOut: NVDAB, fee: FEE, recipient: env.agentAddress, deadline: await deadlineFromNow(), amountIn: a.amountIn, amountOutMinimum: a.minOut, sqrtPriceLimitX96: 0n,
       })
     ).wait();
     console.log(`😈 bypass swap went through with no commit: ${bypassSwap!.hash}`);
