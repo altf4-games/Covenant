@@ -1,7 +1,7 @@
 import { expect } from "chai";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
-import { reconcile } from "../scripts/verify.js";
+import { reconcile, reconcileCrossChecked } from "../scripts/verify.js";
 import { TOPICS } from "../scripts/judge.js";
 
 // verify.ts against a small in-process JSON-RPC server fed crafted logs:
@@ -29,7 +29,7 @@ const TTL = 600;
 const word = (x: bigint | string) => (typeof x === "string" ? x.replace(/^0x/, "").toLowerCase().padStart(64, "0") : x.toString(16).padStart(64, "0"));
 const h = (n: number) => "0x" + n.toString(16).padStart(64, "0");
 
-interface RawLog { address: string; topics: string[]; data: string; blockNumber: string; transactionHash: string; transactionIndex: string }
+interface RawLog { address: string; topics: string[]; data: string; blockNumber: string; transactionHash: string; transactionIndex: string; logIndex: string }
 
 class Chain {
   logs: RawLog[] = [];
@@ -39,7 +39,7 @@ class Chain {
   tip = 1000;
 
   log(address: string, topics: string[], data: string, block: number, tx: string, txIndex = 0) {
-    this.logs.push({ address, topics: topics.map((t) => "0x" + word(t)), data: "0x" + data, blockNumber: "0x" + block.toString(16), transactionHash: tx, transactionIndex: "0x" + txIndex.toString(16) });
+    this.logs.push({ address, topics: topics.map((t) => "0x" + word(t)), data: "0x" + data, blockNumber: "0x" + block.toString(16), transactionHash: tx, transactionIndex: "0x" + txIndex.toString(16), logIndex: "0x" + this.logs.length.toString(16) });
   }
   configure(token: string, allowed = true, block = 2) {
     this.log(COV, [TOKEN_CONFIGURED, token], word(allowed ? 1n : 0n) + word(100n) + word(0n), block, h(900 + block));
@@ -592,6 +592,105 @@ describe("verify.ts reconcile() (unit, mock RPC, crafted logs)", function () {
         }
       });
     }
+  });
+
+
+  // Robustness against the RPC itself, not the chain: a log listed twice, one
+  // endpoint dropping logs, and a second endpoint that disagrees or is down.
+  describe("what the RPC returns, and a second opinion", function () {
+    let server2: http.Server;
+    let url2: string;
+    let chain2: Chain;
+    before(async function () {
+      server2 = http.createServer((req, res) => {
+        let body = "";
+        req.on("data", (c) => (body += c));
+        req.on("end", () => {
+          const { id, method, params } = JSON.parse(body);
+          try {
+            res.end(JSON.stringify({ jsonrpc: "2.0", id, result: chain2.handle(method, params) }));
+          } catch (err) {
+            res.end(JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32000, message: (err as Error).message } }));
+          }
+        });
+      });
+      await new Promise<void>((r) => server2.listen(0, "127.0.0.1", r));
+      url2 = `http://127.0.0.1:${(server2.address() as AddressInfo).port}`;
+    });
+    after(() => server2.close());
+
+    /** A second endpoint that starts as an exact copy of the first. */
+    const mirror = () => {
+      chain2 = Object.assign(new Chain(), chain, { logs: [...chain.logs] });
+    };
+    const hideTransfers = (c: Chain) => {
+      const orig = c.handle.bind(c);
+      c.handle = (m: string, p: any[]) => (m === "eth_getLogs" && Array.isArray(p[0].address) ? [] : orig(m, p));
+    };
+    const both = (fromBlock = 1) => reconcileCrossChecked({ rpcUrls: [url, url2], covenantAddress: COV, fromBlock, chunkSize: 50 });
+
+    it("a log an RPC lists twice is one log: an honest trade stays clean", async function () {
+      honestBuy();
+      const orig = chain.handle.bind(chain);
+      chain.handle = (m: string, p: any[]) => {
+        const r = orig(m, p);
+        return m === "eth_getLogs" ? [...(r as any[]), ...(r as any[])] : r;
+      };
+      const r = await run();
+      expect(r.violations).to.deep.equal([]);
+      expect(r.matched).to.have.length(1);
+    });
+
+    it("two endpoints that agree give a clean report with nothing to note", async function () {
+      honestBuy();
+      mirror();
+      const r = await both();
+      expect(r.violations).to.deep.equal([]);
+      expect(r.notices).to.deep.equal([]);
+      expect(r.rpcsUsed).to.deep.equal([url]);
+    });
+
+    it("an endpoint that drops every Transfer log hides a bypass from a lone scan, and the second opinion catches it", async function () {
+      honestBuy();
+      chain.transfer(NVDA, DEX, OLD, 5n * 10n ** 15n, 40, h(4400)); // a swap with no decision at all
+      chain.transfer(USDT, OLD, DEX, E18, 40, h(4400));
+      mirror();
+      hideTransfers(chain); // the first endpoint is the one that lies
+      const alone = await run();
+      expect(alone.trades, "the lying endpoint reports no trades at all").to.equal(0);
+      const checked = await both();
+      expect(kinds(checked)).to.include("RPC_DISAGREEMENT");
+      expect(checked.clean).to.equal(false);
+      // and the honest second endpoint's own report does show the bypass
+      expect(kinds(await reconcile({ rpcUrls: [url2], covenantAddress: COV, fromBlock: 1, chunkSize: 50 }))).to.deep.equal(["UNMATCHED_TRADE"]);
+    });
+
+    it("an endpoint that hides only the bypass looks perfectly clean alone, and is still caught by the second opinion", async function () {
+      honestBuy();
+      chain.transfer(NVDA, DEX, OLD, 5n * 10n ** 15n, 40, h(4500)); // a swap with no decision at all
+      chain.transfer(USDT, OLD, DEX, E18, 40, h(4500));
+      mirror();
+      const orig = chain.handle.bind(chain);
+      chain.handle = (m: string, p: any[]) => {
+        const r = orig(m, p);
+        return m === "eth_getLogs" ? (r as any[]).filter((l) => l.transactionHash !== h(4500)) : r;
+      };
+      const alone = await run();
+      expect(alone.violations, "the lying endpoint's own report").to.deep.equal([]);
+      expect(alone.clean).to.equal(true);
+      const checked = await both();
+      expect(kinds(checked)).to.deep.equal(["RPC_DISAGREEMENT"]);
+      expect(checked.clean).to.equal(false);
+    });
+
+    it("says so when no second endpoint can complete the scan, rather than passing quietly", async function () {
+      honestBuy();
+      const noSecond = await reconcileCrossChecked({ rpcUrls: [url, "http://127.0.0.1:1"], covenantAddress: COV, fromBlock: 1, chunkSize: 50 });
+      expect(noSecond.violations).to.deep.equal([]);
+      expect(noSecond.notices.map((n) => n.kind)).to.deep.equal(["CROSS_CHECK_UNAVAILABLE"]);
+      const single = await reconcileCrossChecked({ rpcUrls: [url], covenantAddress: COV, fromBlock: 1, chunkSize: 50 });
+      expect(single.notices.map((n) => n.kind)).to.deep.equal(["CROSS_CHECK_UNAVAILABLE"]);
+    });
   });
 
 });

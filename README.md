@@ -122,6 +122,8 @@ It reads hashes from `JUDGE_TX_HASHES` (comma-separated) or [`data/judge-tx-hash
 COVENANT_ADDRESS=0x... VERIFY_FROM_BLOCK=<deployment block> npm run verify
 ```
 
+By default it then repeats the scan on a second RPC, pinned to the same last block, and reports `RPC_DISAGREEMENT` if the two reports differ: one endpoint silently dropping logs would otherwise hide an unmatched trade. If no other RPC can complete the scan (free endpoints cap ranges and refuse old blocks), it says so as a `CROSS_CHECK_UNAVAILABLE` notice instead of passing quietly. `VERIFY_CROSS_CHECK=0` skips the second scan, which doubles the run time. A log an RPC returns twice counts once.
+
 It flags a trade with no settled decision (`UNMATCHED_TRADE`), a settle pointing at a transaction that moved no stock (`FALSE_SETTLE`), a settled amount that isn't what really arrived (`AMOUNT_MISMATCH`), a fill below the committed minimum (`BELOW_MINIMUM`), a trade before its commit or after its expiry, a wrong token or side, two decisions claiming one trade, and quote-token spend that brings back a token the owner never configured (`UNTRACKED_SWAP`). Two things are listed as notices, not violations: a stock sent to the wallet by a stranger who paid nothing (`INBOUND_TRANSFER`, so nobody can turn the reconciliation red by dusting the address, even with a bit of USDT bundled in), and the quote token leaving the wallet in a transaction that moved no stock (`QUOTE_OUTFLOW`, which can be a legitimate payment but is also the first thing a stolen key does). Amounts are compared against the ERC-20 transfers, not Binance's reported fill, which is in share units for bStocks (friction-log C17).
 
 `test/verify.live.ts` proves each verdict with real swaps against live PancakeSwap liquidity on a mainnet fork: an honest buy and an honest sell reconcile clean, and a bypass, a false settle, a settle using Binance's share-unit number, and a swap after expiry are each flagged, with nothing else flagged.
@@ -193,7 +195,7 @@ npm install
 npx hardhat test
 ```
 
-Twenty-three suites in `test/` (263 tests, one full `npm test` run, all passing), plus two in `frontend/` (35 tests, `cd frontend && npm test`). Several suites run live against a fork or Binance's real endpoints; a hosted CI runner can be geo-blocked from Binance's API, in which case those tests skip rather than fail. Also checked in CI: `npm run typecheck` (types for the scripts, tests and MCP server) and the frontend's lint and build.
+Twenty-three suites in `test/` (268 tests, one full `npm test` run, all passing), plus two in `frontend/` (39 tests, `cd frontend && npm test`). Several suites run live against a fork or Binance's real endpoints; a hosted CI runner can be geo-blocked from Binance's API, in which case those tests skip rather than fail. Also checked in CI: `npm run typecheck` (types for the scripts, tests and MCP server) and the frontend's lint and build.
 
 The suites that deploy the contract, use a fork, or call live endpoints:
 
@@ -215,7 +217,7 @@ The live suites share `scripts/lib/local-fork.ts`, which deploys with the real `
 
 Ten more suites are pure-function or mock-RPC coverage, with no fork, no network and no contract deployment: fast checks of logic the suites above only exercise on the happy path, or don't touch:
 
-- `test/verify.unit.ts` (45): `reconcile()` against a mock JSON-RPC server with crafted logs - H13's overspend repro (a $1-approved buy that really moved $10,000), H14's agent-rotation scoping, a multi-token trade, a revoke, a token disallowed mid-approval, a missed deployment block, `getLogs` chunk boundaries, a stock dusted into the wallet by a stranger (with and without USDT bundled in), a quote-token spend on an unconfigured stock, USDT leaving the wallet with nothing coming back, and one scan per direction however many tokens are configured. Every violation kind has its own crafted case, 200 random honest histories must reconcile clean, and one corrupted trade among honest ones must be flagged as exactly the expected kind on exactly that trade. Every boundary (a fill exactly at the minimum, a swap in the decision's last second, a wallet's last second in scope) is tested on both sides. The live suite only ever reconciles one honest trade at a time; this is where the actual violation-detection logic gets tested against something trying to slip past it.
+- `test/verify.unit.ts` (50): `reconcile()` against a mock JSON-RPC server with crafted logs - H13's overspend repro (a $1-approved buy that really moved $10,000), H14's agent-rotation scoping, a multi-token trade, a revoke, a token disallowed mid-approval, a missed deployment block, `getLogs` chunk boundaries, a stock dusted into the wallet by a stranger (with and without USDT bundled in), a quote-token spend on an unconfigured stock, USDT leaving the wallet with nothing coming back, and one scan per direction however many tokens are configured. Every violation kind has its own crafted case, a log listed twice counts once, a second RPC that disagrees is reported, one that is down is noted, 200 random honest histories must reconcile clean, and one corrupted trade among honest ones must be flagged as exactly the expected kind on exactly that trade. Every boundary (a fill exactly at the minimum, a swap in the decision's last second, a wallet's last second in scope) is tested on both sides. The live suite only ever reconciles one honest trade at a time; this is where the actual violation-detection logic gets tested against something trying to slip past it.
 - `test/skill-cli.unit.ts` (17): the Wallet Skill CLI's own input validation. `resolve` refuses ambiguous chains, the calldata builders refuse a negative amount, a `2^256` amount, a JS number that already lost precision, and a ticker where an address belongs, `compile-mandate` refuses two themes or a bound over 100%, and a stalled response body times out.
 - `test/erc8004-update.unit.ts` (3): the identity-update script's document builder, which adds the deployed contract and the agent's own id without duplicating on a re-run.
 - `test/oracle-guards.unit.ts` (13): the price-versus-candle sanity check and the multi-token oracle spec (`theme:<key>` or a comma list), no network.
@@ -361,93 +363,29 @@ Every functional claim on this page is backed by a real bug this project's own t
 | The try-to-break-it demo settled its own honest trade with the quote, not the real fill | Passed `quotedOut` to `settle` instead of the swap receipt's real `Transfer` amount - the exact mistake friction-log C17 documents | `verify.ts`'s own `reconcile()`, run in the same script, caught it immediately (0 matched instead of 1); fixed to read the real `Transfer` log |
 | A rounding artifact at exactly the drift bound | `quotedOut = amountIn × 1e18 / price` truncates, landing ~1e-16 of the price over the bound | Errs toward refusing (the right direction for a guard) - left as-is, asserted directly in the unit test |
 
-### A fifth red-team pass over the whole repo
+### Later passes: a different tool each time
 
-Each one was reproduced with a throwaway test first, then fixed and covered by a permanent test.
+After the fixes above, the code went through eleven more red-team passes. Reading alone stopped finding things quickly, so each pass used a different lens, and each finding was reproduced (or a test written that failed) before it was fixed.
 
-| Bug | Cause | Fix |
+| Lens | What it found | Fix |
 |---|---|---|
-| A buy declaring `amountIn` = $1 with a quote worth $50 was approved | The contract bounded the minimum below the quote and the oracle, but nothing bounded the quote above the oracle; `verify.ts` derived its "received too much" ceiling from that same quote | `_evaluate` now denies a quote more than the slippage bound above the oracle (`SlippageTooLoose`) |
-| Buying a stock the owner never configured reconciled clean | `verify.ts` only watched configured tokens | A quote-token spend that brings back an unconfigured token is `UNTRACKED_SWAP` |
-| Anyone could turn the reconciliation red for good by sending 1 wei of a stock to the wallet | Every inbound transfer counted as a trade | Inbound, unpaid, not sent by the wallet: a notice, not a violation |
-| A theme mandate allowed eight tokens but the oracle kept one fresh | `oracle-updater.ts` took a single token address | Takes a comma list or `theme:<key>`; one token failing doesn't stop the rest |
-| The status page opened onto an empty ledger | Default lookback was 500 blocks, a few minutes on BSC, and the placeholder text said 2000 | 50,000 blocks; text corrected; `deploy.ts` prints the deployment block |
-| `compile-mandate` silently picked one theme when given two, and emitted calldata for a 150% drift bound that would revert | Regex extraction with no ambiguity or range check | Refuses both |
-| One hanging RPC stalled `verify` and `judge` instead of failing over | No fetch timeout, and failover only advances on a thrown error | Timeouts on every RPC and upstream call |
-| `survey` called a quiet token dead from a ~3000-block window | A window of minutes | Scans as far back as the free RPC serves, reports `blocksScanned`; TSLAx, previously "dead", shows 4 transfers to its bStock's 185 |
-| A live price with a fresh on-chain timestamp could be stale upstream | Nothing compared the price feed to anything else | The updater refuses a price more than 10% from the latest hourly candle |
-
-### A sixth pass, on the fixes themselves
-
-| Bug | Cause | Fix |
-|---|---|---|
-| The dust fix didn't hold | A stranger bundling 1 wei of USDT with the stock made `quoteIn` non-zero, so the "inbound only" test failed and the reconciliation went red again | The test now only asks whether the wallet paid anything |
-| A compromised agent sending all its USDT away reconciled clean | Nothing looked at quote-token outflows that weren't a trade | Listed as a `QUOTE_OUTFLOW` notice |
-| `verify.ts` would be slow on a real deployment | One sequential scan per token, per direction | One address-array scan per direction, so two per wallet |
-| The deploy could ship the unoptimized build | `deploy.ts` uses whatever artifact was built last, and the default profile has the optimizer off | `npm run deploy`, a size guard, and the EVM version pinned to Cancun |
-| The UI said "today's trades" for a multi-day, capped list; the card's tier depended on that cap | The list is the whole scanned range, newest 50 | Wording fixed; the track record covers every decision; the card names its contract |
-| The `SlippageTooLoose` explanation was wrong for the new quote ceiling | Written before the ceiling existed | Covers both cases |
-| The ERC-8004 identity named no contract | Registered before the deploy | `scripts/update-erc8004.ts`, dry-run tested against the live registry (about 316k gas) |
-
-### A seventh pass
-
-| Bug | Cause | Fix |
-|---|---|---|
-| Allowed trades were fought at a sign reading "NOT ALLOWED" | Twelve of the theme mandate's tokens have no shop on the map, and every token without one used the impersonator lot's hard-coded sign | The sign says "OFF THE MAP"; the battle says whether the trade was allowed |
-| The map showed a 20 Sep snapshot as current, and described it wrongly | Shop size comes from pool reserves, but the copy said "money traded there"; the xStocks banner said nobody trades | The copy says "money in that market (a Sep 20 snapshot)"; the banner says "Almost no trades" |
-| The "NO" badge covered the off-map lot's sign, so it read "NO ALLOWED" | The badge sits beside the doorstep, and that lot's sign sits there too | The badge goes below the stand on that lot |
-| The reference docs described the old `survey` window and omitted the quote ceiling | Written before those changes | `survey.md` and `check.md` updated |
-| The settle instructions and `verify.ts` used different amounts | The skill said "the Transfer to the wallet"; `verify.ts` uses the wallet's net movement across the transaction | The skill says net movement |
-| The status page pulled a floating `ethers@6` from a CDN | An unpinned version can change under a judge | Pinned to the installed version |
-| The status page's amounts went through `Number` | Precision loss on large values (display only) | Formatted from the decimal string |
-
-### An eighth pass: mechanical checks instead of reading
-
-Earlier passes read code for risk. This one ran everything that can be run: `tsc` over the parts the frontend build doesn't cover, both linters, `npm audit` (0 vulnerabilities), the contract's coverage report, a check that every relative link in this README resolves, a check of every copy of a contract fact against the compiled contract, and an unused-export scan.
-
-| Finding | Fix |
-|---|---|
-| Nothing outside the frontend was type-checked: 43 real errors in the scripts, tests and MCP server (mostly the untyped CLI, plus a wrong type import, `unknown` response bodies and implicit `any`) | JSDoc types on the CLI, every error fixed, `npm run typecheck`, and a CI step |
-| `Covenant.sol` was at 97% line coverage; the uncovered lines were the zero-address checks on `setAgent` and `setOracleUpdater`, cancelling or settling a denied decision, and a closed-market buy with no minimum | Three tests; 100% of lines and statements |
-| Selectors, event topics and the `DenialReason` list are copied into the CLI, `judge.ts`, `verify.ts`, the status page and the game; a drifted copy fails silently | `test/drift.unit.ts` checks every copy against the compiled contract |
-| A forged `?rpc=` link makes the page show made-up decisions under Covenant's branding | The page and the trading card name the RPC host and chain, and flag anything but 56 |
-| The frontend used absolute `/game/...` paths, so it broke at a sub-path such as GitHub Pages | `base: './'` and `BASE_URL`-relative assets |
-| The MCP server passed any string on as an address or URL | Validated at the boundary: a 20-byte address, an http(s) URL |
-| Two oracle-updater runs could overlap and race on the nonce | A lock directory in the cron script (tested: concurrent runs skip, a stale lock is broken) |
-| The 2027 NYSE holidays and the walk-back across New Year were untested | Four tests, including every full closure in both years |
-| This README's test section listed five suites under "Four more", 16 of 18 files, and stale counts | Corrected against a full run: 194 tests; `npm test` is the source, not this list |
-| Unused variables, a dead constant, test libraries in the frontend's runtime dependencies, no frontend lint in CI | Removed, moved to dev dependencies, and added |
-
-### A ninth pass: do the tests notice when the code is wrong?
-
-Line coverage says a line ran, not that a test would fail if it were wrong. So this pass made 33 deliberate breaks in `Covenant.sol` and 33 in `verify.ts` (flip a `>` to `>=`, delete a check, count a trade twice) and ran the unit tests against each. The first run let 8 of the contract's and 22 of `verify.ts`'s survive with every test still green.
-
-| What survived | Test added |
-|---|---|
-| Five `verify.ts` violation kinds (`BELOW_MINIMUM`, `TOKEN_MISMATCH`, `SIDE_MISMATCH`, `DUPLICATE_SETTLE`, `SWAP_BEFORE_COMMIT`) could be deleted with the suite green | One crafted case each, plus the settle-without-commit and amount-mismatch cases |
-| The boundaries between clean and flagged in `verify.ts` (a fill exactly at the minimum, the received-stock tolerance, a swap in a decision's last second, a wallet's last second in scope) | Each tested on both sides |
-| The exclusions in the untracked-swap and dust rules (quote-token change, a wrapped-BNB refund, a stock that nets to zero, a settle-claimed transaction from a stranger, a sponsored paid trade) | One case each |
-| The contract's boundaries: mandate expiry, oracle staleness, the decision's last second, the quote ceiling, both drift bounds | Each on the exact second or wei and one past it |
-| The daily trade counter could count each trade twice, or fail to reset on a new UTC day, and no test noticed | A test for a running count and notional, and for the new UTC day |
-
-The full run also failed the live suites once for a reason unrelated to any of this: this laptop's clock was 19 seconds behind Binance's, and the signed Web3 API rejects a timestamp outside its receive window (HTTP 401, code 40103). The client now reads the server's time from that error, corrects once and retries (friction log A12).\n\nAfter the new tests, all 33 breaks in each file are caught. A separate differential fuzz found nothing wrong in the contract itself: the gaps were in the tests. The pass also caught two mistakes of mine from the previous one: the CI typecheck step failed on a clean checkout (it needed the compiled artifacts) and the Cancun pin covered only the production profile.
-
-### A tenth pass: the rest of the code, mutation-tested and fuzzed
-
-The ninth pass did this for the contract and `verify.ts`. This one covered everything else that can be unit-tested: the skill CLI, the status-page library, the NYSE calendar, the oracle guards, the Web3 API client and the game logic (114 breaks: 37 in the CLI and 77 elsewhere; 21 of the CLI's and 27 of the others survived the existing unit tests). The same two lenses also ran as fuzzers: the CLI's calldata against ethers on random inputs, and random honest histories through `verify.ts`.
-
-| Finding | Fix |
-|---|---|
-| `compile-mandate`'s defaults, regexes and rounding, `resolve`'s disambiguation, `survey`'s verdicts, the bytes32 anchor and the router table were exercised only by live suites, or not at all | `test/skill-cli-logic.unit.ts`, with no network (the network is stubbed) |
-| A real off-by-one: `survey` scanned a fourth, one-block range past its window and reported 15,001 blocks | The window is exactly the blocks it says |
-| Price-string parsing, `isHalted`, the last-close lookup, and the deviation boundary were tested only in a live file that needs a fork | Pure unit tests, including exactly 10% and one wei past it |
-| The Web3 API client's signature, its refusal to retry other errors, and an HTTP error with a code-0 body had no test | Three tests, including the HMAC recomputed independently |
-| The game's number formatting, door position, mixed-case address lookup and sell wording; the trading card's streak and settle counting | Tests for each |
-| `computeTrackRecord` reversed its list first, but no figure depends on the direction | The dead reordering is gone, with a note on why |
-| Whether the hand-rolled encoder and decoder agree with ethers on inputs nobody wrote by hand | They do: 3,000 random cases byte for byte, and 2,000 random events. The one difference found is judge-side: `expiresAt`, `mandateExpiry` and `oracleUpdatedAt` are decoded through `Number`, exact only below 2^53. Real timestamps are far below it. |
-| Whether `verify.ts` handles history it wasn't written against | 200 random honest histories reconcile clean, and each of six corruptions is flagged as exactly the right kind on exactly that trade |
-
-After the new tests, every break is caught except one in the CLI that turned out to be equivalent to the original.
+| Reading the code again, with a repro for each finding | A buy declaring `amountIn` = $1 with a $50 quote was approved (nothing bounded the quote above the oracle) | `_evaluate` denies a quote more than the slippage bound above the oracle |
+| | Buying a stock the owner never configured reconciled clean; anyone could turn the reconciliation red for good by dusting the wallet, even with a bit of USDT bundled in; a stolen key sending its USDT away was invisible | `UNTRACKED_SWAP`; `INBOUND_TRANSFER` and `QUOTE_OUTFLOW` notices |
+| | A theme mandate allowed eight tokens but the oracle kept one fresh; the oracle cron stopped before judging began; runs could overlap and race on the nonce | Multi-token updater (`theme:<key>`), cron through judging, a lock |
+| | The status page opened onto an empty ledger (500 blocks is minutes on BSC); `compile-mandate` silently picked one of two themes and emitted calldata that would revert; one hung RPC stalled `verify` and `judge` | 50,000-block default and the deploy block printed; refusals; timeouts everywhere |
+| | The deploy could ship the unoptimized build (17 KB against 7 KB); the EVM version was pinned only for production | `npm run deploy`, a size guard, Cancun pinned in both profiles |
+| | The map showed allowed trades at a sign reading "NOT ALLOWED"; a badge hid its text; a 20 Sep liquidity snapshot was shown as current | "OFF THE MAP", the badge moved, the snapshot dated |
+| A type check of everything the frontend build doesn't cover | 43 errors in the scripts, tests and MCP server | JSDoc on the CLI, all fixed, `npm run typecheck` in CI |
+| The coverage report | `Covenant.sol` at 97% lines | 100% of lines and statements |
+| A check of every copy of a contract fact | Selectors, event topics and the `DenialReason` list are copied into five places | `test/drift.unit.ts` checks each against the compiled contract |
+| Deliberate breaks of the code (mutation testing), 33 in the contract, 33 in `verify.ts`, 114 in everything else | Five `verify.ts` violation kinds could be deleted with every test green; a daily counter that counted each trade twice went unnoticed; most of `compile-mandate`, `resolve` and `survey` was exercised only by live suites | A crafted case per violation kind, exact-second and exact-wei boundary tests, and stubbed-network unit tests. Every break is now caught but one equivalent one |
+| Fuzzing against an independent model | Nothing wrong: 12,000 random `previewDecision` cases matched a BigInt model with no revert; the CLI's calldata matched ethers byte for byte on 3,000 random inputs; 200 random honest histories reconcile clean through `verify.ts`, and a corrupted trade among them is flagged as exactly the right kind. The one real find was a `survey` off-by-one. | Kept as seeded tests |
+| A full live run | This laptop's clock was 19 seconds behind Binance's, and the signed API rejects a timestamp outside its receive window (code 40103) | The client corrects once from the server time in the error and retries (friction log A12) |
+| Checking my own pushes | Two regressions of mine: CI failed on a clean checkout (the typecheck needed compiled artifacts), and the Cancun pin covered only one profile | Fixed the same day, with a drift test |
+| Provenance | A forged `?rpc=` link makes the page show made-up decisions under Covenant's name | The page and the trading card name the RPC host and chain |
+| The RPC itself | A log returned twice made an honest trade look like three violations; one endpoint silently dropping logs could hide a bypass | Logs are de-duplicated by transaction and index; `verify.ts` asks a second RPC by default and reports `RPC_DISAGREEMENT` (or says it couldn't) |
+| A phone-sized browser | In portrait the whole town was fitted to the width: shop signs a few pixels tall, most of the screen empty forest, dialogue text about 6 px | A camera that follows the agent at a readable zoom, and a tall battle stage shaped like the screen (about 12 px text) |
+| The repository | No `LICENSE` file, and `package.json` said ISC where the contracts say MIT; this section had grown to a hundred lines | MIT `LICENSE`, consistent metadata, and this table |
 
 ### The one bug only found by running it in a browser
 
@@ -465,3 +403,9 @@ Every bug above was caught by an automated test. This one wasn't: manually drivi
 - **Reconciliation is scoped to the configured tokens.** `verify.ts` catches an unconfigured token bought with the quote token, but a stock bought with native BNB leaves no quote-token movement to key off, so only configured tokens are reconciled in that case.
 - **The closed-market drift rule is as accurate as the Binance status/price feeds it reads.** Like any oracle-based guard, it fails closed on a failed read; a read that succeeds with wrong upstream data is outside what it can catch.
 - **The Agentic Wallet's developer mode lapses after ~7 days of external-transaction inactivity** (undocumented by Binance, found by testing it - friction-log C14). A fork-heavy dev workflow doesn't touch this on its own, so a deliberate trivial real transaction on a schedule keeps it alive through the build window.
+
+---
+
+## License
+
+MIT, see [`LICENSE`](LICENSE). The game art is Kenney's CC0 Tiny Town and Tiny Dungeon packs.

@@ -18,6 +18,9 @@ import {
   doorCol,
   standSpot,
   buildQuest,
+  battleStageFor,
+  isPortraitScreen,
+  portraitTownZoom,
   type Building,
   type QuestStep,
   type Spot,
@@ -89,6 +92,9 @@ export class WorldScene extends Phaser.Scene {
   private insetTween?: Phaser.Tweens.Tween;
   private stamps = new Map<string, Phaser.GameObjects.Container>();
   private advanceDialog: (() => void) | null = null;
+  /** A portrait battle draws on its own tall stage, and the camera frames that instead of the town. */
+  private stage: { w: number; h: number } | null = null;
+  private following = false;
 
   constructor() {
     super("world");
@@ -174,15 +180,37 @@ export class WorldScene extends Phaser.Scene {
   // -------------------------------------------------------------------------
   // Camera and crisp text
 
+  private isPortrait() {
+    const g = this.scale.gameSize;
+    return isPortraitScreen(g.width, g.height);
+  }
+
   private fitCamera() {
     if (this.destroyed) return;
     const gw = this.scale.gameSize.width;
     const gh = this.scale.gameSize.height;
-    const availW = Math.max(200, gw - this.rightInset);
-    const z = Math.min(availW / W, gh / H) * 0.97;
     const cam = this.cameras.main;
-    cam.setZoom(z);
-    cam.centerOn(W / 2 + this.rightInset / 2 / z, H / 2);
+    let z: number;
+    if (this.stage) {
+      // A portrait battle: frame its stage, not the town.
+      z = Math.min(gw / this.stage.w, gh / this.stage.h) * 0.97;
+      this.setFollowing(false);
+      cam.setZoom(z);
+      cam.centerOn(this.stage.w / 2, this.stage.h / 2);
+    } else if (this.isPortrait()) {
+      // A phone held upright: fitting the whole 32-tile town to the width
+      // makes shop signs a few pixels tall and leaves most of the screen
+      // empty. Zoom in so the signs are readable and follow the agent.
+      z = portraitTownZoom(gw, gh);
+      cam.setZoom(z);
+      this.setFollowing(true);
+    } else {
+      const availW = Math.max(200, gw - this.rightInset);
+      z = Math.min(availW / W, gh / H) * 0.97;
+      this.setFollowing(false);
+      cam.setZoom(z);
+      cam.centerOn(W / 2 + this.rightInset / 2 / z, H / 2);
+    }
     // Text is rasterized once at its own resolution, then scaled by the
     // camera. Rendering it at the camera's zoom keeps it pin-sharp at any
     // screen size - the "blurry boss names" were small text textures
@@ -478,6 +506,22 @@ export class WorldScene extends Phaser.Scene {
    * rule's monster and is blocked - which is the good outcome for the
    * money, and the dialogue says so. Click / Space / Enter skips ahead.
    */
+  private setFollowing(on: boolean) {
+    if (on === this.following) return;
+    this.following = on;
+    if (on) {
+      this.cameras.main.centerOn(this.hero.x, this.hero.y);
+      this.cameras.main.startFollow(this.hero, true, 0.08, 0.08);
+    } else {
+      this.cameras.main.stopFollow();
+    }
+  }
+
+  /** Where a battle is drawn: the town's own rectangle, or on a portrait screen a tall stage shaped like the screen. */
+  private battleStage() {
+    return battleStageFor(this.scale.gameSize.width, this.scale.gameSize.height);
+  }
+
   private playBattle(step: Extract<QuestStep, { kind: "battle" }>) {
     if (this.destroyed) return;
     const L = this.battleLayer;
@@ -488,35 +532,56 @@ export class WorldScene extends Phaser.Scene {
     this.cameras.main.flash(120, 255, 255, 255);
     this.time.delayedCall(180, () => !this.destroyed && this.cameras.main.flash(120, 255, 255, 255));
 
-    const g = this.add.graphics();
-    g.fillStyle(0xf1f5e8, 1).fillRect(-MARGIN, -MARGIN, W + 2 * MARGIN, H + 2 * MARGIN);
-    g.fillStyle(0xd9ecc4, 1).fillRect(-MARGIN, H * 0.5, W + 2 * MARGIN, MARGIN + H);
-    g.fillStyle(0xa3d17f, 1).fillEllipse(W * 0.7, H * 0.42, 170, 40);
-    g.lineStyle(2, 0x6aa150, 1).strokeEllipse(W * 0.7, H * 0.42, 170, 40);
-    g.fillStyle(0xa3d17f, 1).fillEllipse(W * 0.28, H * 0.76, 190, 44);
-    g.lineStyle(2, 0x6aa150, 1).strokeEllipse(W * 0.28, H * 0.76, 190, 44);
+    const st = this.battleStage();
+    const { w: BW, h: BH } = st;
+    if (st.portrait) {
+      this.stage = { w: BW, h: BH };
+      this.fitCamera();
+    }
+    const lay = st.portrait
+      ? {
+          foe: { x: BW * 0.62, y: BH * 0.31 }, foeEll: [130, 32],
+          hero: { x: BW * 0.32, y: BH * 0.55 }, heroEll: [140, 34],
+          // The HUD sits over the top ~45 world px and the status line over the bottom ~50.
+          foeBox: { x: BW * 0.04, y: 52, w: BW * 0.7 }, heroBox: { x: BW * 0.26, y: BH * 0.6, w: BW * 0.7 },
+          boxH: 84, boxY: BH - 84 - 56,
+        }
+      : {
+          foe: { x: BW * 0.7, y: BH * 0.42 }, foeEll: [170, 40],
+          hero: { x: BW * 0.28, y: BH * 0.76 }, heroEll: [190, 44],
+          foeBox: { x: BW * 0.05, y: BH * 0.07, w: BW * 0.4 }, heroBox: { x: BW * 0.55, y: BH * 0.55, w: BW * 0.4 },
+          boxH: BH * 0.18, boxY: BH * 0.8,
+        };
 
-    const foeHome = { x: W * 0.7, y: H * 0.42 - 26 };
-    const heroHome = { x: W * 0.28, y: H * 0.76 - 30 };
-    const foe = this.add.sprite(W + 80, foeHome.y, "dungeon", step.foeFrame).setScale(4);
+    const g = this.add.graphics();
+    g.fillStyle(0xf1f5e8, 1).fillRect(-MARGIN, -MARGIN, BW + 2 * MARGIN, BH + 2 * MARGIN);
+    g.fillStyle(0xd9ecc4, 1).fillRect(-MARGIN, BH * 0.5, BW + 2 * MARGIN, MARGIN + BH);
+    g.fillStyle(0xa3d17f, 1).fillEllipse(lay.foe.x, lay.foe.y, lay.foeEll[0], lay.foeEll[1]);
+    g.lineStyle(2, 0x6aa150, 1).strokeEllipse(lay.foe.x, lay.foe.y, lay.foeEll[0], lay.foeEll[1]);
+    g.fillStyle(0xa3d17f, 1).fillEllipse(lay.hero.x, lay.hero.y, lay.heroEll[0], lay.heroEll[1]);
+    g.lineStyle(2, 0x6aa150, 1).strokeEllipse(lay.hero.x, lay.hero.y, lay.heroEll[0], lay.heroEll[1]);
+
+    const foeHome = { x: lay.foe.x, y: lay.foe.y - 26 };
+    const heroHome = { x: lay.hero.x, y: lay.hero.y - 30 };
+    const foe = this.add.sprite(BW + 80, foeHome.y, "dungeon", step.foeFrame).setScale(4);
     const heroB = this.add.sprite(-80, heroHome.y, "dungeon", HERO_FRAME).setScale(4.5);
 
-    const foeBox = this.hpBox(W * 0.05, H * 0.07, step.foeName);
-    const heroBox = this.hpBox(W * 0.55, H * 0.55, "AGENT");
+    const foeBox = this.hpBox(lay.foeBox.x, lay.foeBox.y, lay.foeBox.w, step.foeName);
+    const heroBox = this.hpBox(lay.heroBox.x, lay.heroBox.y, lay.heroBox.w, "AGENT");
 
-    const boxY = H * 0.8;
+    const boxY = lay.boxY;
     const box = this.add.graphics();
-    box.fillStyle(0xffffff, 1).fillRoundedRect(W * 0.02, boxY, W * 0.96, H * 0.18, 4);
-    box.lineStyle(3, 0x334155, 1).strokeRoundedRect(W * 0.02, boxY, W * 0.96, H * 0.18, 4);
-    const say = this.text(W * 0.05, boxY + 9, "", {
+    box.fillStyle(0xffffff, 1).fillRoundedRect(BW * 0.02, boxY, BW * 0.96, lay.boxH, 4);
+    box.lineStyle(3, 0x334155, 1).strokeRoundedRect(BW * 0.02, boxY, BW * 0.96, lay.boxH, 4);
+    const say = this.text(BW * 0.05, boxY + 9, "", {
       fontFamily: PIXEL_FONT,
       fontSize: "8px",
       color: "#1f2937",
       lineSpacing: 6,
-      wordWrap: { width: W * 0.9 },
+      wordWrap: { width: BW * 0.9 },
     });
-    const more = this.add.triangle(W * 0.95, H * 0.95, 0, 0, 8, 0, 4, 6, 0x334155).setVisible(false);
-    const hint = this.text(W * 0.97, boxY - 3, "CLICK OR SPACE = NEXT", { fontFamily: PIXEL_FONT, fontSize: "5px", color: "#475569" }).setOrigin(1, 1);
+    const more = this.add.triangle(BW * 0.95, boxY + lay.boxH - 8, 0, 0, 8, 0, 4, 6, 0x334155).setVisible(false);
+    const hint = this.text(BW * 0.97, boxY - 3, "CLICK OR SPACE = NEXT", { fontFamily: PIXEL_FONT, fontSize: "5px", color: "#475569" }).setOrigin(1, 1);
 
     L.add([g, foe, heroB, foeBox.root, heroBox.root, box, say, more, hint]);
 
@@ -552,7 +617,7 @@ export class WorldScene extends Phaser.Scene {
       const line = lines.shift();
       if (!line) {
         this.advanceDialog = null;
-        this.showResult(step.won, () => endBattle());
+        this.showResult(step.won, { w: BW, h: BH }, () => endBattle());
         return;
       }
       switch (line.cue) {
@@ -583,6 +648,10 @@ export class WorldScene extends Phaser.Scene {
         onComplete: () => {
           if (this.destroyed) return;
           L.setVisible(false);
+          if (this.stage) {
+            this.stage = null;
+            this.fitCamera();
+          }
           this.stampShop(step.won);
           this.onResult(step.decisionId, step.won);
           this.time.delayedCall(400, () => this.advance());
@@ -625,8 +694,7 @@ export class WorldScene extends Phaser.Scene {
     this.advanceDialog = () => (done ? go() : finish());
   }
 
-  private hpBox(x: number, y: number, name: string) {
-    const w = W * 0.4;
+  private hpBox(x: number, y: number, w: number, name: string) {
     const bg = this.add.graphics();
     bg.fillStyle(0xfffbeb, 1).fillRoundedRect(0, 0, w, 30, 4);
     bg.lineStyle(2, 0x334155, 1).strokeRoundedRect(0, 0, w, 30, 4);
@@ -652,11 +720,11 @@ export class WorldScene extends Phaser.Scene {
     };
   }
 
-  private showResult(won: boolean, onDone: () => void) {
+  private showResult(won: boolean, dims: { w: number; h: number }, onDone: () => void) {
     const title = won ? "TRADE ALLOWED!" : "TRADE BLOCKED!";
     const sub = won ? "IT FOLLOWED THE RULES" : "YOUR MONEY IS SAFE";
-    const dim = this.add.rectangle(W / 2, H / 2, W + 2 * MARGIN, H + 2 * MARGIN, 0x000000, 0.5).setDepth(150);
-    const banner = this.plate(W / 2, H * 0.45, title, {
+    const dim = this.add.rectangle(dims.w / 2, dims.h / 2, dims.w + 2 * MARGIN, dims.h + 2 * MARGIN, 0x000000, 0.5).setDepth(150);
+    const banner = this.plate(dims.w / 2, dims.h * 0.45, title, {
       size: 14,
       bg: won ? 0x15803d : 0xb91c1c,
       line2: sub,

@@ -12,6 +12,10 @@ import {
   prettyAmount,
   doorCol,
   battleLines,
+  battleStageFor,
+  isPortraitScreen,
+  portraitTownZoom,
+  TILE,
   HOME,
   HOME_STAND,
   UNKNOWN_STAND,
@@ -304,5 +308,37 @@ describe("battle wording", () => {
     expect(fine).not.toContain("less than promised");
     const cancelled = battleLines({ id: "1", commit: commit({}), settle: null, cancelled: true }, "NVIDIA").map((l) => l.text).join(" ");
     expect(cancelled).toContain("changed its mind");
+  });
+});
+
+describe("fitting the game to the screen", () => {
+  const townW = WORLD_COLS * TILE;
+  const townH = WORLD_ROWS * TILE;
+
+  it("a screen is portrait only when it is taller than wide", () => {
+    expect(isPortraitScreen(750, 1624)).toBe(true);
+    expect(isPortraitScreen(1280, 800)).toBe(false);
+    expect(isPortraitScreen(800, 800)).toBe(false);
+  });
+
+  it("a landscape battle is drawn on the town's own rectangle, as it always was", () => {
+    expect(battleStageFor(1280, 800)).toEqual({ w: townW, h: townH, portrait: false });
+  });
+
+  it("a portrait battle gets a stage as wide as the phone can make readable, with the screen's proportions", () => {
+    const stage = battleStageFor(750, 1624);
+    expect(stage.portrait).toBe(true);
+    expect(stage.w).toBe(240);
+    expect(stage.h).toBe(Math.round((240 * 1624) / 750));
+    // 8px dialogue text at the zoom that fits this stage is ~12 CSS px on a 2x phone
+    const zoom = Math.min(750 / stage.w, 1624 / stage.h) * 0.97;
+    expect((8 * zoom) / 2).toBeGreaterThan(10);
+  });
+
+  it("on a phone the town is zoomed until its shop signs can be read, and never less than fitting it all", () => {
+    const zoom = portraitTownZoom(750, 1624);
+    expect((6 * zoom) / 2).toBeGreaterThan(8); // a 6px sign becomes at least ~8 CSS px
+    // a tall tablet-sized portrait window: fitting the whole town is already the bigger zoom
+    expect(portraitTownZoom(2000, 2100)).toBeGreaterThanOrEqual(Math.min(2000 / townW, 2100 / townH) * 0.97);
   });
 });

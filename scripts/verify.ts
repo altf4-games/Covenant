@@ -29,6 +29,10 @@
  * And for settles:
  *   FALSE_SETTLE        a settle points at a transaction that moved none of the wallet's stock
  * And for the scan itself:
+ *   RPC_DISAGREEMENT    (cross-checked runs) a second, independent RPC produced a
+ *                       different report for the same blocks: one of them is
+ *                       lagging, pruned or lying, and a report that depends on which
+ *                       one you asked can't be trusted
  *   INCOMPLETE_RANGE    the scan doesn't include Covenant's deployment, so tokens
  *                       configured and trades made before it would be invisible
  *   UNTRACKED_SWAP      the wallet spent the quote token and received some other
@@ -41,6 +45,8 @@
  *                       attempt, not a trade. Without this, anyone could send
  *                       1 wei of a stock to the wallet and turn the public
  *                       reconciliation red for good.
+ *   CROSS_CHECK_UNAVAILABLE  no second RPC could complete the scan, so the report rests
+ *                       on one RPC's word (it is a notice, not a pass)
  *   QUOTE_OUTFLOW       the wallet paid out the quote token in a transaction that
  *                       moved no configured stock and brought no token back: a
  *                       plain payment or transfer. It can be legitimate (paying for
@@ -80,7 +86,7 @@ const DEFAULT_CHUNK = 5_000;
 /** BSC's wrapped BNB: refunds and gas top-ups arrive as this and aren't an untracked stock. */
 const WBNB = "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c";
 
-type Log = { address: string; topics: string[]; data: string; blockNumber: string; transactionHash: string; transactionIndex: string };
+type Log = { address: string; topics: string[]; data: string; blockNumber: string; transactionHash: string; transactionIndex: string; logIndex?: string };
 
 export type ViolationKind =
   | "UNMATCHED_TRADE"
@@ -97,10 +103,11 @@ export type ViolationKind =
   | "AGENT_MISMATCH"
   | "SWAP_AFTER_REVOKE"
   | "UNTRACKED_SWAP"
+  | "RPC_DISAGREEMENT"
   | "INCOMPLETE_RANGE";
 
 export interface Notice {
-  kind: "INBOUND_TRANSFER" | "QUOTE_OUTFLOW";
+  kind: "INBOUND_TRANSFER" | "QUOTE_OUTFLOW" | "CROSS_CHECK_UNAVAILABLE";
   txHash: string;
   detail: string;
 }
@@ -123,17 +130,47 @@ export interface ReconcileOptions {
 const topicAddr = (a: string) => "0x" + a.toLowerCase().replace(/^0x/, "").padStart(64, "0");
 const addrFromTopic = (t: string) => "0x" + t.slice(-40).toLowerCase();
 
-async function rpc(rpcUrls: string[], method: string, params: unknown[]) {
-  return (await jsonRpcWithFailover(method, params, { rpcUrls })).result;
+/**
+ * The RPC calls of one reconciliation, through failover, remembering which
+ * endpoints actually answered (so a second opinion can ask a different one).
+ */
+function makeClient(rpcUrls: string[]) {
+  const used = new Set<string>();
+  return {
+    used,
+    async call(method: string, params: unknown[]) {
+      const r = await jsonRpcWithFailover(method, params, { rpcUrls });
+      used.add(r.rpcUrl);
+      return r.result;
+    },
+    async ethCall(to: string, data: string) {
+      const r = await ethCallWithFailover(to, data, { rpcUrls });
+      used.add(r.rpcUrl);
+      return r.result;
+    },
+  };
 }
+type Client = ReturnType<typeof makeClient>;
 
-/** eth_getLogs over [from, to] in fixed-size chunks, because public RPCs cap the range. */
-async function getLogs(rpcUrls: string[], filter: { address: string | string[]; topics: (string | null)[] }, from: number, to: number, chunk: number): Promise<Log[]> {
+/**
+ * eth_getLogs over [from, to] in fixed-size chunks, because public RPCs cap the
+ * range. A log an RPC returns twice (same transaction, same log index) is one
+ * log: counting it twice would turn an honest trade into a mismatch.
+ */
+async function getLogs(client: Client, filter: { address: string | string[]; topics: (string | null)[] }, from: number, to: number, chunk: number): Promise<Log[]> {
   const out: Log[] = [];
+  const seen = new Set<string>();
   for (let start = from; start <= to; start += chunk) {
     const end = Math.min(to, start + chunk - 1);
-    const logs = await rpc(rpcUrls, "eth_getLogs", [{ ...filter, fromBlock: "0x" + start.toString(16), toBlock: "0x" + end.toString(16) }]);
-    out.push(...logs);
+    const logs: Log[] = await client.call("eth_getLogs", [{ ...filter, fromBlock: "0x" + start.toString(16), toBlock: "0x" + end.toString(16) }]);
+    for (const log of logs) {
+      if (log.logIndex !== undefined) {
+        const key = `${log.transactionHash.toLowerCase()}:${log.logIndex}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+      }
+      out.push(log);
+    }
   }
   return out;
 }
@@ -144,30 +181,31 @@ const before = (a: { blockNumber: number; txIndex: number }, b: { blockNumber: n
 
 export async function reconcile(opts: ReconcileOptions) {
   const { rpcUrls, covenantAddress, fromBlock } = opts;
+  const client = makeClient(rpcUrls);
   const chunk = opts.chunkSize ?? DEFAULT_CHUNK;
-  const toBlock = opts.toBlock ?? Number(BigInt(await rpc(rpcUrls, "eth_blockNumber", [])));
+  const toBlock = opts.toBlock ?? Number(BigInt(await client.call("eth_blockNumber", [])));
 
-  const agent = addrFromTopic((await ethCallWithFailover(covenantAddress, SELECTOR_AGENT, { rpcUrls })).result);
-  const quoteToken = addrFromTopic((await ethCallWithFailover(covenantAddress, SELECTOR_QUOTE_TOKEN, { rpcUrls })).result);
-  const decisionTtl = Number(BigInt((await ethCallWithFailover(covenantAddress, SELECTOR_DECISION_TTL, { rpcUrls })).result));
+  const agent = addrFromTopic((await client.ethCall(covenantAddress, SELECTOR_AGENT)));
+  const quoteToken = addrFromTopic((await client.ethCall(covenantAddress, SELECTOR_QUOTE_TOKEN)));
+  const decisionTtl = Number(BigInt((await client.ethCall(covenantAddress, SELECTOR_DECISION_TTL))));
 
   const blockTimes = new Map<number, number>();
   const blockTime = async (n: number) => {
-    if (!blockTimes.has(n)) blockTimes.set(n, Number(BigInt((await rpc(rpcUrls, "eth_getBlockByNumber", ["0x" + n.toString(16), false])).timestamp)));
+    if (!blockTimes.has(n)) blockTimes.set(n, Number(BigInt((await client.call("eth_getBlockByNumber", ["0x" + n.toString(16), false])).timestamp)));
     return blockTimes.get(n)!;
   };
   const pos = (log: Log) => ({ blockNumber: Number(BigInt(log.blockNumber)), txIndex: Number(BigInt(log.transactionIndex)) });
 
   // Every token the owner ever configured, from Covenant's own events, and
   // when any of them was later disallowed.
-  const configLogs = await getLogs(rpcUrls, { address: covenantAddress, topics: [TOKEN_CONFIGURED_TOPIC] }, fromBlock, toBlock, chunk);
+  const configLogs = await getLogs(client, { address: covenantAddress, topics: [TOKEN_CONFIGURED_TOPIC] }, fromBlock, toBlock, chunk);
   const stockTokens = [...new Set(configLogs.map((l) => addrFromTopic(l.topics[1])))];
   const disallowed = configLogs
     .filter((l) => BigInt(l.data.slice(0, 66)) === 0n)
     .map((l) => ({ token: addrFromTopic(l.topics[1]), ...pos(l) }));
 
   // Covenant's decision events, agent rotations and revokes.
-  const covenantLogs = await getLogs(rpcUrls, { address: covenantAddress, topics: [] }, fromBlock, toBlock, chunk);
+  const covenantLogs = await getLogs(client, { address: covenantAddress, topics: [] }, fromBlock, toBlock, chunk);
   const commits = new Map<string, CommittedDecision & { blockNumber: number; txIndex: number }>();
   const settles: Array<SettledDecision & { settleTx: string }> = [];
   const agentChanges: Array<{ agent: string; blockNumber: number; txIndex: number }> = [];
@@ -201,7 +239,7 @@ export async function reconcile(opts: ReconcileOptions) {
     let first = agent;
     if (tenures.length > 0) {
       try {
-        const res = await rpc(rpcUrls, "eth_call", [{ to: covenantAddress, data: SELECTOR_AGENT }, "0x" + fromBlock.toString(16)]);
+        const res = await client.call("eth_call", [{ to: covenantAddress, data: SELECTOR_AGENT }, "0x" + fromBlock.toString(16)]);
         first = addrFromTopic(res);
       } catch {
         throw new Error(
@@ -232,13 +270,13 @@ export async function reconcile(opts: ReconcileOptions) {
   // tokens the mandate covers (an 8-token theme was 18).
   const watched = [...stockTokens, quoteToken];
   for (const wallet of wallets) {
-    for (const log of await getLogs(rpcUrls, { address: watched, topics: [TRANSFER_TOPIC, null, topicAddr(wallet)] }, fromBlock, toBlock, chunk)) {
+    for (const log of await getLogs(client, { address: watched, topics: [TRANSFER_TOPIC, null, topicAddr(wallet)] }, fromBlock, toBlock, chunk)) {
       const token = log.address.toLowerCase();
       const m = touch(log, wallet);
       if (token === quoteToken) m.quoteIn += BigInt(log.data);
       else m.stock.set(token, (m.stock.get(token) ?? 0n) + BigInt(log.data));
     }
-    for (const log of await getLogs(rpcUrls, { address: watched, topics: [TRANSFER_TOPIC, topicAddr(wallet)] }, fromBlock, toBlock, chunk)) {
+    for (const log of await getLogs(client, { address: watched, topics: [TRANSFER_TOPIC, topicAddr(wallet)] }, fromBlock, toBlock, chunk)) {
       const token = log.address.toLowerCase();
       const m = touch(log, wallet);
       if (token === quoteToken) m.quoteOut += BigInt(log.data);
@@ -270,7 +308,7 @@ export async function reconcile(opts: ReconcileOptions) {
 
   const stockSet = new Set(stockTokens);
   async function receivedUnconfiguredToken(txHash: string, wallet: string): Promise<boolean> {
-    const receipt = await rpc(rpcUrls, "eth_getTransactionReceipt", [txHash]);
+    const receipt = await client.call("eth_getTransactionReceipt", [txHash]);
     for (const l of (receipt?.logs ?? []) as Log[]) {
       if (l.topics[0] !== TRANSFER_TOPIC || l.topics.length !== 3) continue;
       if (addrFromTopic(l.topics[2]) !== wallet) continue;
@@ -319,7 +357,7 @@ export async function reconcile(opts: ReconcileOptions) {
     // USDT with the dust. What makes it not a trade is that the wallet paid nothing.
     const inboundOnly = [...m.stock.values()].every((d) => d >= 0n) && m.quoteOut === 0n;
     if (inboundOnly && !settlesBySwap.has(txHash)) {
-      const tx = await rpc(rpcUrls, "eth_getTransactionByHash", [txHash]);
+      const tx = await client.call("eth_getTransactionByHash", [txHash]);
       if (tx && String(tx.from).toLowerCase() !== m.wallet) {
         notices.push({ kind: "INBOUND_TRANSFER", txHash, detail: `${m.wallet} was sent stock by ${String(tx.from).toLowerCase()}, who paid nothing and wasn't the wallet` });
         continue;
@@ -413,6 +451,7 @@ export async function reconcile(opts: ReconcileOptions) {
 
   return {
     agent,
+    rpcsUsed: [...client.used],
     agents: wallets,
     quoteToken,
     stockTokens,
@@ -427,6 +466,56 @@ export async function reconcile(opts: ReconcileOptions) {
   };
 }
 
+type Report = Awaited<ReturnType<typeof reconcile>>;
+
+/** What two honest scans of the same blocks must agree on, in a comparable form. */
+const fingerprint = (r: Report) =>
+  JSON.stringify({
+    decisions: r.decisions,
+    trades: r.trades,
+    matched: r.matched.map((m) => m.txHash).sort(),
+    violations: r.violations.map((v) => `${v.kind}:${v.txHash ?? ""}:${v.decisionId ?? ""}`).sort(),
+  });
+
+/**
+ * `reconcile`, then the same scan again on a different RPC, pinned to the same
+ * last block. The reconciliation trusts whichever RPC answers to have returned
+ * every log; one that silently drops Transfer logs would hide an unmatched
+ * trade. Two independent endpoints disagreeing is reported as
+ * RPC_DISAGREEMENT. If no other RPC can complete the scan (free endpoints cap
+ * ranges and refuse old blocks), the report says so instead of pretending.
+ */
+export async function reconcileCrossChecked(opts: ReconcileOptions): Promise<Report> {
+  const report = await reconcile(opts);
+  const others = opts.rpcUrls.filter((u) => !report.rpcsUsed.includes(u));
+  let second: Report | undefined;
+  for (const url of others) {
+    try {
+      second = await reconcile({ ...opts, rpcUrls: [url], toBlock: report.toBlock });
+      break;
+    } catch {
+      // this endpoint couldn't complete the scan; try the next
+    }
+  }
+  if (!second) {
+    report.notices.push({
+      kind: "CROSS_CHECK_UNAVAILABLE",
+      txHash: "",
+      detail: `no second RPC could complete the scan (${others.length} other candidate${others.length === 1 ? "" : "s"}); this report rests on ${report.rpcsUsed.join(", ")} alone`,
+    });
+    return report;
+  }
+  if (fingerprint(report) !== fingerprint(second)) {
+    report.violations.push({
+      kind: "RPC_DISAGREEMENT",
+      detail: `${report.rpcsUsed.join(", ")} and ${second.rpcsUsed.join(", ")} returned different reports for blocks ${report.fromBlock}-${report.toBlock} ` +
+        `(decisions ${report.decisions} vs ${second.decisions}, trades ${report.trades} vs ${second.trades}, violations ${report.violations.length} vs ${second.violations.length})`,
+    });
+    report.clean = false;
+  }
+  return report;
+}
+
 if (import.meta.url === `file://${process.argv[1]}`) {
   (async () => {
     try {
@@ -439,13 +528,15 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     if (!covenantAddress || !fromBlock) throw new Error("Set COVENANT_ADDRESS and VERIFY_FROM_BLOCK (Covenant's deployment block).");
     const rpcUrls = [process.env.BSC_RPC_URL, ...DEFAULT_BSC_RPCS].filter((u): u is string => Boolean(u));
 
-    const report = await reconcile({ rpcUrls, covenantAddress, fromBlock: Number(fromBlock) });
+    // A second RPC checks the first by default; VERIFY_CROSS_CHECK=0 skips it (it doubles the scan).
+    const scan = process.env.VERIFY_CROSS_CHECK === "0" ? reconcile : reconcileCrossChecked;
+    const report = await scan({ rpcUrls, covenantAddress, fromBlock: Number(fromBlock) });
     console.log(`Covenant reconciliation, blocks ${report.fromBlock}-${report.toBlock}`);
     console.log(`  agent wallet: ${report.agent}${report.agents.length > 1 ? ` (all holders: ${report.agents.join(", ")})` : ""}`);
     console.log(`  decisions:    ${report.decisions}`);
     console.log(`  trades:       ${report.trades} (${report.matched.length} matched to a settled decision)\n`);
     for (const m of report.matched) console.log(`[OK]  ${m.txHash} ${m.side} decision #${m.decisionId}, received ${m.received}`);
-    for (const n of report.notices) console.log(`[notice: ${n.kind}] ${n.txHash} - ${n.detail}`);
+    for (const n of report.notices) console.log(`[notice: ${n.kind}]${n.txHash ? ` ${n.txHash}` : ""} - ${n.detail}`);
     for (const v of report.violations) console.log(`[${v.kind}] ${v.txHash ?? ""}${v.decisionId ? ` decision #${v.decisionId}` : ""} - ${v.detail}`);
     console.log(report.clean ? "\nClean: every trade maps to an approved decision." : `\n${report.violations.length} violation(s).`);
     process.exitCode = report.clean ? 0 : 1;

@@ -419,3 +419,27 @@ export function buildQuest(decisions: Decision[], start: Spot = HOME_STAND): Que
   }
   return steps;
 }
+
+// ---------------------------------------------------------------------------
+// Screen fitting. The town is 32x18 tiles, wider than tall, so on a phone held
+// upright fitting it to the width leaves signs a few pixels tall and most of
+// the screen empty. Portrait screens get a follow camera and a battle stage
+// shaped like the screen instead.
+
+/** How much of the town a portrait screen shows at once, in world pixels. */
+export const PORTRAIT_VISIBLE_WORLD_W = 240;
+/** Width of the battle stage on a portrait screen, in world pixels (8px text becomes ~12px on a phone). */
+export const PORTRAIT_STAGE_W = 240;
+
+export const isPortraitScreen = (gw: number, gh: number) => gw < gh;
+
+/** The camera zoom on a portrait screen: enough to read the signs, never less than fitting the whole town. */
+export function portraitTownZoom(gw: number, gh: number): number {
+  return Math.max(Math.min(gw / (WORLD_COLS * TILE), gh / (WORLD_ROWS * TILE)) * 0.97, gw / PORTRAIT_VISIBLE_WORLD_W);
+}
+
+/** Where a battle is drawn: the town's own rectangle, or on a portrait screen a tall stage with the screen's shape. */
+export function battleStageFor(gw: number, gh: number): { w: number; h: number; portrait: boolean } {
+  if (!isPortraitScreen(gw, gh)) return { w: WORLD_COLS * TILE, h: WORLD_ROWS * TILE, portrait: false };
+  return { w: PORTRAIT_STAGE_W, h: Math.round((PORTRAIT_STAGE_W * gh) / gw), portrait: true };
+}
