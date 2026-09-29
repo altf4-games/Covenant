@@ -193,29 +193,34 @@ npm install
 npx hardhat test
 ```
 
-Seventeen suites:
+Nineteen suites in `test/` (194 tests, one full `npm test` run, all passing), plus two in `frontend/` (26 tests, `cd frontend && npm test`). Several suites run live against a fork or Binance's real endpoints; a hosted CI runner can be geo-blocked from Binance's API, in which case those tests skip rather than fail. Also checked in CI: `npm run typecheck` (types for the scripts, tests and MCP server) and the frontend's lint and build.
 
-- `test/Covenant.unit.ts` (50): in-memory chain with a mock ERC20. Every denial reason, including Feature 1's drift rule (with the real NVDAB numbers from 2026-09-25) and the red-team H7 daily-notional cap (with a test that deliberately demonstrates its disclosed midnight-boundary limitation rather than hiding it), the three-distinct-roles rule, agent-only commit/settle/cancel (a stranger, the owner and the updater all revert), the settle and cancel lifecycle, the understated-quote attack, Feature 3's position cap, red-team H11's self-describing `DecisionCommitted` event, Feature 2's `setMandateForTokens` batch setter, preview/commit agreement, and H14/H15/H16's fixes (agent-scoped settle/cancel, absurd-amount denials, and the drift-at-worst-price rewrite).
+The suites that deploy the contract, use a fork, or call live endpoints:
+
+- `test/Covenant.unit.ts` (55): in-memory chain with a mock ERC20. Every denial reason, including Feature 1's drift rule (with the real NVDAB numbers from 2026-09-25) and the red-team H7 daily-notional cap (with a test that deliberately demonstrates its disclosed midnight-boundary limitation rather than hiding it), the three-distinct-roles rule, agent-only commit/settle/cancel (a stranger, the owner and the updater all revert), the settle and cancel lifecycle, the understated-quote attack, Feature 3's position cap, red-team H11's self-describing `DecisionCommitted` event, Feature 2's `setMandateForTokens` batch setter, preview/commit agreement, and H14/H15/H16's fixes (agent-scoped settle/cancel, absurd-amount denials, and the drift-at-worst-price rewrite).
 - `test/Covenant.fork.ts` (7): a real fork of BSC mainnet with the real Agentic Wallet impersonated as the agent, so the position cap reads the NVDAB it really bought on Day 1. Includes a full commit, real swap and settle loop against live PancakeSwap liquidity.
-- `test/nyse-calendar.ts` (8): the NYSE calendar against real dates, including a holiday, an early close, both daylight-saving switches, and a year with no data (it refuses).
+- `test/nyse-calendar.ts` (12): the NYSE calendar against real dates, including a holiday, an early close, both daylight-saving switches, and a year with no data (it refuses).
 - `test/oracle-updater.live.ts` (4): Binance's real status, price and K-line endpoints, posted on chain by the real updater code and read back; the last close is re-derived independently from a separate K-line fetch.
 - `test/skill-cli.live.ts` (17): the skill's own commands against a spawned fork node, including its commit, settle and cancel calldata sent as real transactions, Feature 2's `compile-mandate` turning a real plain-English sentence into one real transaction that configures eight real tokens, and `classify-execution-mode` against the real Day-1 router address.
 - `test/status-page.live.ts` (4): the page's event reading, joined per decision, and the fork-boundary timeout. Runs its boundary test last on purpose (see below).
-- `test/mcp-server.live.ts` (8): the MCP server as a real subprocess, driven by the real MCP client.
+- `test/mcp-server.live.ts` (9): the MCP server as a real subprocess, driven by the real MCP client.
 - `test/off-hours-logger.live.ts` (2): the cron logger against Binance's live endpoints.
 - `test/judge.live.ts` (8): `judge.ts` against real commits, settles and cancels, decoded field by field against ethers' own parsing, plus a never-mined hash, a wrong contract, and a dead RPC ahead of a working one.
 - `test/chaos-fork.live.ts` (1): `npm run chaos-fork` itself, as a subprocess.
 - `test/verify.live.ts` (2): `verify.ts` against real swaps, clean and with every kind of violation.
+- `test/try-to-break-it-demo.live.ts` (1): `npm run try-to-break-it` itself, as a subprocess: an honest trade stays clean and a swap with no commit is caught.
+- `test/generate-narration.ts` (4): the play-by-play prompts are built only from real decision fields (no network; the Gemini call itself is not tested).
 
 The live suites share `scripts/lib/local-fork.ts`, which deploys with the real `scripts/deploy.ts` and posts the oracle with the real `scripts/oracle-updater.ts`, so every one of them also exercises the path the mainnet deployment will run. They're slower than a typical Hardhat suite; see below for why.
 
-Four more suites need no fork and no network at all - fast, pure-function coverage for logic the live suites above only exercise on the happy path, or don't touch:
+Six more suites are pure-function or mock-RPC coverage, with no fork, no network and no contract deployment: fast checks of logic the suites above only exercise on the happy path, or don't touch:
 
 - `test/verify.unit.ts` (21): `reconcile()` against a mock JSON-RPC server with crafted logs - H13's overspend repro (a $1-approved buy that really moved $10,000), H14's agent-rotation scoping, a multi-token trade, a revoke, a token disallowed mid-approval, a missed deployment block, `getLogs` chunk boundaries, a stock dusted into the wallet by a stranger (with and without USDT bundled in), a quote-token spend on an unconfigured stock, USDT leaving the wallet with nothing coming back, and one scan per direction however many tokens are configured. The live suite only ever reconciles one honest trade at a time; this is where the actual violation-detection logic gets tested against something trying to slip past it.
-- `test/skill-cli.unit.ts` (14): the Wallet Skill CLI's own input validation. `resolve` refuses ambiguous chains, the calldata builders refuse a negative amount, a `2^256` amount, a JS number that already lost precision, and a ticker where an address belongs, `compile-mandate` refuses two themes or a bound over 100%, and a stalled response body times out.
+- `test/skill-cli.unit.ts` (17): the Wallet Skill CLI's own input validation. `resolve` refuses ambiguous chains, the calldata builders refuse a negative amount, a `2^256` amount, a JS number that already lost precision, and a ticker where an address belongs, `compile-mandate` refuses two themes or a bound over 100%, and a stalled response body times out.
 - `test/erc8004-update.unit.ts` (3): the identity-update script's document builder, which adds the deployed contract and the agent's own id without duplicating on a re-run.
 - `test/oracle-guards.unit.ts` (7): the price-versus-candle sanity check and the multi-token oracle spec (`theme:<key>` or a comma list), no network.
-- `test/status-page-lib.unit.ts` (12): the sell-side wording in `describeDecision`/`guardedVsUnguarded` (the live suite only ever commits buy-side decisions), and `resolveFromBlock`'s input validation (NaN, negative, non-integer).
+- `test/drift.unit.ts` (5): every copy of a contract fact matches the compiled contract: the CLI's selectors, the event topics in `judge.ts` and `verify.ts`, and the `DenialReason` list in the contract, the CLI, the status page and the game's monster, attack and explanation tables.
+- `test/status-page-lib.unit.ts` (15): the sell-side wording in `describeDecision`/`guardedVsUnguarded` (the live suite only ever commits buy-side decisions), and `resolveFromBlock`'s input validation (NaN, negative, non-integer).
 
 ### What needs a secret, and what needs an archive RPC
 
@@ -223,7 +228,7 @@ Not every test or script here runs the same way. Some need nothing but a public 
 
 | Needs | Examples | Why |
 |---|---|---|
-| Nothing (public RPC only) | `test/Covenant.unit.ts`, `test/verify.unit.ts`, `test/skill-cli.unit.ts`, `test/status-page-lib.unit.ts`, `test/oracle-guards.unit.ts`, `test/erc8004-update.unit.ts`, `test/nyse-calendar.ts` | Pure logic, or a mock chain/RPC - no real network call. |
+| Nothing (public RPC only) | `test/Covenant.unit.ts`, `test/verify.unit.ts`, `test/skill-cli.unit.ts`, `test/status-page-lib.unit.ts`, `test/oracle-guards.unit.ts`, `test/erc8004-update.unit.ts`, `test/drift.unit.ts`, `test/nyse-calendar.ts` | Pure logic, or a mock chain/RPC - no real network call. |
 | `WEB3_API_KEY` / `WEB3_API_SECRET` | `test/oracle-updater.live.ts`, `test/skill-cli.live.ts`, `scripts/oracle-updater.ts` | Reads Binance's RWA Data/Market APIs (real price, real market status). |
 | `GEMINI_API_KEY` | `scripts/generate-narration.ts` | Batch play-by-play narration - see "Running the status page" below. |
 | An archive-capable RPC (`bsc-dataseed`/`1rpc` verified live to work; `publicnode` refuses old receipts) | `scripts/verify.ts` run against a wide historical range, the frontend's snapshot/re-verification mode | A public RPC's own `eth_getLogs` range cap and receipt-pruning window (docs/partner-feedback/friction-log.md) - `bsc-dataseed` returns "limit exceeded" past a few thousand blocks, `publicnode` won't serve receipts for old transactions at all. `status-page/lib.mjs`'s `fetchDecisionEvents` chunks its own `eth_getLogs` calls (`DEFAULT_LOGS_CHUNK_BLOCKS`) for exactly this reason, mirroring the chunking `scripts/verify.ts` already needed. |
@@ -240,6 +245,8 @@ cd frontend && npm install && npm run dev
 ```
 
 Open the printed localhost URL and point it at an RPC URL and a deployed Covenant (or pass `?rpc=...&contract=...&fromBlock=...`). `scripts/seed-status-page-demo.ts` deploys to a local `hardhat node --fork` and records a denial, a settled trade and a cancelled one, if you want something to look at - works against either version, since both take the same query params.
+
+`cd frontend && npm run build` produces a static site in `frontend/dist/`. Its asset paths are relative, so it works at a site root or under a sub-path such as GitHub Pages' `/<repo>/`. The page shows only what its RPC returns, and says which RPC host and chain that was; to check a deployment independently, run `verify.ts`.
 
 `frontend`'s tests (`cd frontend && npm test`, Vitest, Node 22+) cover the game's logic rather than its pixels: the town layout, the road routing, and the battle script for every real `DenialReason`. The rendering itself was checked by playing it in a browser.
 
@@ -389,6 +396,23 @@ Each one was reproduced with a throwaway test first, then fixed and covered by a
 | The settle instructions and `verify.ts` used different amounts | The skill said "the Transfer to the wallet"; `verify.ts` uses the wallet's net movement across the transaction | The skill says net movement |
 | The status page pulled a floating `ethers@6` from a CDN | An unpinned version can change under a judge | Pinned to the installed version |
 | The status page's amounts went through `Number` | Precision loss on large values (display only) | Formatted from the decimal string |
+
+### An eighth pass: mechanical checks instead of reading
+
+Earlier passes read code for risk. This one ran everything that can be run: `tsc` over the parts the frontend build doesn't cover, both linters, `npm audit` (0 vulnerabilities), the contract's coverage report, a check that every relative link in this README resolves, a check of every copy of a contract fact against the compiled contract, and an unused-export scan.
+
+| Finding | Fix |
+|---|---|
+| Nothing outside the frontend was type-checked: 43 real errors in the scripts, tests and MCP server (mostly the untyped CLI, plus a wrong type import, `unknown` response bodies and implicit `any`) | JSDoc types on the CLI, every error fixed, `npm run typecheck`, and a CI step |
+| `Covenant.sol` was at 97% line coverage; the uncovered lines were the zero-address checks on `setAgent` and `setOracleUpdater`, cancelling or settling a denied decision, and a closed-market buy with no minimum | Three tests; 100% of lines and statements |
+| Selectors, event topics and the `DenialReason` list are copied into the CLI, `judge.ts`, `verify.ts`, the status page and the game; a drifted copy fails silently | `test/drift.unit.ts` checks every copy against the compiled contract |
+| A forged `?rpc=` link makes the page show made-up decisions under Covenant's branding | The page and the trading card name the RPC host and chain, and flag anything but 56 |
+| The frontend used absolute `/game/...` paths, so it broke at a sub-path such as GitHub Pages | `base: './'` and `BASE_URL`-relative assets |
+| The MCP server passed any string on as an address or URL | Validated at the boundary: a 20-byte address, an http(s) URL |
+| Two oracle-updater runs could overlap and race on the nonce | A lock directory in the cron script (tested: concurrent runs skip, a stale lock is broken) |
+| The 2027 NYSE holidays and the walk-back across New Year were untested | Four tests, including every full closure in both years |
+| This README's test section listed five suites under "Four more", 16 of 18 files, and stale counts | Corrected against a full run: 194 tests; `npm test` is the source, not this list |
+| Unused variables, a dead constant, test libraries in the frontend's runtime dependencies, no frontend lint in CI | Removed, moved to dev dependencies, and added |
 
 ### The one bug only found by running it in a browser
 

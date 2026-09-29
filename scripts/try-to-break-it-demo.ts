@@ -88,8 +88,8 @@ async function main() {
     // friction-log C17 warns about.
     const toAgent = "0x" + env.agentAddress.toLowerCase().slice(2).padStart(64, "0");
     const honestReceived = honestSwap!.logs
-      .filter((l) => l.address.toLowerCase() === NVDAB.toLowerCase() && l.topics[0] === TRANSFER && l.topics[2].toLowerCase() === toAgent)
-      .reduce((sum, l) => sum + BigInt(l.data), 0n);
+      .filter((l: ethers.Log) => l.address.toLowerCase() === NVDAB.toLowerCase() && l.topics[0] === TRANSFER && l.topics[2].toLowerCase() === toAgent)
+      .reduce((sum: bigint, l: ethers.Log) => sum + BigInt(l.data), 0n);
     await (await covenant.settle(committed.args.id, honestSwap!.hash, honestReceived, 1)).wait();
     console.log(`✅ settled with the real swap hash and real received amount: ${honestSwap!.hash}\n`);
     await pause(400);

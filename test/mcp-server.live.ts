@@ -86,6 +86,23 @@ describe("Covenant MCP server (live, real subprocess speaking real MCP protocol)
     });
   });
 
+  it("refuses a malformed address or a non-http RPC URL at the boundary, before any network call", async function () {
+    for (const args of [
+      { rpcUrl: RPC_URL, covenantAddress: "0x123" },
+      { rpcUrl: "file:///etc/passwd", covenantAddress },
+      { rpcUrl: "not a url", covenantAddress },
+    ]) {
+      let refused = false;
+      try {
+        const result = await mcpClient.callTool({ name: "get_mandate_status", arguments: args });
+        refused = (result as any).isError === true;
+      } catch {
+        refused = true;
+      }
+      expect(refused, JSON.stringify(args)).to.equal(true);
+    }
+  });
+
   it("get_mandate_status reads the real mandate just set on the real deployed contract", async function () {
     const result = await mcpClient.callTool({
       name: "get_mandate_status",

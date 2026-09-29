@@ -52,7 +52,6 @@ describe("Covenant v2 (fork, real BSC mainnet state)", function () {
   this.timeout(240_000);
 
   let covenant: any;
-  let covenantAddress: string;
   let updater: any;
   let agent: any;
   let livePrice: bigint;
@@ -67,7 +66,6 @@ describe("Covenant v2 (fork, real BSC mainnet state)", function () {
     agent = await ethers.getSigner(AGENTIC_WALLET);
 
     covenant = await ethers.deployContract("Covenant", [USDT, updater.address, AGENTIC_WALLET, 900, 600]);
-    covenantAddress = await covenant.getAddress();
 
     // The oracle price is the real live one. The halt flag is set to open
     // here on purpose so the allow path can run whatever the market is

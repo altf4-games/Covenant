@@ -40,8 +40,6 @@ export function monsterFor(reason: string): { frame: number; name: string } {
   return MONSTER[reason] ?? UNKNOWN_MONSTER;
 }
 
-export const HERO_MOVE_NAME = "MANDATE CHECK";
-
 const ATTACK_NAME: Record<string, string> = {
   MandateInactive: "EXPIRY CURSE",
   MandateExpired: "EXPIRY CURSE",

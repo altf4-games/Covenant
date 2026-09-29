@@ -63,7 +63,7 @@ export async function web3ApiGet(
     },
     signal: AbortSignal.timeout(15_000),
   });
-  const body = await res.json();
+  const body = (await res.json()) as { code?: number; msg?: string; data?: unknown };
   if (!res.ok || body.code !== 0) {
     throw new Error(`Web3 API GET ${path} failed: HTTP ${res.status} code=${body.code} msg=${body.msg}`);
   }

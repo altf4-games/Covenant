@@ -22,6 +22,9 @@ jobs:
       # next time either lockfile is regenerated locally.
       - run: npm install -g npm@12.0.2
       - run: npm ci
+      # Types for everything the frontend build doesn't cover: scripts, tests,
+      # the MCP server. tsx and Hardhat strip types without checking them.
+      - run: npm run typecheck
       # The live/fork tests deploy to a real forked BSC mainnet and read
       # real chain state over public RPCs (no private key needed - nothing
       # here spends real gas). They can occasionally be slow or flaky under
@@ -47,6 +50,8 @@ jobs:
         with: { node-version: 22 }
       - run: npm install -g npm@12.0.2
       - run: npm ci
+        working-directory: frontend
+      - run: npm run lint
         working-directory: frontend
       - run: npm test
         working-directory: frontend

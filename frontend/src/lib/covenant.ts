@@ -24,6 +24,9 @@ export interface Mandate {
 export interface CovenantSnapshot {
   /** The contract this snapshot was read from (the input box can change afterward). */
   contractAddress: string;
+  /** Where the numbers came from. The page shows only what this RPC said, so it says which one. */
+  rpcHost: string;
+  chainId: number;
   mandate: Mandate;
   tradesUsedToday: bigint;
   stalenessBound: bigint;
@@ -39,6 +42,18 @@ export interface CovenantSnapshot {
   totalDecisions: number;
   latestBlock: number;
 }
+
+/** The host of an RPC URL, without credentials or a path (an API key often sits in the path). */
+export function rpcHostOf(rpcUrl: string): string {
+  try {
+    return new URL(rpcUrl).host;
+  } catch {
+    return "unknown RPC";
+  }
+}
+
+/** BSC mainnet's chain id; a fork of it reports the same one. */
+export const BSC_CHAIN_ID = 56;
 
 /** wei -> a plain decimal string, 18 decimals - every token here uses 18 (verified-facts.md). */
 export function fmtAmount(wei: bigint): string {
@@ -71,6 +86,7 @@ export async function fetchSnapshot(
       covenant.notionalUsedToday(),
       provider.getBlockNumber(),
     ]);
+  const chainId = Number((await provider.getNetwork()).chainId);
 
   const fromBlock = resolveFromBlock(fromBlockInput || undefined, latestBlock);
   const events = await fetchDecisionEvents(covenant, { fromBlock });
@@ -79,6 +95,8 @@ export async function fetchSnapshot(
 
   return {
     contractAddress,
+    rpcHost: rpcHostOf(rpcUrl),
+    chainId,
     mandate: {
       active: mandateRaw.active,
       maxNotionalPerTradeUsd: mandateRaw.maxNotionalPerTradeUsd,

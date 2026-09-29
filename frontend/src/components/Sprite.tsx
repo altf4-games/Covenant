@@ -8,7 +8,7 @@ export function Sprite({ sheet, frame, size = 40 }: { sheet: "dungeon" | "town";
       style={{
         width: size,
         height: size,
-        backgroundImage: `url(/game/kenney-tiny-${sheet}.png)`,
+        backgroundImage: `url(${import.meta.env.BASE_URL}game/kenney-tiny-${sheet}.png)`,
         backgroundSize: `${192 * s}px ${176 * s}px`,
         backgroundPosition: `-${(frame % 12) * 16 * s}px -${Math.floor(frame / 12) * 16 * s}px`,
         imageRendering: "pixelated",

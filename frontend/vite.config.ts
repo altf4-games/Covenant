@@ -9,7 +9,10 @@ import { defineConfig } from 'vite'
 // duplicating it, so nothing here can drift from what's tested there.
 // server.fs.allow widens Vite's dev-server file access past `frontend/`
 // to the repo root so that import can be served in dev.
+// base './': assets resolve relative to the page, so the build works at a site
+// root and under a sub-path (GitHub Pages serves a project at /<repo>/).
 export default defineConfig({
+  base: './',
   plugins: [react(), tailwindcss()],
   server: {
     fs: {

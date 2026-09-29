@@ -22,7 +22,7 @@ function decision(overrides: Record<string, unknown> = {}) {
       minOut: 0n,
       ...overrides,
     },
-    settle: null,
+    settle: null as null | Record<string, unknown>,
     cancelled: false,
   };
 }

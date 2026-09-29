@@ -33,6 +33,20 @@ if [[ "$today" > "$EXPIRY_DATE" || "$today" == "$EXPIRY_DATE" ]]; then
   exit 0
 fi
 
+# One run at a time. Every run signs several transactions from one key, and a
+# run held up by a slow upstream could otherwise still be going when the next
+# starts; two of them at once race on the nonce. mkdir is atomic, and macOS has
+# no flock. A lock left by a killed run is broken once it is 20 minutes old.
+LOCK_DIR="/tmp/covenant-oracle-updater.lock"
+if [[ -d "$LOCK_DIR" ]] && [[ -n "$(find "$LOCK_DIR" -maxdepth 0 -mmin +20 2>/dev/null)" ]]; then
+  rmdir "$LOCK_DIR" 2>/dev/null || true
+fi
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+  echo "[$today] previous oracle-updater run still in progress - skipping this one."
+  exit 0
+fi
+trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
+
 export PATH="$NODE_BIN_DIR:$PATH"
 cd "$REPO_DIR"
 "$NODE_BIN_DIR/npx" tsx scripts/oracle-updater.ts

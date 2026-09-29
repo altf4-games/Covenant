@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { fetchSnapshot, fmtAmount, describeDecision, guardedVsUnguarded, bossFor, tokenName, type CovenantSnapshot, type Decision } from "./lib/covenant";
+import { fetchSnapshot, BSC_CHAIN_ID, fmtAmount, describeDecision, guardedVsUnguarded, bossFor, tokenName, type CovenantSnapshot, type Decision } from "./lib/covenant";
 import { TradingCard } from "./components/TradingCard";
 import { GameCanvas } from "./components/GameCanvas";
 import { monsterFor } from "./game/logic";
@@ -222,7 +222,7 @@ export default function App() {
           {snapshot && (
             <>
               <section className="flex justify-center">
-                <TradingCard record={snapshot.trackRecord} contract={snapshot.contractAddress} />
+                <TradingCard record={snapshot.trackRecord} contract={snapshot.contractAddress} rpcHost={snapshot.rpcHost} chainId={snapshot.chainId} />
               </section>
 
               <PokeBox title="THE RULES">
@@ -235,6 +235,10 @@ export default function App() {
                   <StatTile label="Spent today" value={`$${fmtAmount(snapshot.notionalUsedToday)}`} />
                   <StatTile label="Agent" value={snapshot.agent.slice(0, 6) + "…" + snapshot.agent.slice(-4)} />
                 </div>
+                <p className={`mt-2 text-[10px] ${snapshot.chainId === BSC_CHAIN_ID ? "text-slate-500" : "font-semibold text-red-700"}`}>
+                  Read from {snapshot.rpcHost}, chain {snapshot.chainId}
+                  {snapshot.chainId === BSC_CHAIN_ID ? "." : " - not BSC mainnet."} This page shows only what that RPC returned; to check it independently, run verify.ts.
+                </p>
               </PokeBox>
 
               <PokeBox title={snapshot.totalDecisions > snapshot.decisions.length ? `TRADE LOG (NEWEST ${snapshot.decisions.length} OF ${snapshot.totalDecisions})` : "TRADE LOG (NEWEST FIRST)"}>

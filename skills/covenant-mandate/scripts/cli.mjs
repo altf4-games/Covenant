@@ -26,6 +26,11 @@
 // would be allowed or denied. Reading previewDecision first tells you the
 // real answer before spending a transaction on it.
 
+
+// ---- parameter types (JSDoc, so `npm run typecheck` checks every caller) ----
+/** @typedef {string | number | bigint} Amount   an integer amount of base units; strings must be plain decimal */
+/** @typedef {"buy" | "sell"} SideName */
+
 // ---- inline HTTP helper (self-contained, zero dependency) ----
 const TIMEOUT_MS = 10_000;
 // RPC failover only advances when a call throws, so a hanging endpoint has to
@@ -34,6 +39,7 @@ const TIMEOUT_MS = 10_000;
 const RPC_TIMEOUT_MS = 15_000;
 const UA = { "Accept-Encoding": "identity", "User-Agent": "binance-web3/1.1 (Skill)" };
 
+/** @param {{ url: string, method?: string, body?: unknown, headers?: Record<string, string> }} req */
 async function call({ url, method = "GET", body, headers = {} }) {
   const ctrl = new AbortController();
   // The timer covers reading the body too: a server that sends headers and
@@ -375,6 +381,7 @@ const COMMANDS = {
    * project's only target chain) is applied implicitly, and only when doing
    * so already yields a single match.
    */
+  /** @param {{ ticker: string, provider?: "ondo" | "xstock" | "bstock", chainId?: string | number }} args */
   async resolve({ ticker, provider, chainId }) {
     if (!ticker) throw Object.assign(new Error("resolve requires { ticker }"), { exitCode: 1 });
     const PROVIDER_TYPE = { ondo: 1, xstock: 2, bstock: 3 };
@@ -469,6 +476,7 @@ const COMMANDS = {
    * Transfer events rather than trusting either source alone - see
    * countRecentTransfers's doc comment for why that check exists at all.
    */
+  /** @param {{ ticker: string }} args */
   async survey({ ticker }) {
     if (!ticker) throw Object.assign(new Error("survey requires { ticker }"), { exitCode: 1 });
 
@@ -532,6 +540,7 @@ const COMMANDS = {
    *   -> the mandate, token and oracle state, plus the decision `commit`
    *      would make right now. Read-only. Amounts are in 18-decimal base units.
    */
+  /** @param {{ rpcUrl: string, covenantAddress: string, side: SideName, tokenAddress: string, amountIn: Amount, quotedOut: Amount, minOut: Amount }} args */
   async check({ rpcUrl, covenantAddress, side, tokenAddress, amountIn, quotedOut, minOut }) {
     if (!rpcUrl || !covenantAddress || side === undefined || !tokenAddress || amountIn === undefined || quotedOut === undefined || minOut === undefined) {
       throw Object.assign(
@@ -596,6 +605,7 @@ const COMMANDS = {
    * { side, tokenAddress, amountIn, quotedOut, minOut, quoteRef?, researchRef? }
    *   -> commit calldata. quoteRef/researchRef are 32-byte hashes, zero if omitted.
    */
+  /** @param {{ side: SideName, tokenAddress: string, amountIn: Amount, quotedOut: Amount, minOut: Amount, quoteRef?: string, researchRef?: string }} args */
   async buildCommitCalldata({ side, tokenAddress, amountIn, quotedOut, minOut, quoteRef, researchRef }) {
     if (side === undefined || !tokenAddress || amountIn === undefined || quotedOut === undefined || minOut === undefined) {
       throw Object.assign(
@@ -620,6 +630,7 @@ const COMMANDS = {
    * `to` address alone. See the KNOWN_ROUTERS comment above for exactly
    * what this can and can't tell you - it deliberately never returns "rfq".
    */
+  /** @param {{ to: string }} args */
   async classifyExecutionMode({ to }) {
     if (!to) throw Object.assign(new Error("classify-execution-mode requires { to }"), { exitCode: 1 });
     return { executionMode: classifyExecutionMode({ to }) };
@@ -631,6 +642,7 @@ const COMMANDS = {
    *      wallet really received, not market-order list's toTokenActualQty,
    *      which is in share units for bStocks (friction-log.md C17).
    */
+  /** @param {{ decisionId: Amount, swapTxHash: string, amountOut: Amount, executionMode: "unknown" | "pool" | "rfq" | "aggregator" }} args */
   async buildSettleCalldata({ decisionId, swapTxHash, amountOut, executionMode }) {
     if (decisionId === undefined || !swapTxHash || amountOut === undefined || executionMode === undefined) {
       throw Object.assign(
@@ -648,6 +660,7 @@ const COMMANDS = {
   },
 
   /** { decisionId } -> cancel calldata. */
+  /** @param {{ decisionId: Amount }} args */
   async buildCancelCalldata({ decisionId }) {
     if (decisionId === undefined) throw Object.assign(new Error("build-cancel-calldata requires { decisionId }"), { exitCode: 1 });
     return { calldata: SELECTORS.cancel + hex32(decisionId) };
@@ -659,6 +672,7 @@ const COMMANDS = {
    * Every *List array must be the same length as `tokens` - the contract checks this
    * too (ArrayLengthMismatch), but failing here first gives a clearer message.
    */
+  /** @param {{ maxNotionalPerTradeUsd: Amount, maxTradesPerDay: Amount, expiry: Amount, tokens: string[], maxSlippageBpsList: Amount[], maxPositionUsdList: Amount[], maxClosedMarketDriftBpsList: Amount[] }} args */
   async buildSetMandateForTokensCalldata({
     maxNotionalPerTradeUsd,
     maxTradesPerDay,
@@ -735,6 +749,7 @@ const COMMANDS = {
    *   - optional slippage: `slippage (of|up to)? <number>%` (default 100 bps / 1%)
    *   - optional position cap: `position cap $<number>` (default 10x the per-trade cap)
    */
+  /** @param {{ text: string, durationDays?: number }} args */
   async compileMandate({ text, durationDays }) {
     if (typeof text !== "string" || text.length === 0) {
       throw Object.assign(new Error("compile-mandate requires { text }"), { exitCode: 1 });
@@ -838,6 +853,7 @@ const COMMANDS = {
    * this script has no dependencies; the contract only needs 32 bytes.
    * Hash the raw response exactly as received so anyone can re-derive it.
    */
+  /** @param {{ text: string }} args */
   async hashRef({ text }) {
     if (typeof text !== "string" || text.length === 0) throw Object.assign(new Error("hash-ref requires { text }"), { exitCode: 1 });
     const { createHash } = await import("node:crypto");

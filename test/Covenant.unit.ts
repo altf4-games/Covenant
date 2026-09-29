@@ -853,4 +853,36 @@ describe("Covenant v2 (unit, mocked tokens)", function () {
       expect((await commit(f, Side.Buy, a)).reason).to.equal(allowedPreview);
     });
   });
+
+  describe("edges the coverage report showed untested", function () {
+    it("setAgent and setOracleUpdater refuse the zero address, and setOracleUpdater takes effect and emits", async function () {
+      const f = await networkHelpers.loadFixture(deployFixture);
+      await expect(f.covenant.setAgent(ethers.ZeroAddress)).to.be.revertedWithCustomError(f.covenant, "ZeroAddress");
+      await expect(f.covenant.setOracleUpdater(ethers.ZeroAddress)).to.be.revertedWithCustomError(f.covenant, "ZeroAddress");
+      await expect(f.covenant.setOracleUpdater(f.other.address)).to.emit(f.covenant, "OracleUpdaterChanged").withArgs(f.other.address);
+      expect(await f.covenant.oracleUpdater()).to.equal(f.other.address);
+      // the old updater can no longer post
+      await expect(f.covenant.connect(f.updater).updateOracle(f.stockAddress, false, E18, true, E18)).to.be.revertedWithCustomError(f.covenant, "NotOracleUpdater");
+    });
+
+    it("a denied decision can be neither cancelled nor settled: there is no approval to close", async function () {
+      const f = await networkHelpers.loadFixture(deployFixture);
+      await makeTradeable(f, { maxNotional: 1n * E18 });
+      const denied = await commit(f, Side.Buy, buyArgs(5n * E18));
+      expect(denied.reason).to.equal(Reason.NotionalExceeded);
+      await expect(f.covenant.connect(f.agent).cancel(denied.id)).to.be.revertedWithCustomError(f.covenant, "DecisionNotAllowed");
+      await expect(f.covenant.connect(f.agent).settle(denied.id, SWAP_TX, 1n, Mode.Pool)).to.be.revertedWithCustomError(f.covenant, "DecisionNotAllowed");
+    });
+
+    it("a closed-market buy with no minimum at all is a drift denial, not a divide-by-zero", async function () {
+      const f = await networkHelpers.loadFixture(deployFixture);
+      // A 100% slippage bound is the one setting under which minOut = 0 gets past the slippage check.
+      await makeTradeable(f, { slippageBps: 10_000 });
+      await f.covenant.setClosedMarketDrift(f.stockAddress, 100);
+      await f.covenant.connect(f.updater).updateOracle(f.stockAddress, false, 200n * E18, false, 200n * E18);
+      const quotedOut = (E18 * E18) / (200n * E18);
+      expect((await commit(f, Side.Buy, { amountIn: E18, quotedOut, minOut: 0n })).reason).to.equal(Reason.ClosedMarketDrift);
+    });
+  });
+
 });

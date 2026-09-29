@@ -77,9 +77,13 @@ describe("Oracle updater (live RWA status + live price -> real on-chain write)",
     const covenant = await ethers.deployContract("Covenant", [USDT, updater.address, agent.address, 900, 600]);
     const reading = { halted: false, priceUsd: 200n * E18, sessionOpen: true, lastCloseUsd: 200n * E18 };
     for (const wrong of [owner, agent]) {
-      await expect(
-        pushOracleUpdate({ signer: wrong, covenantAddress: await covenant.getAddress(), token: NVDAB, reading }),
-      ).to.be.rejected;
+      let rejected = false;
+      try {
+        await pushOracleUpdate({ signer: wrong, covenantAddress: await covenant.getAddress(), token: NVDAB, reading });
+      } catch {
+        rejected = true;
+      }
+      expect(rejected, "an updater key that isn't the oracle updater must not be able to post").to.equal(true);
     }
   });
 

@@ -95,8 +95,8 @@ export class WorldScene extends Phaser.Scene {
   }
 
   preload() {
-    this.load.spritesheet("town", "/game/kenney-tiny-town.png", { frameWidth: 16, frameHeight: 16 });
-    this.load.spritesheet("dungeon", "/game/kenney-tiny-dungeon.png", { frameWidth: 16, frameHeight: 16 });
+    this.load.spritesheet("town", `${import.meta.env.BASE_URL}game/kenney-tiny-town.png`, { frameWidth: 16, frameHeight: 16 });
+    this.load.spritesheet("dungeon", `${import.meta.env.BASE_URL}game/kenney-tiny-dungeon.png`, { frameWidth: 16, frameHeight: 16 });
   }
 
   create() {

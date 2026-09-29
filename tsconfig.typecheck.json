@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "allowJs": true,
+    "checkJs": false,
+    "resolveJsonModule": true
+  },
+  "include": [
+    "scripts/**/*.ts",
+    "test/**/*.ts",
+    "mcp-server/**/*.ts",
+    "hardhat.config.ts",
+    "types/**/*.ts"
+  ]
+}

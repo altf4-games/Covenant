@@ -24,7 +24,8 @@
 import { ethers } from "ethers";
 import { writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { ABI, fetchDecisionEvents, joinDecisions, bossFor, tokenName, type Decision } from "../status-page/lib.mjs";
+import { ABI, fetchDecisionEvents, joinDecisions, bossFor, tokenName } from "../status-page/lib.mjs";
+import type { Decision } from "../frontend/src/lib/status-page-lib-types.ts";
 
 const GEMINI_MODEL = "gemini-2.5-flash"; // cheap/fast tier; free-tier-eligible per ai.google.dev's own model list
 // The key goes in a header, not the query string, so it can't end up in a URL
@@ -40,7 +41,6 @@ export function buildPrompt(d: Decision): string | null {
   const c = d.commit;
   if (!c) return null;
   const name = tokenName(c.token);
-  const verb = c.side === "buy" ? "buy" : "sell";
   const amount = fmt(c.amountIn);
   // amountIn is USDT for a buy but the token itself for a sell (Covenant.sol's
   // own Decision.amountIn semantics) - "$amount of name" only makes sense for
@@ -85,7 +85,7 @@ async function narrate(apiKey: string, prompt: string, attempts = 4): Promise<st
       signal: AbortSignal.timeout(30_000),
       body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
     });
-    const body = await res.json();
+    const body = (await res.json()) as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
     if (!res.ok) {
       lastError = new Error(`Gemini API error: HTTP ${res.status} ${JSON.stringify(body)}`);
       if (res.status === 503 || res.status === 429) continue; // retry only on transient errors

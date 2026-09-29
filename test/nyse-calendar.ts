@@ -55,4 +55,32 @@ describe("NYSE calendar (Feature 1's session source)", function () {
   it("refuses a year it has no holiday data for, instead of guessing", function () {
     expect(() => isRegularSessionOpen(at("2028-03-01T15:00:00Z"))).to.throw(/no holiday data for 2028/);
   });
+
+  it("every listed full closure in 2026 and 2027 is closed all day", function () {
+    // Transcribed separately from the calendar module, from the same NYSE table.
+    const closures = [
+      "2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03", "2026-05-25", "2026-06-19", "2026-07-03", "2026-09-07", "2026-11-26", "2026-12-25",
+      "2027-01-01", "2027-01-18", "2027-02-15", "2027-03-26", "2027-05-31", "2027-06-18", "2027-07-05", "2027-09-06", "2027-11-25", "2027-12-24",
+    ];
+    for (const day of closures) {
+      expect(isRegularSessionOpen(at(`${day}T15:00:00Z`)), `${day} 15:00Z`).to.equal(false);
+      expect(isRegularSessionOpen(at(`${day}T18:00:00Z`)), `${day} 18:00Z`).to.equal(false);
+    }
+  });
+
+  it("the 2027 early close (Fri Nov 26) ends at 1:00 p.m. ET", function () {
+    expect(isRegularSessionOpen(at("2027-11-26T17:59:00Z"))).to.equal(true);
+    expect(isRegularSessionOpen(at("2027-11-26T18:00:00Z"))).to.equal(false);
+    expect(iso(lastRegularClose(at("2027-11-26T19:00:00Z")))).to.equal("2027-11-26T18:00:00.000Z");
+  });
+
+  it("walks back across New Year: Mon 2027-01-04's last close is Thu 2026-12-31, 4:00 p.m. EST", function () {
+    // Fri 2027-01-01 is a holiday, then a weekend.
+    expect(iso(lastRegularClose(at("2027-01-04T15:00:00Z")))).to.equal("2026-12-31T21:00:00.000Z");
+  });
+
+  it("the Christmas Eve 2026 early close ends at 1:00 p.m. ET", function () {
+    expect(isRegularSessionOpen(at("2026-12-24T17:59:00Z"))).to.equal(true);
+    expect(isRegularSessionOpen(at("2026-12-24T18:00:00Z"))).to.equal(false);
+  });
 });

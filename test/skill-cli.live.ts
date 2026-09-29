@@ -75,7 +75,7 @@ describe("covenant-mandate skill CLI (live, against a real spawned JSON-RPC node
       // window that count was 0 ("dead"); the wider window survey now scans
       // (red-team round 5: 3000 blocks is only minutes on BSC) finds a handful,
       // so the stable, honest assertion is the ratio, not a label.
-      const result = await COMMANDS.survey({ ticker: "TSLA" });
+      const result: any = await COMMANDS.survey({ ticker: "TSLA" });
       const xstock = result.providers.find((p: any) => p.provider === "xstock");
       const bstock = result.providers.find((p: any) => p.provider === "bstock");
       expect(xstock.onChainVerified.transferCount).to.be.lessThan(bstock.onChainVerified.transferCount / 10);
@@ -84,7 +84,7 @@ describe("covenant-mandate skill CLI (live, against a real spawned JSON-RPC node
     });
 
     it("reports real liquid providers as live, with real, differentiated transfer counts", async function () {
-      const result = await COMMANDS.survey({ ticker: "NVDA" });
+      const result: any = await COMMANDS.survey({ ticker: "NVDA" });
       const bstock = result.providers.find((p: any) => p.provider === "bstock");
       const xstock = result.providers.find((p: any) => p.provider === "xstock");
       expect(bstock.status).to.equal("live");
@@ -105,7 +105,7 @@ describe("covenant-mandate skill CLI (live, against a real spawned JSON-RPC node
       // actually stable - bstock dominates, xstock stays dead - and check
       // ondo's own reported fields are internally consistent instead of
       // hardcoding a liveness label that can flip under us.
-      const result = await COMMANDS.survey({ ticker: "GME" });
+      const result: any = await COMMANDS.survey({ ticker: "GME" });
       const byProvider = Object.fromEntries(result.providers.map((p: any) => [p.provider, p]));
       expect(byProvider.bstock.status).to.equal("live");
       expect(byProvider.bstock.onChainVerified.transferCount).to.be.greaterThan(0);
@@ -159,7 +159,7 @@ describe("covenant-mandate skill CLI (live, against a real spawned JSON-RPC node
 
     it("rejects a side that isn't buy or sell instead of guessing", async function () {
       try {
-        await COMMANDS.check({ rpcUrl, covenantAddress: env.covenantAddress, side: "short", tokenAddress: NVDAB, amountIn: "1", quotedOut: "1", minOut: "1" });
+        await COMMANDS.check({ rpcUrl, covenantAddress: env.covenantAddress, side: "short" as never, tokenAddress: NVDAB, amountIn: "1", quotedOut: "1", minOut: "1" });
         expect.fail("expected check to reject an unknown side");
       } catch (err: any) {
         expect(err.message).to.include("buy");
@@ -221,7 +221,7 @@ describe("covenant-mandate skill CLI (live, against a real spawned JSON-RPC node
         expect(err.message).to.include("quoteRef");
       }
       try {
-        await COMMANDS.buildSettleCalldata({ decisionId: "1", swapTxHash: ethers.ZeroHash, amountOut: "1", executionMode: "darkpool" });
+        await COMMANDS.buildSettleCalldata({ decisionId: "1", swapTxHash: ethers.ZeroHash, amountOut: "1", executionMode: "darkpool" as never });
         expect.fail("expected an unknown execution mode to be rejected");
       } catch (err: any) {
         expect(err.message).to.include("executionMode");

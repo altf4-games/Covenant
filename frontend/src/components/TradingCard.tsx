@@ -1,13 +1,16 @@
 import identityEvidence from "../../../docs/evidence/erc8004-registration.json";
 import { classifyRarity, RARITY_STYLE, type TrackRecord } from "../lib/rarity";
+import { BSC_CHAIN_ID } from "../lib/covenant";
 import { HERO_FRAME } from "../game/logic";
 import { Sprite } from "./Sprite";
 
 interface TradingCardProps {
   /** Over every decision in the scanned range (see CovenantSnapshot.trackRecord). */
   record: TrackRecord;
-  /** The Covenant contract these numbers were read from. */
+  /** The Covenant contract these numbers were read from, and the RPC and chain that said so. */
   contract: string;
+  rpcHost: string;
+  chainId: number;
 }
 
 function Move({ name, detail, value }: { name: string; detail: string; value: number }) {
@@ -29,7 +32,7 @@ function Move({ name, detail, value }: { name: string; detail: string; value: nu
  * scripts/register-erc8004.ts at registration time) drawn as a Pokemon-style
  * trading card. Every number on it comes from the decisions of the contract that is loaded (named on the card).
  */
-export function TradingCard({ record, contract }: TradingCardProps) {
+export function TradingCard({ record, contract, rpcHost, chainId }: TradingCardProps) {
   const rarity = classifyRarity(record);
   const style = RARITY_STYLE[rarity];
 
@@ -72,6 +75,9 @@ export function TradingCard({ record, contract }: TradingCardProps) {
             </div>
             <div className="truncate" title={contract}>
               Stats from {contract.slice(0, 6)}…{contract.slice(-4)}
+            </div>
+            <div className={`truncate ${chainId === BSC_CHAIN_ID ? "" : "font-semibold text-red-700"}`} title={`${rpcHost}, chain ${chainId}`}>
+              via {rpcHost}, chain {chainId}
             </div>
           </div>
           <span className="font-pixel text-[7px] text-slate-800" title={`Rarity: ${style.label}`}>

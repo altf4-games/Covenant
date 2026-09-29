@@ -63,6 +63,8 @@ describe("covenant-mandate skill CLI (unit, input validation)", function () {
     });
 
     it("refuses a JS number that already lost precision", async function () {
+      // The literal is meant to lose precision: that is the input being refused.
+      // oxlint-disable-next-line no-loss-of-precision
       expect(await build({ amountIn: 1234567890123456789 })).to.match(/^refused: .*not an exact integer/);
     });
 

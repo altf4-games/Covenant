@@ -58,8 +58,8 @@ describe("verify.ts (live, real swaps, real reconciliation)", function () {
     ).wait();
     const toAgent = "0x" + env.agentAddress.toLowerCase().slice(2).padStart(64, "0");
     const received = receipt!.logs
-      .filter((l) => l.address.toLowerCase() === tokenOut.toLowerCase() && l.topics[0] === TRANSFER && l.topics[2].toLowerCase() === toAgent)
-      .reduce((sum, l) => sum + BigInt(l.data), 0n);
+      .filter((l: ethers.Log) => l.address.toLowerCase() === tokenOut.toLowerCase() && l.topics[0] === TRANSFER && l.topics[2].toLowerCase() === toAgent)
+      .reduce((sum: bigint, l: ethers.Log) => sum + BigInt(l.data), 0n);
     return { hash: receipt!.hash, received };
   }
 

@@ -69,14 +69,14 @@ async function main() {
   if (!receipt || receipt.status !== 1) throw new Error(`register() reverted (tx ${tx.hash})`);
 
   const transferLog = receipt.logs
-    .map((l) => {
+    .map((l: ethers.Log) => {
       try {
         return registry.interface.parseLog(l);
       } catch {
         return null;
       }
     })
-    .find((p) => p?.name === "Transfer");
+    .find((p: ethers.LogDescription | null) => p?.name === "Transfer");
   if (!transferLog) throw new Error("no Transfer event in receipt - could not determine the new agentId");
   const agentId = transferLog.args.tokenId as bigint;
 

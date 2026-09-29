@@ -164,7 +164,8 @@ async function load() {
       provider.getBlockNumber(),
     ]);
 
-    renderMandate(mandate, tradesUsedToday, stalenessBound, decisionTtl, agent);
+    const network = await provider.getNetwork();
+    renderMandate(mandate, tradesUsedToday, stalenessBound, decisionTtl, agent, rpcHostOf(rpcUrl), Number(network.chainId));
 
     // fetchDecisionEvents (lib.mjs) races eth_getLogs against a timeout:
     // against a forked RPC, a fromBlock before the fork point hangs forever
@@ -180,7 +181,18 @@ async function load() {
   }
 }
 
-function renderMandate(mandate, tradesUsedToday, stalenessBound, decisionTtl, agent) {
+// This page shows only what the RPC returns, so it says which RPC and chain.
+function rpcHostOf(url) {
+  try {
+    return new URL(url).host;
+  } catch {
+    return "unknown RPC";
+  }
+}
+
+const esc = (v) => String(v).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+
+function renderMandate(mandate, tradesUsedToday, stalenessBound, decisionTtl, agent, rpcHost, chainId) {
   const el = $("mandate");
   el.classList.remove("empty");
   const [active, maxNotionalPerTradeUsd, maxTradesPerDay, expiry] = mandate;
@@ -192,6 +204,7 @@ function renderMandate(mandate, tradesUsedToday, stalenessBound, decisionTtl, ag
     <div class="stat"><div class="label">Oracle staleness bound</div><div class="value">${stalenessBound}s</div></div>
     <div class="stat"><div class="label">Decision valid for</div><div class="value">${decisionTtl}s</div></div>
     <div class="stat"><div class="label">Agent</div><div class="value addr" title="${agent}">${fmtAddr(agent)}</div></div>
+    <div class="stat"><div class="label">Read from</div><div class="value addr" title="${esc(rpcHost)}">${esc(rpcHost)}, chain ${chainId}${chainId === 56 ? "" : " (not BSC mainnet)"}</div></div>
   `;
 }
 

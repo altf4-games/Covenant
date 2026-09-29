@@ -26,6 +26,14 @@ import { fetchAssetMarketStatus, isHalted } from "../scripts/lib/rwa-status.js";
 // Base-unit amounts as decimal strings only. An 18-decimal amount passed as
 // a JSON number is rounded before it ever reaches us (1234567890123456789
 // arrives as ...768).
+// Addresses and URLs are checked at the boundary instead of being passed
+// through to eth_call / fetch as whatever the caller typed.
+const addressSchema = z.string().regex(/^0x[0-9a-fA-F]{40}$/, "a 0x-prefixed 20-byte address");
+const rpcUrlSchema = z
+  .string()
+  .url()
+  .refine((u) => /^https?:\/\//i.test(u), "an http(s) JSON-RPC URL");
+
 const baseUnits = z.string().regex(/^\d+$/, "a non-negative integer, as a decimal string of 18-decimal base units");
 
 const server = new McpServer({ name: "covenant-mandate", version: "0.2.0" });
@@ -80,8 +88,8 @@ server.registerTool(
     description:
       "Reads the mandate (active, max USD per trade, max trades per day, expiry, and the separate daily-notional cap from red-team fix H7), today's trade count and cumulative notional, and whether an approved decision is still in flight, directly from a deployed Covenant contract via eth_call. Read-only, no gas, no signing.",
     inputSchema: {
-      rpcUrl: z.string().describe("BSC JSON-RPC endpoint"),
-      covenantAddress: z.string().describe("Deployed Covenant contract address"),
+      rpcUrl: rpcUrlSchema.describe("BSC JSON-RPC endpoint"),
+      covenantAddress: addressSchema.describe("Deployed Covenant contract address"),
     },
   },
   async ({ rpcUrl, covenantAddress }) => {
@@ -117,7 +125,7 @@ server.registerTool(
       "Fetches the current trading status for a tokenized stock directly from Binance's live RWA asset-market-status endpoint (real-time, not the contract's cached oracle reading - use get_mandate_status/preview_trade for what the contract itself currently believes). See docs/partner-feedback/friction-log.md B15 for where this endpoint was found and confirmed to work for bStocks despite Binance's own skill describing it as Ondo-only.",
     inputSchema: {
       chainId: z.number().default(56).describe("Binance chain ID, defaults to BSC (56)"),
-      contractAddress: z.string().describe("Token contract address (from resolve_ticker)"),
+      contractAddress: addressSchema.describe("Token contract address (from resolve_ticker)"),
     },
   },
   async ({ chainId, contractAddress }) => {
@@ -134,10 +142,10 @@ server.registerTool(
     description:
       "Reads the decision Covenant's commit would make right now for a proposed trade - allowed or denied, and the exact typed reason - before spending a transaction on it. Necessary, not redundant with contract-call preview: commit never reverts on a denial (it records the refusal as an event, see contracts/Covenant.sol), so a wallet-level simulation can't tell allow from deny. Read-only, no gas, no signing.",
     inputSchema: {
-      rpcUrl: z.string().describe("BSC JSON-RPC endpoint"),
-      covenantAddress: z.string().describe("Deployed Covenant contract address"),
+      rpcUrl: rpcUrlSchema.describe("BSC JSON-RPC endpoint"),
+      covenantAddress: addressSchema.describe("Deployed Covenant contract address"),
       side: z.enum(["buy", "sell"]).describe("buy spends USDT for the stock; sell spends the stock for USDT"),
-      tokenAddress: z.string().describe("Exact stock token address (from resolve_ticker)"),
+      tokenAddress: addressSchema.describe("Exact stock token address (from resolve_ticker)"),
       amountIn: baseUnits.describe("What you spend, in 18-decimal base units"),
       quotedOut: baseUnits.describe("What baw market-order quote says you receive, in 18-decimal base units"),
       minOut: baseUnits.describe("The least you'll accept, in 18-decimal base units - must sit within the token's slippage bound"),
