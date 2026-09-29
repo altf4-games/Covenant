@@ -683,6 +683,30 @@ describe("verify.ts reconcile() (unit, mock RPC, crafted logs)", function () {
       expect(checked.clean).to.equal(false);
     });
 
+    it("an endpoint that refuses log requests is asked once, not on every range", async function () {
+      honestBuy();
+      let refusals = 0;
+      const refuser = http.createServer((req, res) => {
+        let body = "";
+        req.on("data", (c) => (body += c));
+        req.on("end", () => {
+          const { id, method } = JSON.parse(body);
+          if (method === "eth_getLogs") refusals++;
+          res.end(JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32005, message: "limit exceeded" } }));
+        });
+      });
+      await new Promise<void>((r) => refuser.listen(0, "127.0.0.1", r));
+      try {
+        const refuserUrl = `http://127.0.0.1:${(refuser.address() as AddressInfo).port}`;
+        const r = await reconcile({ rpcUrls: [refuserUrl, url], covenantAddress: COV, fromBlock: 1, chunkSize: 50 }); // 20 ranges
+        expect(r.violations).to.deep.equal([]);
+        expect(r.rpcsUsed).to.deep.equal([url]);
+        expect(refusals, "getLogs requests sent to the endpoint that refuses them").to.be.lessThan(3);
+      } finally {
+        refuser.close();
+      }
+    });
+
     it("says so when no second endpoint can complete the scan, rather than passing quietly", async function () {
       honestBuy();
       const noSecond = await reconcileCrossChecked({ rpcUrls: [url, "http://127.0.0.1:1"], covenantAddress: COV, fromBlock: 1, chunkSize: 50 });

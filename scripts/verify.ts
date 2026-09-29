@@ -83,6 +83,8 @@ const SELECTOR_DECISION_TTL = "0x072aaa5c";
  */
 const BUY_RECEIVED_TOLERANCE_BPS = 500n;
 const DEFAULT_CHUNK = 5_000;
+/** How many eth_getLogs ranges are in flight at once. */
+const LOG_CONCURRENCY = 4;
 /** BSC's wrapped BNB: refunds and gas top-ups arrive as this and aren't an untracked stock. */
 const WBNB = "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c";
 
@@ -136,16 +138,25 @@ const addrFromTopic = (t: string) => "0x" + t.slice(-40).toLowerCase();
  */
 function makeClient(rpcUrls: string[]) {
   const used = new Set<string>();
+  // Endpoints in the order to try them. One that answers moves to the front, so
+  // a scan of hundreds of ranges asks a free endpoint that refuses old blocks
+  // (or every log request) once, not on every range.
+  const order = [...rpcUrls];
+  const promote = (url: string) => {
+    const i = order.indexOf(url);
+    if (i > 0) order.unshift(...order.splice(i, 1));
+    used.add(url);
+  };
   return {
     used,
     async call(method: string, params: unknown[]) {
-      const r = await jsonRpcWithFailover(method, params, { rpcUrls });
-      used.add(r.rpcUrl);
+      const r = await jsonRpcWithFailover(method, params, { rpcUrls: [...order] });
+      promote(r.rpcUrl);
       return r.result;
     },
     async ethCall(to: string, data: string) {
-      const r = await ethCallWithFailover(to, data, { rpcUrls });
-      used.add(r.rpcUrl);
+      const r = await ethCallWithFailover(to, data, { rpcUrls: [...order] });
+      promote(r.rpcUrl);
       return r.result;
     },
   };
@@ -158,11 +169,25 @@ type Client = ReturnType<typeof makeClient>;
  * log: counting it twice would turn an honest trade into a mismatch.
  */
 async function getLogs(client: Client, filter: { address: string | string[]; topics: (string | null)[] }, from: number, to: number, chunk: number): Promise<Log[]> {
+  const ranges: Array<[number, number]> = [];
+  for (let start = from; start <= to; start += chunk) ranges.push([start, Math.min(to, start + chunk - 1)]);
+
+  // A few ranges at a time: hundreds of sequential round trips to a free
+  // endpoint take many minutes, and more than a handful at once draws rate limits.
+  const results: Log[][] = Array.from({ length: ranges.length }, () => []);
+  let next = 0;
+  const worker = async () => {
+    while (next < ranges.length) {
+      const i = next++;
+      const [start, end] = ranges[i];
+      results[i] = await client.call("eth_getLogs", [{ ...filter, fromBlock: "0x" + start.toString(16), toBlock: "0x" + end.toString(16) }]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(LOG_CONCURRENCY, ranges.length) }, worker));
+
   const out: Log[] = [];
   const seen = new Set<string>();
-  for (let start = from; start <= to; start += chunk) {
-    const end = Math.min(to, start + chunk - 1);
-    const logs: Log[] = await client.call("eth_getLogs", [{ ...filter, fromBlock: "0x" + start.toString(16), toBlock: "0x" + end.toString(16) }]);
+  for (const logs of results) {
     for (const log of logs) {
       if (log.logIndex !== undefined) {
         const key = `${log.transactionHash.toLowerCase()}:${log.logIndex}`;
@@ -196,16 +221,18 @@ export async function reconcile(opts: ReconcileOptions) {
   };
   const pos = (log: Log) => ({ blockNumber: Number(BigInt(log.blockNumber)), txIndex: Number(BigInt(log.transactionIndex)) });
 
+  // Covenant's decision events, agent rotations and revokes.
+  const covenantLogs = await getLogs(client, { address: covenantAddress, topics: [] }, fromBlock, toBlock, chunk);
+
   // Every token the owner ever configured, from Covenant's own events, and
-  // when any of them was later disallowed.
-  const configLogs = await getLogs(client, { address: covenantAddress, topics: [TOKEN_CONFIGURED_TOPIC] }, fromBlock, toBlock, chunk);
+  // when any of them was later disallowed. (Read out of the same scan as the
+  // decision events: a second pass over every range just for these was half
+  // of Covenant's log requests.)
+  const configLogs = covenantLogs.filter((l) => l.topics[0] === TOKEN_CONFIGURED_TOPIC);
   const stockTokens = [...new Set(configLogs.map((l) => addrFromTopic(l.topics[1])))];
   const disallowed = configLogs
     .filter((l) => BigInt(l.data.slice(0, 66)) === 0n)
     .map((l) => ({ token: addrFromTopic(l.topics[1]), ...pos(l) }));
-
-  // Covenant's decision events, agent rotations and revokes.
-  const covenantLogs = await getLogs(client, { address: covenantAddress, topics: [] }, fromBlock, toBlock, chunk);
   const commits = new Map<string, CommittedDecision & { blockNumber: number; txIndex: number }>();
   const settles: Array<SettledDecision & { settleTx: string }> = [];
   const agentChanges: Array<{ agent: string; blockNumber: number; txIndex: number }> = [];

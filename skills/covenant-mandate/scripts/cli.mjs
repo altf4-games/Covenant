@@ -270,7 +270,19 @@ const TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a
 // judge's environment, a cron job) without depending on one free-tier
 // endpoint staying up - see friction-log.md B12-B14 for the flakiness this
 // is guarding against, found live while forking against a single endpoint.
-const DEFAULT_BSC_RPCS = ["https://bsc.publicnode.com", "https://bsc-dataseed1.defibit.io", "https://bsc-dataseed.binance.org"];
+// The first two answer eth_getLogs in 5,000-block ranges at depth (probed
+// 2026-09-29: bloXroute back at least 3M blocks, 48Club at least 1M). The rest
+// serve calls and receipts but not logs: publicnode only for the last ~10,000
+// blocks, and the two Binance dataseeds refuse eth_getLogs outright ("limit
+// exceeded" even for 100 blocks). verify.ts needs logs, so without the first two
+// it can scan nothing older than about an hour.
+const DEFAULT_BSC_RPCS = [
+  "https://bsc.rpc.blxrbdn.com",
+  "https://rpc-bsc.48.club",
+  "https://bsc.publicnode.com",
+  "https://bsc-dataseed1.defibit.io",
+  "https://bsc-dataseed.binance.org",
+];
 
 async function jsonRpc(rpcUrl, method, params) {
   const res = await fetch(rpcUrl, {

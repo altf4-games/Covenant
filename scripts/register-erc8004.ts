@@ -17,6 +17,7 @@
  * Env: DEPLOYER_PRIVATE_KEY, optional BSC_RPC_URL
  */
 import { ethers } from "ethers";
+import { bscProvider } from "./lib/bsc-provider.js";
 
 const REGISTRY_MAINNET = "0x8004A169FB4a3325136EB29fA0ceB6D2e539a432"; // verified-facts.md §5
 const AGENTIC_WALLET = "0xaa963e1b4f913975Ee81139F4BA2953951E45844"; // the real agent, this project's whole build
@@ -51,8 +52,7 @@ async function main() {
   }
   const privateKey = process.env.DEPLOYER_PRIVATE_KEY;
   if (!privateKey) throw new Error("Set DEPLOYER_PRIVATE_KEY.");
-  const rpcUrl = process.env.BSC_RPC_URL || "https://bsc-mainnet.public.blastapi.io";
-  const provider = new ethers.JsonRpcProvider(rpcUrl);
+  const provider = bscProvider(process.env.BSC_RPC_URL || undefined);
   const wallet = new ethers.Wallet(privateKey, provider);
   const registry = new ethers.Contract(REGISTRY_MAINNET, REGISTRY_ABI, wallet);
 

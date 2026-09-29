@@ -17,6 +17,7 @@
  *   (reads DEPLOYER_PRIVATE_KEY and BSC_RPC_URL from .env)
  */
 import { ethers } from "ethers";
+import { bscProvider } from "./lib/bsc-provider.js";
 import gateArtifact from "../artifacts/contracts/Gate.sol/Gate.json" with { type: "json" };
 
 try {
@@ -25,13 +26,12 @@ try {
   // no .env - real environment variables only
 }
 
-const RPC_URL = process.env.BSC_RPC_URL || "https://bsc-mainnet.public.blastapi.io";
 
 async function main() {
   const privateKey = process.env.DEPLOYER_PRIVATE_KEY;
   if (!privateKey) throw new Error("Set DEPLOYER_PRIVATE_KEY in .env");
 
-  const provider = new ethers.JsonRpcProvider(RPC_URL);
+  const provider = bscProvider(process.env.BSC_RPC_URL || undefined);
   const signer = new ethers.Wallet(privateKey, provider);
   console.log(`Deployer: ${signer.address}`);
   console.log(`Balance:  ${ethers.formatEther(await provider.getBalance(signer.address))} BNB`);

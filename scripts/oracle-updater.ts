@@ -44,6 +44,7 @@ import { ethers } from "ethers";
 import covenantArtifact from "../artifacts/contracts/Covenant.sol/Covenant.json" with { type: "json" };
 import { fetchAssetMarketStatus, isHalted, priceToUsdE18, fetchHourlyKlines, closePriceAt, assertPriceConsistent, type AssetMarketStatus } from "./lib/rwa-status.js";
 import { readFileSync } from "node:fs";
+import { bscProvider } from "./lib/bsc-provider.js";
 import { isRegularSessionOpen, lastRegularClose } from "./lib/nyse-calendar.js";
 import { fetchDynamic } from "../skills/covenant-mandate/scripts/cli.mjs";
 import { loadWeb3ApiCredentials, verifyTokenListed, type RwaTokenListing } from "./lib/web3-api-client.js";
@@ -149,7 +150,10 @@ export async function pushOracleUpdate(opts: {
   const covenant = new ethers.Contract(opts.covenantAddress, covenantArtifact.abi, opts.signer);
   const r = opts.reading;
   const tx = await covenant.updateOracle(opts.token, r.halted, r.priceUsd, r.sessionOpen, r.lastCloseUsd);
-  const receipt = await tx.wait();
+  // Bounded: a transaction stuck pending would otherwise hold this run (and, via
+  // the cron lock, every later one) indefinitely. On a timeout the run fails and
+  // the next one queues behind it on the same nonce.
+  const receipt = await tx.wait(1, 120_000);
   if (!receipt || receipt.status !== 1) throw new Error(`updateOracle reverted (tx ${tx.hash})`);
 
   const onChain = await covenant.oracleStatus(opts.token);
@@ -185,9 +189,8 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     const tokens = resolveOracleTokens(process.env.ORACLE_TOKEN_ADDRESS || DEFAULT_TOKEN);
     const chainId = Number(process.env.ORACLE_BINANCE_CHAIN_ID || DEFAULT_CHAIN_ID);
     const platformId = process.env.ORACLE_PLATFORM_ID || "bstock";
-    const rpcUrl = process.env.BSC_RPC_URL || "https://bsc-mainnet.public.blastapi.io";
     // NonceManager: several sequential updateOracle sends from one key.
-    const signer = new ethers.NonceManager(new ethers.Wallet(privateKey, new ethers.JsonRpcProvider(rpcUrl)));
+    const signer = new ethers.NonceManager(new ethers.Wallet(privateKey, bscProvider(process.env.BSC_RPC_URL || undefined)));
 
     let failures = 0;
     for (const token of tokens) {

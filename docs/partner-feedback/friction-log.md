@@ -285,6 +285,20 @@ The load-bearing claim - real reported volume, zero real on-chain activity - was
 
 **Verdict:** `tokenInfo.volume24h` cannot be used on its own to judge whether a tokenized-stock listing is actually liquid - it doesn't move with real on-chain activity for at least one real, reproducible case (`TSLAx`). `survey` (this project's own multi-provider comparison tool) reports it anyway, labeled `binanceReported`, next to an independently-verified `onChainVerified` transfer count, and makes tradability decisions off the latter only. **Redesign suggestion:** either fix `volume24h` to reflect real per-token activity, or document plainly that it's not a live per-token figure - right now it looks like real-time per-token data and isn't.
 
+### B19. `[PITFALL]` The free BSC RPCs cannot serve a multi-day `eth_getLogs` scan at all - only two of the dozen or so I tried could, 2026-09-29
+Building the judge-run reconciliation (`verify.ts`), which needs every Transfer in and out of the agent wallet since deployment, I assumed the defaults I had been using for receipts and `eth_call` would also serve logs. They don't. One filter (a wallet's Transfer logs for two tokens), ranges of 100 to 20,000 blocks, at the chain head and about 1 and 5 days back:
+
+- `bsc.rpc.blxrbdn.com` (bloXroute): 5,000-block ranges worked back at least 3 million blocks (about 16 days); 10,000 was refused ("exceed maximum block range").
+- `rpc-bsc.48.club` (48Club): 5,000-block ranges worked back at least 1 million blocks; 3 million came back "header not found".
+- `bsc.publicnode.com`: logs only for roughly the last 10,000 blocks; older ranges say "Archive requests require a personal token".
+- `bsc-dataseed.binance.org`, `bsc-dataseed1.defibit.io`, and the `bnbchain.org` and `ninicoin.io` dataseeds: "limit exceeded" for every range, including 100 blocks.
+- `1rpc.io/bnb`: "eth_getLogs is limited to 0 ...". `bsc.drpc.org`: a 10,000-block cap plus a public-endpoint rate limit. `bsc.meowrpc.com`: "The method eth_getLogs is not available".
+- `bsc-mainnet.public.blastapi.io`: rate-limited within a few minutes of use; my fork node stalled on it more than once.
+
+None of this is written down anywhere I found, and the error strings differ per provider ("limit exceeded" for a range problem and for a rate problem look identical). My README had claimed the dataseeds worked for a historical scan; that was true for receipts, not logs. I only found out by probing.
+
+**Redesign suggestion:** a `getLogs` capability flag or a documented per-endpoint block-range limit on the official RPC page, and an error that says whether the limit is range, result count or rate.
+
 ---
 
 ## C. Agentic Wallet / Wallet Skills

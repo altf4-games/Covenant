@@ -23,7 +23,7 @@
  *   npm run deploy      (builds with the production profile, then runs this)
  * Env:
  *   DEPLOYER_PRIVATE_KEY, ORACLE_UPDATER_ADDRESS, AGENT_ADDRESS   required
- *   BSC_RPC_URL                    default https://bsc-mainnet.public.blastapi.io
+ *   BSC_RPC_URL                    default: several free endpoints behind a fallback provider
  *   MANDATE_TOKEN_ADDRESS          default real NVDAB (verified-facts.md)
  *   MANDATE_MAX_NOTIONAL_USD       default "1"   (per trade, dollars)
  *   MANDATE_MAX_TRADES_PER_DAY     default 5
@@ -36,6 +36,7 @@
  *   DECISION_TTL_SECONDS           default 600
  */
 import { ethers } from "ethers";
+import { bscProvider } from "./lib/bsc-provider.js";
 import covenantArtifact from "../artifacts/contracts/Covenant.sol/Covenant.json" with { type: "json" };
 
 export const BSC_USDT = "0x55d398326f99059fF775485246999027B3197955";
@@ -177,7 +178,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     // NonceManager: three sequential sends from one key hit a real
     // NONCE_EXPIRED race with a bare Wallet (README, chaos-fork.ts).
     const deployer = new ethers.NonceManager(
-      new ethers.Wallet(key, new ethers.JsonRpcProvider(process.env.BSC_RPC_URL || "https://bsc-mainnet.public.blastapi.io")),
+      new ethers.Wallet(key, bscProvider(process.env.BSC_RPC_URL || undefined)),
     );
     const result = await deployCovenant({
       deployer,

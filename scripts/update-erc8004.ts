@@ -18,6 +18,7 @@
  *   COVENANT_ADDRESS=0x... CONFIRM=1 npx tsx scripts/update-erc8004.ts  (sends, needs DEPLOYER_PRIVATE_KEY)
  */
 import { ethers } from "ethers";
+import { bscProvider } from "./lib/bsc-provider.js";
 import { readFileSync, writeFileSync } from "node:fs";
 
 const EVIDENCE_PATH = new URL("../docs/evidence/erc8004-registration.json", import.meta.url).pathname;
@@ -53,8 +54,7 @@ async function main() {
   const covenantAddress = process.env.COVENANT_ADDRESS;
   if (!covenantAddress) throw new Error("Set COVENANT_ADDRESS to the deployed Covenant.");
   const evidence = JSON.parse(readFileSync(EVIDENCE_PATH, "utf8"));
-  const rpcUrl = process.env.BSC_RPC_URL || "https://bsc-mainnet.public.blastapi.io";
-  const provider = new ethers.JsonRpcProvider(rpcUrl);
+  const provider = bscProvider(process.env.BSC_RPC_URL || undefined);
 
   const code = await provider.getCode(covenantAddress);
   if (code === "0x") throw new Error(`no contract at ${covenantAddress} on this chain - refusing to link an identity to it`);
