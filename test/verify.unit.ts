@@ -343,4 +343,166 @@ describe("verify.ts reconcile() (unit, mock RPC, crafted logs)", function () {
     expect(seen).to.deep.equal([5, 5]);
   });
 
+
+  // Mutation testing (deleting or flipping each check in verify.ts) showed that
+  // five violation kinds and several boundaries had no test at all: the suite
+  // passed with the check gone. One crafted case each.
+  describe("every violation kind, and the boundaries between clean and flagged", function () {
+    const WBNB = "0x" + "bb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c";
+    const QUOTED = 5n * 10n ** 15n;
+    const MIN = 49n * 10n ** 14n;
+
+    /** A $1 buy committed at `commitBlock`, its swap in `swapBlock` receiving `received`, settled with `settled`. */
+    function buy({ commitBlock = 10, swapBlock = 11, received = QUOTED, settled = received, minOut = MIN, id = 1, token = NVDA, spent = E18 }: Partial<Record<string, any>> = {}) {
+      chain.commit(id, token, 0, E18, QUOTED, minOut, commitBlock);
+      chain.transfer(USDT, OLD, DEX, spent, swapBlock, h(swapBlock));
+      chain.transfer(token, DEX, OLD, received, swapBlock, h(swapBlock));
+      chain.settle(id, h(swapBlock), settled, swapBlock + 1);
+    }
+
+    it("BELOW_MINIMUM: a fill under the committed minimum, and exactly the minimum is fine", async function () {
+      buy({ received: MIN - 1n });
+      expect(kinds(await run())).to.deep.equal(["BELOW_MINIMUM"]);
+    });
+    it("BELOW_MINIMUM: exactly the minimum is clean", async function () {
+      buy({ received: MIN });
+      expect((await run()).violations).to.deep.equal([]);
+    });
+
+    it("AMOUNT_MISMATCH: a settle that claims something other than what arrived", async function () {
+      buy({ settled: QUOTED + 1n });
+      expect(kinds(await run())).to.deep.equal(["AMOUNT_MISMATCH"]);
+    });
+
+    it("SWAP_BEFORE_COMMIT: the trade landed before its decision was committed", async function () {
+      buy({ commitBlock: 12, swapBlock: 10 });
+      expect(kinds(await run())).to.deep.equal(["SWAP_BEFORE_COMMIT"]);
+    });
+
+    it("the decision's expiry is inclusive: a swap in the last second is clean, one second later is flagged", async function () {
+      // block time = 1000 + block number; a decision at block 10 expires at 1010 + TTL
+      buy({ swapBlock: 10 + TTL });
+      expect((await run(1, 5000)).violations).to.deep.equal([]);
+      chain = new Chain(); chain.deploy(1); chain.configure(NVDA);
+      buy({ swapBlock: 11 + TTL });
+      expect(kinds(await run(1, 5000))).to.deep.equal(["SWAP_AFTER_EXPIRY"]);
+    });
+
+    it("TOKEN_MISMATCH: the decision was for one stock and the wallet received another", async function () {
+      chain.configure(AAPL, true, 3);
+      buy({ token: AAPL, id: 1 });
+      // rewrite the commit to name NVDA: the trade moved AAPL
+      chain.logs = chain.logs.filter((l) => !(l.topics[0] === "0x" + word(TOPICS.DecisionCommitted)));
+      chain.commit(1, NVDA, 0, E18, QUOTED, MIN, 10);
+      expect(kinds(await run())).to.deep.equal(["TOKEN_MISMATCH"]);
+    });
+
+    it("SIDE_MISMATCH: the decision said buy and the wallet sold", async function () {
+      chain.commit(1, NVDA, 0, E18, QUOTED, MIN, 10);
+      chain.transfer(NVDA, OLD, DEX, QUOTED, 11, h(11));
+      chain.transfer(USDT, DEX, OLD, E18, 11, h(11));
+      chain.settle(1, h(11), E18, 12);
+      expect(kinds(await run())).to.deep.equal(["SIDE_MISMATCH"]);
+    });
+
+    it("DUPLICATE_SETTLE: two decisions claiming one trade", async function () {
+      buy({ id: 1 });
+      chain.commit(2, NVDA, 0, E18, QUOTED, MIN, 20);
+      chain.settle(2, h(11), QUOTED, 21);
+      expect(kinds(await run())).to.deep.equal(["DUPLICATE_SETTLE"]);
+    });
+
+    it("FALSE_SETTLE: a settle whose commit isn't in the scanned range", async function () {
+      chain.transfer(USDT, OLD, DEX, E18, 11, h(11));
+      chain.transfer(NVDA, DEX, OLD, QUOTED, 11, h(11));
+      chain.settle(7, h(11), QUOTED, 12);
+      const r = await run();
+      expect(kinds(r)).to.deep.equal(["FALSE_SETTLE"]);
+      expect(r.violations[0].detail).to.contain("no commit");
+    });
+
+    it("a buy that received exactly its quote plus the tolerance is clean, a wei more is flagged", async function () {
+      const limit = (QUOTED * 10_500n) / 10_000n;
+      buy({ received: limit });
+      expect((await run()).violations).to.deep.equal([]);
+      chain = new Chain(); chain.deploy(1); chain.configure(NVDA);
+      buy({ received: limit + 1n });
+      expect(kinds(await run())).to.deep.equal(["AMOUNT_IN_EXCEEDED"]);
+    });
+
+    it("what a buy really spent is net of anything refunded in the same transaction", async function () {
+      buy({ spent: 12n * 10n ** 17n });
+      chain.transfer(USDT, DEX, OLD, 3n * 10n ** 17n, 11, h(11)); // 1.2 out, 0.3 refunded: 0.9 net, under the $1 approved
+      expect((await run()).violations).to.deep.equal([]);
+    });
+
+    it("what a sell received is net of what left in the same transaction, and the stock that left is what it spent", async function () {
+      chain.commit(1, NVDA, 1, QUOTED, E18, (E18 * 99n) / 100n, 10);
+      chain.transfer(NVDA, OLD, DEX, QUOTED, 11, h(11));
+      chain.transfer(USDT, DEX, OLD, E18, 11, h(11));
+      chain.transfer(USDT, OLD, DEX, 10n ** 16n, 11, h(11)); // a 0.01 fee out: 0.99 net
+      chain.settle(1, h(11), (E18 * 99n) / 100n, 12);
+      const r = await run();
+      expect(r.violations).to.deep.equal([]);
+      expect(r.matched.map((m) => m.side)).to.deep.equal(["sell"]);
+    });
+
+    it("the old wallet's TTL window is inclusive: a trade in the last second is flagged, one second later is not", async function () {
+      chain.agentChanged(NEW, 50); // handover at time 1050; the window runs to 1050 + TTL
+      chain.transfer(NVDA, DEX, OLD, QUOTED, 50 + TTL, h(900));
+      chain.transfer(USDT, OLD, DEX, E18, 50 + TTL, h(900));
+      expect(kinds(await run(1, 5000))).to.deep.equal(["UNMATCHED_TRADE"]);
+      chain = new Chain(); chain.deploy(1); chain.configure(NVDA);
+      chain.agentChanged(NEW, 50);
+      chain.transfer(NVDA, DEX, OLD, QUOTED, 51 + TTL, h(901));
+      chain.transfer(USDT, OLD, DEX, E18, 51 + TTL, h(901));
+      expect((await run(1, 5000)).violations).to.deep.equal([]);
+    });
+
+    it("stock a stranger sent is a gift, but a transaction the wallet paid the quote token in is a trade whoever sent it", async function () {
+      chain.transfer(USDT, OLD, DEX, E18, 30, h(3300));
+      chain.transfer(NVDA, DEX, OLD, QUOTED, 30, h(3300));
+      chain.txFrom[h(3300)] = THIRD; // e.g. sent by a sponsor on the wallet's behalf
+      const r = await run();
+      expect(kinds(r)).to.deep.equal(["UNMATCHED_TRADE"]);
+      expect(r.notices).to.deep.equal([]);
+    });
+
+    it("stock from a stranger's transaction that a settle claims is reconciled as a trade, not waved through as a gift", async function () {
+      chain.commit(1, NVDA, 0, E18, QUOTED, MIN, 10);
+      chain.transfer(NVDA, DEX, OLD, QUOTED, 11, h(11));
+      chain.txFrom[h(11)] = THIRD;
+      chain.settle(1, h(11), QUOTED, 12);
+      const r = await run();
+      expect(r.violations).to.deep.equal([]);
+      expect(r.matched).to.have.length(1);
+      expect(r.notices).to.deep.equal([]);
+    });
+
+    it("UNTRACKED_SWAP ignores the quote token coming back as change, a wrapped-BNB refund, and a configured stock that nets to zero", async function () {
+      // quote token out, part of it back: net out, but nothing unconfigured received
+      chain.transfer(USDT, OLD, DEX, E18, 30, h(3401));
+      chain.transfer(USDT, DEX, OLD, E18 / 2n, 30, h(3401));
+      // quote token out and wrapped BNB back
+      chain.transfer(USDT, OLD, DEX, E18, 31, h(3402));
+      chain.transfer(WBNB, DEX, OLD, 10n ** 15n, 31, h(3402));
+      // quote token out; a configured stock in and out again, net zero
+      chain.transfer(USDT, OLD, DEX, E18, 32, h(3403));
+      chain.transfer(NVDA, DEX, OLD, QUOTED, 32, h(3403));
+      chain.transfer(NVDA, OLD, DEX, QUOTED, 32, h(3403));
+      const r = await run();
+      expect(r.violations).to.deep.equal([]);
+      expect(r.notices.map((n) => n.kind)).to.deep.equal(["QUOTE_OUTFLOW", "QUOTE_OUTFLOW", "QUOTE_OUTFLOW"]);
+    });
+
+    it("a quote-token round trip that nets to zero is neither an outflow notice nor an untracked swap", async function () {
+      chain.transfer(USDT, OLD, DEX, E18, 30, h(3500));
+      chain.transfer(USDT, DEX, OLD, E18, 30, h(3500));
+      chain.transfer(AAPL, DEX, OLD, 5n * E18, 30, h(3500)); // an unconfigured token arrives too
+      const r = await run();
+      expect(r.violations).to.deep.equal([]);
+      expect(r.notices).to.deep.equal([]);
+    });
+  });
+
 });

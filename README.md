@@ -193,11 +193,11 @@ npm install
 npx hardhat test
 ```
 
-Nineteen suites in `test/` (194 tests, one full `npm test` run, all passing), plus two in `frontend/` (26 tests, `cd frontend && npm test`). Several suites run live against a fork or Binance's real endpoints; a hosted CI runner can be geo-blocked from Binance's API, in which case those tests skip rather than fail. Also checked in CI: `npm run typecheck` (types for the scripts, tests and MCP server) and the frontend's lint and build.
+Twenty-one suites in `test/` (223 tests, one full `npm test` run, all passing), plus two in `frontend/` (26 tests, `cd frontend && npm test`). Several suites run live against a fork or Binance's real endpoints; a hosted CI runner can be geo-blocked from Binance's API, in which case those tests skip rather than fail. Also checked in CI: `npm run typecheck` (types for the scripts, tests and MCP server) and the frontend's lint and build.
 
 The suites that deploy the contract, use a fork, or call live endpoints:
 
-- `test/Covenant.unit.ts` (55): in-memory chain with a mock ERC20. Every denial reason, including Feature 1's drift rule (with the real NVDAB numbers from 2026-09-25) and the red-team H7 daily-notional cap (with a test that deliberately demonstrates its disclosed midnight-boundary limitation rather than hiding it), the three-distinct-roles rule, agent-only commit/settle/cancel (a stranger, the owner and the updater all revert), the settle and cancel lifecycle, the understated-quote attack, Feature 3's position cap, red-team H11's self-describing `DecisionCommitted` event, Feature 2's `setMandateForTokens` batch setter, preview/commit agreement, and H14/H15/H16's fixes (agent-scoped settle/cancel, absurd-amount denials, and the drift-at-worst-price rewrite).
+- `test/Covenant.unit.ts` (62): in-memory chain with a mock ERC20. Every denial reason, including Feature 1's drift rule (with the real NVDAB numbers from 2026-09-25) and the red-team H7 daily-notional cap (with a test that deliberately demonstrates its disclosed midnight-boundary limitation rather than hiding it), the three-distinct-roles rule, agent-only commit/settle/cancel (a stranger, the owner and the updater all revert), the settle and cancel lifecycle, the understated-quote attack, Feature 3's position cap, red-team H11's self-describing `DecisionCommitted` event, Feature 2's `setMandateForTokens` batch setter, preview/commit agreement, and H14/H15/H16's fixes (agent-scoped settle/cancel, absurd-amount denials, and the drift-at-worst-price rewrite).
 - `test/Covenant.fork.ts` (7): a real fork of BSC mainnet with the real Agentic Wallet impersonated as the agent, so the position cap reads the NVDAB it really bought on Day 1. Includes a full commit, real swap and settle loop against live PancakeSwap liquidity.
 - `test/nyse-calendar.ts` (12): the NYSE calendar against real dates, including a holiday, an early close, both daylight-saving switches, and a year with no data (it refuses).
 - `test/oracle-updater.live.ts` (4): Binance's real status, price and K-line endpoints, posted on chain by the real updater code and read back; the last close is re-derived independently from a separate K-line fetch.
@@ -213,13 +213,15 @@ The suites that deploy the contract, use a fork, or call live endpoints:
 
 The live suites share `scripts/lib/local-fork.ts`, which deploys with the real `scripts/deploy.ts` and posts the oracle with the real `scripts/oracle-updater.ts`, so every one of them also exercises the path the mainnet deployment will run. They're slower than a typical Hardhat suite; see below for why.
 
-Six more suites are pure-function or mock-RPC coverage, with no fork, no network and no contract deployment: fast checks of logic the suites above only exercise on the happy path, or don't touch:
+Eight more suites are pure-function or mock-RPC coverage, with no fork, no network and no contract deployment: fast checks of logic the suites above only exercise on the happy path, or don't touch:
 
-- `test/verify.unit.ts` (21): `reconcile()` against a mock JSON-RPC server with crafted logs - H13's overspend repro (a $1-approved buy that really moved $10,000), H14's agent-rotation scoping, a multi-token trade, a revoke, a token disallowed mid-approval, a missed deployment block, `getLogs` chunk boundaries, a stock dusted into the wallet by a stranger (with and without USDT bundled in), a quote-token spend on an unconfigured stock, USDT leaving the wallet with nothing coming back, and one scan per direction however many tokens are configured. The live suite only ever reconciles one honest trade at a time; this is where the actual violation-detection logic gets tested against something trying to slip past it.
+- `test/verify.unit.ts` (38): `reconcile()` against a mock JSON-RPC server with crafted logs - H13's overspend repro (a $1-approved buy that really moved $10,000), H14's agent-rotation scoping, a multi-token trade, a revoke, a token disallowed mid-approval, a missed deployment block, `getLogs` chunk boundaries, a stock dusted into the wallet by a stranger (with and without USDT bundled in), a quote-token spend on an unconfigured stock, USDT leaving the wallet with nothing coming back, and one scan per direction however many tokens are configured. Every violation kind has its own crafted case, and every boundary (a fill exactly at the minimum, a swap in the decision's last second, a wallet's last second in scope) is tested on both sides. The live suite only ever reconciles one honest trade at a time; this is where the actual violation-detection logic gets tested against something trying to slip past it.
 - `test/skill-cli.unit.ts` (17): the Wallet Skill CLI's own input validation. `resolve` refuses ambiguous chains, the calldata builders refuse a negative amount, a `2^256` amount, a JS number that already lost precision, and a ticker where an address belongs, `compile-mandate` refuses two themes or a bound over 100%, and a stalled response body times out.
 - `test/erc8004-update.unit.ts` (3): the identity-update script's document builder, which adds the deployed contract and the agent's own id without duplicating on a re-run.
 - `test/oracle-guards.unit.ts` (7): the price-versus-candle sanity check and the multi-token oracle spec (`theme:<key>` or a comma list), no network.
-- `test/drift.unit.ts` (5): every copy of a contract fact matches the compiled contract: the CLI's selectors, the event topics in `judge.ts` and `verify.ts`, and the `DenialReason` list in the contract, the CLI, the status page and the game's monster, attack and explanation tables.
+- `test/drift.unit.ts` (6): every copy of a contract fact matches the compiled contract: the CLI's selectors, the event topics in `judge.ts` and `verify.ts`, and the `DenialReason` list in the contract, the CLI, the status page and the game's monster, attack and explanation tables.
+- `test/web3-api-clock.unit.ts` (3): the signed Web3 API client when this machine's clock is outside Binance's receive window: it corrects once from the server's own time and retries, then gives up rather than looping, and doesn't retry any other error.
+- `test/Covenant.fuzz.unit.ts` (1): a seeded differential fuzz of `previewDecision` against an independent BigInt model of the rules, over amounts up to the `2^128` limit; it asserts there is never a revert (a panic instead of a denial) and never a disagreement, and that it reaches the late checks. 12,000 cases at development time found no mismatch.
 - `test/status-page-lib.unit.ts` (15): the sell-side wording in `describeDecision`/`guardedVsUnguarded` (the live suite only ever commits buy-side decisions), and `resolveFromBlock`'s input validation (NaN, negative, non-integer).
 
 ### What needs a secret, and what needs an archive RPC
@@ -413,6 +415,20 @@ Earlier passes read code for risk. This one ran everything that can be run: `tsc
 | The 2027 NYSE holidays and the walk-back across New Year were untested | Four tests, including every full closure in both years |
 | This README's test section listed five suites under "Four more", 16 of 18 files, and stale counts | Corrected against a full run: 194 tests; `npm test` is the source, not this list |
 | Unused variables, a dead constant, test libraries in the frontend's runtime dependencies, no frontend lint in CI | Removed, moved to dev dependencies, and added |
+
+### A ninth pass: do the tests notice when the code is wrong?
+
+Line coverage says a line ran, not that a test would fail if it were wrong. So this pass made 33 deliberate breaks in `Covenant.sol` and 33 in `verify.ts` (flip a `>` to `>=`, delete a check, count a trade twice) and ran the unit tests against each. The first run let 8 of the contract's and 22 of `verify.ts`'s survive with every test still green.
+
+| What survived | Test added |
+|---|---|
+| Five `verify.ts` violation kinds (`BELOW_MINIMUM`, `TOKEN_MISMATCH`, `SIDE_MISMATCH`, `DUPLICATE_SETTLE`, `SWAP_BEFORE_COMMIT`) could be deleted with the suite green | One crafted case each, plus the settle-without-commit and amount-mismatch cases |
+| The boundaries between clean and flagged in `verify.ts` (a fill exactly at the minimum, the received-stock tolerance, a swap in a decision's last second, a wallet's last second in scope) | Each tested on both sides |
+| The exclusions in the untracked-swap and dust rules (quote-token change, a wrapped-BNB refund, a stock that nets to zero, a settle-claimed transaction from a stranger, a sponsored paid trade) | One case each |
+| The contract's boundaries: mandate expiry, oracle staleness, the decision's last second, the quote ceiling, both drift bounds | Each on the exact second or wei and one past it |
+| The daily trade counter could count each trade twice, or fail to reset on a new UTC day, and no test noticed | A test for a running count and notional, and for the new UTC day |
+
+The full run also failed the live suites once for a reason unrelated to any of this: this laptop's clock was 19 seconds behind Binance's, and the signed Web3 API rejects a timestamp outside its receive window (HTTP 401, code 40103). The client now reads the server's time from that error, corrects once and retries (friction log A12).\n\nAfter the new tests, all 33 breaks in each file are caught. A separate differential fuzz found nothing wrong in the contract itself: the gaps were in the tests. The pass also caught two mistakes of mine from the previous one: the CI typecheck step failed on a clean checkout (it needed the compiled artifacts) and the Cancun pin covered only the production profile.
 
 ### The one bug only found by running it in a browser
 

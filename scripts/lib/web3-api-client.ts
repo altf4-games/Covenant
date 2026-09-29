@@ -39,6 +39,19 @@ export function loadWeb3ApiCredentials(env: NodeJS.ProcessEnv = process.env): We
   return { apiKey, secretKey };
 }
 
+/**
+ * How far this machine's clock is behind (negative: ahead of) Binance's, in ms,
+ * learned from a rejected request. The API rejects a timestamp outside its
+ * receive window with HTTP 401 code 40103 and names its own time in the message
+ * ("Timestamp outside recv_window. serverTime=..."). A laptop clock 19 seconds
+ * slow was enough to fail every signed call, so the first such error corrects
+ * the clock once and retries.
+ */
+let clockOffsetMs = 0;
+export const resetClockOffset = () => {
+  clockOffsetMs = 0;
+};
+
 /** One signed GET call against the documented Web3 API. Throws on a non-zero business `code`. */
 export async function web3ApiGet(
   creds: Web3ApiCredentials,
@@ -50,24 +63,35 @@ export async function web3ApiGet(
     .join("&");
   const fullPath = queryStr ? `${path}?${queryStr}` : path;
   const signedPath = BUILD_PREFIX + fullPath;
-  const timestamp = new Date().toISOString();
-  const preHash = timestamp + "GET" + signedPath + "";
-  const signature = createHmac("sha256", creds.secretKey).update(preHash, "utf8").digest("base64");
 
-  const res = await fetch(BASE_URL + signedPath, {
-    method: "GET",
-    headers: {
-      "X-OC-APIKEY": creds.apiKey,
-      "X-OC-TIMESTAMP": timestamp,
-      "X-OC-SIGN": signature,
-    },
-    signal: AbortSignal.timeout(15_000),
-  });
-  const body = (await res.json()) as { code?: number; msg?: string; data?: unknown };
-  if (!res.ok || body.code !== 0) {
-    throw new Error(`Web3 API GET ${path} failed: HTTP ${res.status} code=${body.code} msg=${body.msg}`);
+  for (let attempt = 0; ; attempt++) {
+    const timestamp = new Date(Date.now() + clockOffsetMs).toISOString();
+    const preHash = timestamp + "GET" + signedPath + "";
+    const signature = createHmac("sha256", creds.secretKey).update(preHash, "utf8").digest("base64");
+
+    const res = await fetch(BASE_URL + signedPath, {
+      method: "GET",
+      headers: {
+        "X-OC-APIKEY": creds.apiKey,
+        "X-OC-TIMESTAMP": timestamp,
+        "X-OC-SIGN": signature,
+      },
+      signal: AbortSignal.timeout(15_000),
+    });
+    const body = (await res.json()) as { code?: number; msg?: string; data?: unknown };
+    if (body.code === 40103 && attempt === 0) {
+      const serverTime = /serverTime=([0-9T:.-]+Z)/.exec(body.msg ?? "")?.[1];
+      const server = serverTime ? Date.parse(serverTime) : NaN;
+      if (Number.isFinite(server)) {
+        clockOffsetMs = server - Date.now();
+        continue;
+      }
+    }
+    if (!res.ok || body.code !== 0) {
+      throw new Error(`Web3 API GET ${path} failed: HTTP ${res.status} code=${body.code} msg=${body.msg}`);
+    }
+    return body.data;
   }
-  return body.data;
 }
 
 export interface RwaTokenListing {

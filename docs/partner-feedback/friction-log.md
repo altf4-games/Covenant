@@ -85,6 +85,13 @@ With no documented shape to go on, tried to reverse-engineer it from the live er
 **Day-of check result: fails clean.** Per this feature's own stated gate ("confirm the Transaction API can actually simulate this route; skip cleanly if it can't"), Feature 5 (simulation hash in `commit`) does not verify and should not be built on this endpoint as currently documented. The finding itself — a advertised "dry-run" endpoint with no discoverable request contract — is stronger Developer Experience Report material than a forced integration would have been.
 **Redesign suggestion:** publish at least one working `curl` example for `POST /simulate`, the same way `broadcast-transaction` has one in `integration-flow.md`; right now it's the only pre-transaction endpoint with zero example payloads anywhere in the docs.
 
+### A12. `[API][PITFALL]` The signed Web3 API rejects a request from a clock only 19 seconds off, and the fix is in the error text - 2026-09-29
+Every signed call started failing with `HTTP 401 code=40103 msg=Timestamp outside recv_window. serverTime=2026-09-29T09:37:13.075202901Z`. Nothing in my code had changed. My laptop's clock was 19 seconds behind Binance's (I checked against the `Date` header of a plain request to web3.binance.com), and the signature covers the timestamp, so a slow clock fails the signature check too.
+
+I didn't find two things on the authentication page I read: how wide the receive window is, and that a rejected request tells you the server's time (worth re-checking the page before this goes in the report). The second one is the useful part. The client now reads `serverTime` out of the 40103 message, works out its own offset, and retries once. That turned a hard failure into a working call.
+
+**Redesign suggestion:** document the window size on the authentication page, and return the server time in a header or a dedicated `/time` endpoint instead of only inside an error string. Most exchange APIs have one.
+
 ---
 
 ## B. Tokenized stocks — the asset class itself

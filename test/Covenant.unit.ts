@@ -885,4 +885,107 @@ describe("Covenant v2 (unit, mocked tokens)", function () {
     });
   });
 
+
+  // Mutation testing (a deliberate flip of each comparison in Covenant.sol) showed
+  // the suite passed with `>` changed to `>=` at every boundary below, and with
+  // the same-day counter counting twice. These put each value exactly on its
+  // boundary, one second or one wei either side.
+  describe("boundaries: exactly at the limit is allowed, one past it is not", function () {
+    type Fx = Awaited<ReturnType<typeof deployFixture>>;
+    const at = async (t: number | bigint) => networkHelpers.time.setNextBlockTimestamp(Number(t));
+
+    it("a mandate is still valid at the second it expires, and expired after it", async function () {
+      const f: Fx = await networkHelpers.loadFixture(deployFixture);
+      await makeTradeable(f);
+      const expiry = BigInt(await networkHelpers.time.latest()) + 200n;
+      await f.covenant.setMandate(10n * E18, 5n, expiry);
+      await at(expiry);
+      const ok = await commit(f, Side.Buy, buyArgs(E18));
+      expect(ok.reason).to.equal(Reason.None);
+      await f.covenant.connect(f.agent).cancel(ok.id);
+      await at(expiry + 2n); // the cancel above mined at expiry + 1
+      expect((await commit(f, Side.Buy, buyArgs(E18))).reason).to.equal(Reason.MandateExpired);
+    });
+
+    it("oracle data is fresh at exactly the staleness bound, stale one second later", async function () {
+      const f: Fx = await networkHelpers.loadFixture(deployFixture);
+      await makeTradeable(f);
+      const t0 = (await f.covenant.oracleStatus(f.stockAddress)).updatedAt;
+      await at(t0 + BigInt(STALENESS_BOUND));
+      const ok = await commit(f, Side.Buy, buyArgs(E18));
+      expect(ok.reason).to.equal(Reason.None);
+      await f.covenant.connect(f.agent).cancel(ok.id);
+      await at(t0 + BigInt(STALENESS_BOUND) + 2n);
+      expect((await commit(f, Side.Buy, buyArgs(E18))).reason).to.equal(Reason.OracleStale);
+    });
+
+    it("an approved decision blocks the next commit through its last valid second, and not after", async function () {
+      const f: Fx = await networkHelpers.loadFixture(deployFixture);
+      await makeTradeable(f);
+      const first = await commit(f, Side.Buy, buyArgs(E18));
+      const committedAt = BigInt(await networkHelpers.time.latest());
+      expect(first.reason).to.equal(Reason.None);
+      await at(committedAt + BigInt(DECISION_TTL));
+      expect((await commit(f, Side.Buy, buyArgs(E18))).reason).to.equal(Reason.DecisionOpen);
+      await at(committedAt + BigInt(DECISION_TTL) + 1n);
+      expect((await commit(f, Side.Buy, buyArgs(E18))).reason).to.equal(Reason.None);
+    });
+
+    it("a quote exactly at the slippage bound above the oracle is allowed, one wei more is not", async function () {
+      const f: Fx = await networkHelpers.loadFixture(deployFixture);
+      await makeTradeable(f, { slippageBps: 100 });
+      const oracleOut = (E18 * E18) / (200n * E18); // 5e15
+      const limit = (oracleOut * 10_100n) / 10_000n; // exactly 1% above
+      expect(limit * 10_000n).to.equal(oracleOut * 10_100n); // the boundary really is exact
+      const args = (quotedOut: bigint) => [Side.Buy, f.stockAddress, E18, quotedOut, quotedOut] as const;
+      expect(await f.covenant.previewDecision(...args(limit))).to.equal(Reason.None);
+      expect(await f.covenant.previewDecision(...args(limit + 1n))).to.equal(Reason.SlippageTooLoose);
+    });
+
+    it("a closed-market buy exactly at the drift bound is allowed, a wei worse is not", async function () {
+      const f: Fx = await networkHelpers.loadFixture(deployFixture);
+      const price = 100n * E18;
+      await makeTradeable(f, { price, maxNotional: 1000n * E18, maxPositionUsd: 1000n * E18, slippageBps: 100 });
+      await f.covenant.setClosedMarketDrift(f.stockAddress, 100);
+      await f.covenant.connect(f.updater).updateOracle(f.stockAddress, false, price, false, price);
+      const amountIn = 101n * E18; // worst price = amountIn * 1e18 / minOut = 101e18 = lastClose * 1.01, exactly
+      const quotedOut = (amountIn * E18) / price;
+      const preview = (minOut: bigint) => f.covenant.previewDecision(Side.Buy, f.stockAddress, amountIn, quotedOut, minOut);
+      expect(await preview(E18)).to.equal(Reason.None);
+      expect(await preview(E18 - 1n)).to.equal(Reason.ClosedMarketDrift);
+    });
+
+    it("a closed-market sell exactly at the drift bound is allowed, a wei worse is not", async function () {
+      const f: Fx = await networkHelpers.loadFixture(deployFixture);
+      const price = 100n * E18;
+      await makeTradeable(f, { price, maxNotional: 1000n * E18, slippageBps: 200 });
+      await f.covenant.setClosedMarketDrift(f.stockAddress, 100);
+      await f.covenant.connect(f.updater).updateOracle(f.stockAddress, false, price, false, price);
+      const quotedOut = 100n * E18;
+      const preview = (minOut: bigint) => f.covenant.previewDecision(Side.Sell, f.stockAddress, E18, quotedOut, minOut);
+      expect(await preview(99n * E18)).to.equal(Reason.None); // worst price = 99e18 = lastClose * 0.99
+      expect(await preview(99n * E18 - 1n)).to.equal(Reason.ClosedMarketDrift);
+    });
+
+    it("the day's trade count and notional add up one trade at a time, and start over on a new UTC day", async function () {
+      const f: Fx = await networkHelpers.loadFixture(deployFixture);
+      await makeTradeable(f, { maxTrades: 5n });
+      for (let i = 0; i < 3; i++) {
+        const ev = await commit(f, Side.Buy, buyArgs(E18));
+        expect(ev.reason).to.equal(Reason.None);
+        await f.covenant.connect(f.agent).cancel(ev.id);
+      }
+      expect(await f.covenant.tradesUsedToday()).to.equal(3n);
+      expect(await f.covenant.notionalUsedToday()).to.equal(3n * E18);
+
+      const nextDay = (BigInt(await networkHelpers.time.latest()) / 86_400n + 1n) * 86_400n + 5n;
+      await networkHelpers.time.increaseTo(nextDay);
+      await f.covenant.connect(f.updater).updateOracle(f.stockAddress, false, 200n * E18, true, 200n * E18);
+      expect(await f.covenant.tradesUsedToday()).to.equal(0n); // the view already reads the new day as empty
+      expect((await commit(f, Side.Buy, buyArgs(E18))).reason).to.equal(Reason.None);
+      expect(await f.covenant.tradesUsedToday()).to.equal(1n);
+      expect(await f.covenant.notionalUsedToday()).to.equal(E18);
+    });
+  });
+
 });
