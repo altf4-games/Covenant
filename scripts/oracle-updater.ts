@@ -27,15 +27,23 @@
  * fail-closed philosophy as the rest of this function: if the signed API
  * can't confirm the listing, nothing is posted.
  *
+ * A theme mandate (setMandateForTokens) can allow several tokens, and each
+ * one's oracle goes stale on its own, so ORACLE_TOKEN_ADDRESS takes a
+ * comma-separated list, or `theme:<key>` for every token in a theme-map.json
+ * theme. A failure on one token doesn't stop the others; the run still exits
+ * non-zero so the failure is visible, and the failed token's oracle goes stale
+ * and its commits are denied (fail-closed, per token).
+ *
  * Usage:
  *   npx tsx scripts/oracle-updater.ts
  * Env: ORACLE_UPDATER_PRIVATE_KEY, COVENANT_ADDRESS, WEB3_API_KEY, WEB3_API_SECRET,
- *      optional BSC_RPC_URL, ORACLE_TOKEN_ADDRESS (default real NVDAB),
+ *      optional BSC_RPC_URL, ORACLE_TOKEN_ADDRESS (default real NVDAB; comma list or theme:<key>),
  *      ORACLE_BINANCE_CHAIN_ID (default 56), ORACLE_PLATFORM_ID (default "bstock").
  */
 import { ethers } from "ethers";
 import covenantArtifact from "../artifacts/contracts/Covenant.sol/Covenant.json" with { type: "json" };
-import { fetchAssetMarketStatus, isHalted, priceToUsdE18, fetchHourlyKlines, closePriceAt, type AssetMarketStatus } from "./lib/rwa-status.js";
+import { fetchAssetMarketStatus, isHalted, priceToUsdE18, fetchHourlyKlines, closePriceAt, assertPriceConsistent, type AssetMarketStatus } from "./lib/rwa-status.js";
+import { readFileSync } from "node:fs";
 import { isRegularSessionOpen, lastRegularClose } from "./lib/nyse-calendar.js";
 import { fetchDynamic } from "../skills/covenant-mandate/scripts/cli.mjs";
 import { loadWeb3ApiCredentials, verifyTokenListed, type RwaTokenListing } from "./lib/web3-api-client.js";
@@ -92,6 +100,7 @@ export async function readLiveOracle(
   }
   const priceUsd = priceToUsdE18(String(rawPrice));
   if (priceUsd === 0n) throw new Error(`live price for ${token} is zero - refusing to post it`);
+  assertPriceConsistent(priceUsd, klines);
 
   const lastCloseAt = lastRegularClose(now);
   const rawLastClose = closePriceAt(klines, lastCloseAt);
@@ -109,6 +118,25 @@ export async function readLiveOracle(
     lastCloseUsd,
     authenticatedListing,
   };
+}
+
+/**
+ * "0xabc,0xdef" -> both; "theme:ai-chips" -> every token in that theme of
+ * skills/covenant-mandate/scripts/theme-map.json.
+ */
+export function resolveOracleTokens(spec: string): string[] {
+  const themePrefix = "theme:";
+  if (spec.startsWith(themePrefix)) {
+    const key = spec.slice(themePrefix.length).trim();
+    const map = JSON.parse(readFileSync(new URL("../skills/covenant-mandate/scripts/theme-map.json", import.meta.url), "utf8"));
+    const theme = map.themes[key];
+    if (!theme) throw new Error(`no theme "${key}" in theme-map.json (known: ${Object.keys(map.themes).join(", ")})`);
+    return Object.values(theme.tickers) as string[];
+  }
+  const tokens = spec.split(",").map((t) => t.trim()).filter(Boolean);
+  for (const t of tokens) if (!/^0x[0-9a-fA-F]{40}$/.test(t)) throw new Error(`"${t}" is not a 0x-prefixed 20-byte address`);
+  if (tokens.length === 0) throw new Error("ORACLE_TOKEN_ADDRESS is empty");
+  return [...new Set(tokens.map((t) => t.toLowerCase()))];
 }
 
 /** Posts a reading and confirms it by reading the contract back. */
@@ -154,21 +182,30 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     const covenantAddress = process.env.COVENANT_ADDRESS;
     if (!privateKey || !covenantAddress) throw new Error("Set ORACLE_UPDATER_PRIVATE_KEY and COVENANT_ADDRESS.");
     // `||`, not `??`: .env.example ships these present but blank.
-    const token = process.env.ORACLE_TOKEN_ADDRESS || DEFAULT_TOKEN;
+    const tokens = resolveOracleTokens(process.env.ORACLE_TOKEN_ADDRESS || DEFAULT_TOKEN);
     const chainId = Number(process.env.ORACLE_BINANCE_CHAIN_ID || DEFAULT_CHAIN_ID);
     const platformId = process.env.ORACLE_PLATFORM_ID || "bstock";
     const rpcUrl = process.env.BSC_RPC_URL || "https://bsc-mainnet.public.blastapi.io";
+    // NonceManager: several sequential updateOracle sends from one key.
+    const signer = new ethers.NonceManager(new ethers.Wallet(privateKey, new ethers.JsonRpcProvider(rpcUrl)));
 
-    const reading = await readLiveOracle(chainId, token, new Date(), platformId);
-    console.log(`live: openState=${reading.status.openState} reasonCode=${reading.status.reasonCode} -> halted=${reading.halted}, price=${reading.rawPrice}`);
-    console.log(`NYSE session open: ${reading.sessionOpen}; last close ${reading.lastCloseAt.toISOString()} at ${reading.rawLastClose}`);
-    console.log(
-      `authenticated Market API confirms ${reading.authenticatedListing.tokenSymbol} (platformId=${reading.authenticatedListing.platformId}, chain ${reading.authenticatedListing.binanceChainId}) - red-team H10`,
-    );
-
-    const signer = new ethers.Wallet(privateKey, new ethers.JsonRpcProvider(rpcUrl));
-    const result = await pushOracleUpdate({ signer, covenantAddress, token, reading });
-    console.log(`posted in ${result.txHash}; on chain now halted=${result.halted} priceUsd=${ethers.formatUnits(result.priceUsd, 18)}`);
+    let failures = 0;
+    for (const token of tokens) {
+      try {
+        const reading = await readLiveOracle(chainId, token, new Date(), platformId);
+        console.log(`[${token}] live: openState=${reading.status.openState} reasonCode=${reading.status.reasonCode} -> halted=${reading.halted}, price=${reading.rawPrice}`);
+        console.log(`[${token}] NYSE session open: ${reading.sessionOpen}; last close ${reading.lastCloseAt.toISOString()} at ${reading.rawLastClose}`);
+        console.log(
+          `[${token}] authenticated Market API confirms ${reading.authenticatedListing.tokenSymbol} (platformId=${reading.authenticatedListing.platformId}, chain ${reading.authenticatedListing.binanceChainId}) - red-team H10`,
+        );
+        const result = await pushOracleUpdate({ signer, covenantAddress, token, reading });
+        console.log(`[${token}] posted in ${result.txHash}; on chain now halted=${result.halted} priceUsd=${ethers.formatUnits(result.priceUsd, 18)}`);
+      } catch (error) {
+        failures++;
+        console.error(`[${token}] NOT posted (its oracle will go stale, commits for it are denied):`, error instanceof Error ? error.message : error);
+      }
+    }
+    if (failures > 0) process.exitCode = 1;
   })().catch((error) => {
     console.error(error);
     process.exitCode = 1;

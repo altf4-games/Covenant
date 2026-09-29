@@ -92,7 +92,7 @@ Phase 2.5 added a slashable bond for the oracle updater. As built it provided no
 `docs/research/opus-2026-09-24/a-redteam.md` red-teamed v1. Four findings against v2's design were still open after the rebuild; all four are now fixed, each with a real fork test, not just a code change:
 
 - **H7 (midnight double-burst, no cumulative cap).** The only notional check was per trade, so real daily exposure was `maxNotionalPerTradeUsd x maxTradesPerDay`, doubled by trading across a UTC midnight boundary. `setMaxDailyNotionalUsd` (a separate owner setter, independent of `setMandate` so tightening it never requires re-setting the mandate) now caps cumulative same-day notional; `DailyNotionalExceeded` is a new denial reason. Kept honest: a cap keyed by the UTC calendar day doesn't by itself close the midnight-boundary gap it was added for, and `test/Covenant.unit.ts` has a test that deliberately demonstrates the residual gap still clearing the cap twice within under a minute, rather than claiming the cap fixes something it doesn't.
-- **H8 (no scheduled oracle updater).** `oracle-updater.ts` was a one-shot script with nothing to run it. `scripts/oracle-updater-cron.sh` (same self-disabling pattern as the existing off-hours cron: it removes its own crontab line once past the Oct 11 deadline) now exists to run it on a schedule. Not installed automatically - it's the one part of this project that would spend real gas on a timer rather than per deliberate action, so it's opt-in via `crontab -e`, documented in the script itself.
+- **H8 (no scheduled oracle updater).** `oracle-updater.ts` was a one-shot script with nothing to run it. `scripts/oracle-updater-cron.sh` (same self-disabling pattern as the off-hours cron; it removes its own crontab line on Oct 24, after judging, so judges don't find a contract that denies every commit) now exists to run it on a schedule. Not installed automatically - it's the one part of this project that would spend real gas on a timer rather than per deliberate action, so it's opt-in via `crontab -e`, documented in the script itself.
 - **H10 (the authenticated Web3 API sits unused).** Every price/status read went through Binance's public, unauthenticated `bapi` endpoints; the HMAC-signed Web3 API key from Phase 0 backed nothing. `scripts/lib/web3-api-client.ts` implements the documented HMAC-SHA256 signing (`authentication.md`, verified live while investigating friction-log A10/A11) and `oracle-updater.ts`'s `readLiveOracle` now cross-checks the token address against Binance's authenticated Market API before trusting a price for it - fail-closed, same as the rest of that function, if the credentials or the listing are missing.
 - **H11 (a decision wasn't provable without replaying history).** `DecisionCommitted` used to carry only the trade and the denial reason; proving a decision was evaluated correctly meant replaying `MandateSet`/`OracleUpdated` history to reconstruct what was in force. The event now also carries the mandate's per-trade cap, trade-count cap and expiry, plus the oracle's `updatedAt`, all snapshotted at commit time - a third party can check one event, no replay required.
 
@@ -116,7 +116,7 @@ It reads hashes from `JUDGE_TX_HASHES` (comma-separated) or [`data/judge-tx-hash
 COVENANT_ADDRESS=0x... VERIFY_FROM_BLOCK=<deployment block> npm run verify
 ```
 
-It flags a trade with no settled decision (`UNMATCHED_TRADE`), a settle pointing at a transaction that moved no stock (`FALSE_SETTLE`), a settled amount that isn't what really arrived (`AMOUNT_MISMATCH`), a fill below the committed minimum (`BELOW_MINIMUM`), a trade before its commit or after its expiry, a wrong token or side, and two decisions claiming one trade. Amounts are compared against the ERC-20 transfers, not Binance's reported fill, which is in share units for bStocks (friction-log C17).
+It flags a trade with no settled decision (`UNMATCHED_TRADE`), a settle pointing at a transaction that moved no stock (`FALSE_SETTLE`), a settled amount that isn't what really arrived (`AMOUNT_MISMATCH`), a fill below the committed minimum (`BELOW_MINIMUM`), a trade before its commit or after its expiry, a wrong token or side, two decisions claiming one trade, and quote-token spend that brings back a token the owner never configured (`UNTRACKED_SWAP`). A stock sent to the wallet by a stranger who paid nothing is a notice (`INBOUND_TRANSFER`), not a violation, so nobody can turn the reconciliation red by dusting the address. Amounts are compared against the ERC-20 transfers, not Binance's reported fill, which is in share units for bStocks (friction-log C17).
 
 `test/verify.live.ts` proves each verdict with real swaps against live PancakeSwap liquidity on a mainnet fork: an honest buy and an honest sell reconcile clean, and a bypass, a false settle, a settle using Binance's share-unit number, and a swap after expiry are each flagged, with nothing else flagged.
 
@@ -187,7 +187,7 @@ npm install
 npx hardhat test
 ```
 
-Fifteen suites, 142 tests:
+Sixteen suites:
 
 - `test/Covenant.unit.ts` (50): in-memory chain with a mock ERC20. Every denial reason, including Feature 1's drift rule (with the real NVDAB numbers from 2026-09-25) and the red-team H7 daily-notional cap (with a test that deliberately demonstrates its disclosed midnight-boundary limitation rather than hiding it), the three-distinct-roles rule, agent-only commit/settle/cancel (a stranger, the owner and the updater all revert), the settle and cancel lifecycle, the understated-quote attack, Feature 3's position cap, red-team H11's self-describing `DecisionCommitted` event, Feature 2's `setMandateForTokens` batch setter, preview/commit agreement, and H14/H15/H16's fixes (agent-scoped settle/cancel, absurd-amount denials, and the drift-at-worst-price rewrite).
 - `test/Covenant.fork.ts` (7): a real fork of BSC mainnet with the real Agentic Wallet impersonated as the agent, so the position cap reads the NVDAB it really bought on Day 1. Includes a full commit, real swap and settle loop against live PancakeSwap liquidity.
@@ -205,9 +205,10 @@ The live suites share `scripts/lib/local-fork.ts`, which deploys with the real `
 
 Four more suites need no fork and no network at all - fast, pure-function coverage for logic the live suites above only exercise on the happy path, or don't touch:
 
-- `test/verify.unit.ts` (13): `reconcile()` against a mock JSON-RPC server with crafted logs - H13's overspend repro (a $1-approved buy that really moved $10,000), H14's agent-rotation scoping, a multi-token trade, a revoke, a token disallowed mid-approval, a missed deployment block, and `getLogs` chunk boundaries. The live suite only ever reconciles one honest trade at a time; this is where the actual violation-detection logic gets tested against something trying to slip past it.
-- `test/skill-cli.unit.ts` (8): the Wallet Skill CLI's own input validation - `resolve`'s chain-disambiguation refusals, and the calldata builders refusing a negative amount, a `2^256` amount, a JS number that already lost precision, and a ticker where an address belongs.
-- `test/status-page-lib.unit.ts` (9): the sell-side wording in `describeDecision`/`guardedVsUnguarded` (the live suite only ever commits buy-side decisions), and `resolveFromBlock`'s input validation (NaN, negative, non-integer).
+- `test/verify.unit.ts` (17): `reconcile()` against a mock JSON-RPC server with crafted logs - H13's overspend repro (a $1-approved buy that really moved $10,000), H14's agent-rotation scoping, a multi-token trade, a revoke, a token disallowed mid-approval, a missed deployment block, `getLogs` chunk boundaries, a stock dusted into the wallet by a stranger, and a quote-token spend on an unconfigured stock. The live suite only ever reconciles one honest trade at a time; this is where the actual violation-detection logic gets tested against something trying to slip past it.
+- `test/skill-cli.unit.ts` (14): the Wallet Skill CLI's own input validation. `resolve` refuses ambiguous chains, the calldata builders refuse a negative amount, a `2^256` amount, a JS number that already lost precision, and a ticker where an address belongs, `compile-mandate` refuses two themes or a bound over 100%, and a stalled response body times out.
+- `test/oracle-guards.unit.ts` (7): the price-versus-candle sanity check and the multi-token oracle spec (`theme:<key>` or a comma list), no network.
+- `test/status-page-lib.unit.ts` (10): the sell-side wording in `describeDecision`/`guardedVsUnguarded` (the live suite only ever commits buy-side decisions), and `resolveFromBlock`'s input validation (NaN, negative, non-integer).
 
 ### What needs a secret, and what needs an archive RPC
 
@@ -215,7 +216,7 @@ Not every test or script here runs the same way. Some need nothing but a public 
 
 | Needs | Examples | Why |
 |---|---|---|
-| Nothing (public RPC only) | `test/Covenant.unit.ts`, `test/verify.unit.ts`, `test/skill-cli.unit.ts`, `test/status-page-lib.unit.ts`, `test/nyse-calendar.ts` | Pure logic, or a mock chain/RPC - no real network call. |
+| Nothing (public RPC only) | `test/Covenant.unit.ts`, `test/verify.unit.ts`, `test/skill-cli.unit.ts`, `test/status-page-lib.unit.ts`, `test/oracle-guards.unit.ts`, `test/nyse-calendar.ts` | Pure logic, or a mock chain/RPC - no real network call. |
 | `WEB3_API_KEY` / `WEB3_API_SECRET` | `test/oracle-updater.live.ts`, `test/skill-cli.live.ts`, `scripts/oracle-updater.ts` | Reads Binance's RWA Data/Market APIs (real price, real market status). |
 | `GEMINI_API_KEY` | `scripts/generate-narration.ts` | Batch play-by-play narration - see "Running the status page" below. |
 | An archive-capable RPC (`bsc-dataseed`/`1rpc` verified live to work; `publicnode` refuses old receipts) | `scripts/verify.ts` run against a wide historical range, the frontend's snapshot/re-verification mode | A public RPC's own `eth_getLogs` range cap and receipt-pruning window (docs/partner-feedback/friction-log.md) - `bsc-dataseed` returns "limit exceeded" past a few thousand blocks, `publicnode` won't serve receipts for old transactions at all. `status-page/lib.mjs`'s `fetchDecisionEvents` chunks its own `eth_getLogs` calls (`DEFAULT_LOGS_CHUNK_BLOCKS`) for exactly this reason, mirroring the chunking `scripts/verify.ts` already needed. |
@@ -342,6 +343,22 @@ Every functional claim on this page is backed by a real bug this project's own t
 | The try-to-break-it demo settled its own honest trade with the quote, not the real fill | Passed `quotedOut` to `settle` instead of the swap receipt's real `Transfer` amount - the exact mistake friction-log C17 documents | `verify.ts`'s own `reconcile()`, run in the same script, caught it immediately (0 matched instead of 1); fixed to read the real `Transfer` log |
 | A rounding artifact at exactly the drift bound | `quotedOut = amountIn × 1e18 / price` truncates, landing ~1e-16 of the price over the bound | Errs toward refusing (the right direction for a guard) - left as-is, asserted directly in the unit test |
 
+### A fifth red-team pass over the whole repo
+
+Each one was reproduced with a throwaway test first, then fixed and covered by a permanent test.
+
+| Bug | Cause | Fix |
+|---|---|---|
+| A buy declaring `amountIn` = $1 with a quote worth $50 was approved | The contract bounded the minimum below the quote and the oracle, but nothing bounded the quote above the oracle; `verify.ts` derived its "received too much" ceiling from that same quote | `_evaluate` now denies a quote more than the slippage bound above the oracle (`SlippageTooLoose`) |
+| Buying a stock the owner never configured reconciled clean | `verify.ts` only watched configured tokens | A quote-token spend that brings back an unconfigured token is `UNTRACKED_SWAP` |
+| Anyone could turn the reconciliation red for good by sending 1 wei of a stock to the wallet | Every inbound transfer counted as a trade | Inbound, unpaid, not sent by the wallet: a notice, not a violation |
+| A theme mandate allowed eight tokens but the oracle kept one fresh | `oracle-updater.ts` took a single token address | Takes a comma list or `theme:<key>`; one token failing doesn't stop the rest |
+| The status page opened onto an empty ledger | Default lookback was 500 blocks, a few minutes on BSC, and the placeholder text said 2000 | 50,000 blocks; text corrected; `deploy.ts` prints the deployment block |
+| `compile-mandate` silently picked one theme when given two, and emitted calldata for a 150% drift bound that would revert | Regex extraction with no ambiguity or range check | Refuses both |
+| One hanging RPC stalled `verify` and `judge` instead of failing over | No fetch timeout, and failover only advances on a thrown error | Timeouts on every RPC and upstream call |
+| `survey` called a quiet token dead from a ~3000-block window | A window of minutes | Scans as far back as the free RPC serves, reports `blocksScanned`; TSLAx, previously "dead", shows 4 transfers to its bStock's 185 |
+| A live price with a fresh on-chain timestamp could be stale upstream | Nothing compared the price feed to anything else | The updater refuses a price more than 10% from the latest hourly candle |
+
 ### The one bug only found by running it in a browser
 
 Every bug above was caught by an automated test. This one wasn't: manually driving `status-page/index.html` against a real fork in a real browser found that a query range crossing the fork's boundary makes Hardhat's `eth_getLogs` hang forever (friction-log B16). Fixed properly, not just logged: `fetchAttestations` races the real call against a client-side timeout, and a new live suite (`test/status-page.live.ts`) proves both sides - a safe range returns real events fast, a boundary-crossing one rejects within the timeout instead of hanging. Writing that test caught two more things live: the "safe" boundary is `forkStartBlock + 1`, not `forkStartBlock` itself (still needs the same remote lookup and hangs identically), and one hung `eth_getLogs` call degrades the *whole node* for calls after it - so the suite deliberately runs its node-degrading test last, documented as such in its own comments.
@@ -355,5 +372,6 @@ Every bug above was caught by an automated test. This one wasn't: manually drivi
 - **H7's daily-notional cap closes the midnight-double-burst gap for everything except a burst timed exactly across the UTC boundary.** `test/Covenant.unit.ts` has a test that demonstrates this specific residual case directly, so the boundary is measured rather than assumed.
 - **Off-hours logging reflects real conditions, laptop sleep included.** `data/off-hours-log.jsonl`'s occasional gaps (confirmed live via `pmset -g log`) are what running unattended infrastructure on a laptop actually looks like, left as-is rather than papered over with `caffeinate`.
 - **The trading card's rarity tier is a deterministic classification** (`frontend/src/lib/rarity.ts`) standing in for a live TypeSafe Jev call, which needs its own third-party API key.
+- **Reconciliation is scoped to the configured tokens.** `verify.ts` catches an unconfigured token bought with the quote token, but a stock bought with native BNB leaves no quote-token movement to key off, so only configured tokens are reconciled in that case.
 - **The closed-market drift rule is as accurate as the Binance status/price feeds it reads.** Like any oracle-based guard, it fails closed on a failed read; a read that succeeds with wrong upstream data is outside what it can catch.
 - **The Agentic Wallet's developer mode lapses after ~7 days of external-transaction inactivity** (undocumented by Binance, found by testing it - friction-log C14). A fork-heavy dev workflow doesn't touch this on its own, so a deliberate trivial real transaction on a schedule keeps it alive through the build window.

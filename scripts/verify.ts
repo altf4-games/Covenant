@@ -31,6 +31,16 @@
  * And for the scan itself:
  *   INCOMPLETE_RANGE    the scan doesn't include Covenant's deployment, so tokens
  *                       configured and trades made before it would be invisible
+ *   UNTRACKED_SWAP      the wallet spent the quote token and received some other
+ *                       token in the same transaction, and that token isn't one
+ *                       the owner configured - a stock bought outside the mandate
+ *
+ * Notices (reported, but they don't make a run unclean):
+ *   INBOUND_TRANSFER    a configured stock arrived in a transaction the wallet
+ *                       didn't send and paid nothing for: a gift or a dusting
+ *                       attempt, not a trade. Without this, anyone could send
+ *                       1 wei of a stock to the wallet and turn the public
+ *                       reconciliation red for good.
  *
  * Every wallet that held the agent role is reconciled (from Covenant's own
  * AgentChanged events), over the blocks it held it plus the decision TTL
@@ -62,6 +72,8 @@ const SELECTOR_DECISION_TTL = "0x072aaa5c";
  */
 const BUY_RECEIVED_TOLERANCE_BPS = 500n;
 const DEFAULT_CHUNK = 5_000;
+/** BSC's wrapped BNB: refunds and gas top-ups arrive as this and aren't an untracked stock. */
+const WBNB = "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c";
 
 type Log = { address: string; topics: string[]; data: string; blockNumber: string; transactionHash: string; transactionIndex: string };
 
@@ -79,7 +91,14 @@ export type ViolationKind =
   | "MULTI_TOKEN_TRADE"
   | "AGENT_MISMATCH"
   | "SWAP_AFTER_REVOKE"
+  | "UNTRACKED_SWAP"
   | "INCOMPLETE_RANGE";
+
+export interface Notice {
+  kind: "INBOUND_TRANSFER";
+  txHash: string;
+  detail: string;
+}
 
 export interface Violation {
   kind: ViolationKind;
@@ -244,6 +263,19 @@ export async function reconcile(opts: ReconcileOptions) {
     return (await blockTime(m.blockNumber)) <= (await blockTime(handover.blockNumber)) + decisionTtl;
   };
 
+  const stockSet = new Set(stockTokens);
+  async function receivedUnconfiguredToken(txHash: string, wallet: string): Promise<boolean> {
+    const receipt = await rpc(rpcUrls, "eth_getTransactionReceipt", [txHash]);
+    for (const l of (receipt?.logs ?? []) as Log[]) {
+      if (l.topics[0] !== TRANSFER_TOPIC || l.topics.length !== 3) continue;
+      if (addrFromTopic(l.topics[2]) !== wallet) continue;
+      const token = l.address.toLowerCase();
+      if (token === quoteToken || token === WBNB || stockSet.has(token)) continue;
+      return true;
+    }
+    return false;
+  }
+
   const matched: Array<{ txHash: string; decisionId: string; side: string; token: string; received: string; wallet: string }> = [];
 
   const settlesBySwap = new Map<string, typeof settles>();
@@ -254,10 +286,33 @@ export async function reconcile(opts: ReconcileOptions) {
 
   // Every trade must be claimed by exactly one settle, and the claim must hold up.
   const trades: Array<[string, TxMovement]> = [];
+  const notices: Notice[] = [];
   for (const [key, m] of movements) {
-    if (![...m.stock.values()].some((d) => d !== 0n)) continue;
+    const txHash = key.split("|")[0];
+    const moved = [...m.stock.values()].some((d) => d !== 0n);
     if (!(await inScope(m))) continue;
-    trades.push([key.split("|")[0], m]);
+    if (!moved) {
+      // A quote-token spend that brought back some other token is a swap the
+      // mandate never saw: a stock the owner didn't configure, say.
+      if (m.quoteOut > m.quoteIn && (await receivedUnconfiguredToken(txHash, m.wallet))) {
+        violations.push({
+          kind: "UNTRACKED_SWAP",
+          txHash,
+          detail: `${m.wallet} spent ${m.quoteOut - m.quoteIn} of the quote token and received a token that isn't configured on Covenant`,
+        });
+      }
+      continue;
+    }
+    // Inbound-only, unpaid, and sent by someone else: not a trade.
+    const inboundOnly = [...m.stock.values()].every((d) => d >= 0n) && m.quoteIn === 0n && m.quoteOut === 0n;
+    if (inboundOnly && !settlesBySwap.has(txHash)) {
+      const tx = await rpc(rpcUrls, "eth_getTransactionByHash", [txHash]);
+      if (tx && String(tx.from).toLowerCase() !== m.wallet) {
+        notices.push({ kind: "INBOUND_TRANSFER", txHash, detail: `${m.wallet} was sent stock by ${String(tx.from).toLowerCase()}, who paid nothing and wasn't the wallet` });
+        continue;
+      }
+    }
+    trades.push([txHash, m]);
   }
   for (const [txHash, m] of trades) {
     const moved = [...m.stock.entries()].filter(([, d]) => d !== 0n);
@@ -354,6 +409,7 @@ export async function reconcile(opts: ReconcileOptions) {
     trades: trades.length,
     matched,
     violations,
+    notices,
     clean: violations.length === 0,
   };
 }
@@ -376,6 +432,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     console.log(`  decisions:    ${report.decisions}`);
     console.log(`  trades:       ${report.trades} (${report.matched.length} matched to a settled decision)\n`);
     for (const m of report.matched) console.log(`[OK]  ${m.txHash} ${m.side} decision #${m.decisionId}, received ${m.received}`);
+    for (const n of report.notices) console.log(`[notice: ${n.kind}] ${n.txHash} - ${n.detail}`);
     for (const v of report.violations) console.log(`[${v.kind}] ${v.txHash ?? ""}${v.decisionId ? ` decision #${v.decisionId}` : ""} - ${v.detail}`);
     console.log(report.clean ? "\nClean: every trade maps to an approved decision." : `\n${report.violations.length} violation(s).`);
     process.exitCode = report.clean ? 0 : 1;

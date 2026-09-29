@@ -67,7 +67,19 @@ class Chain {
     this.log(token, [TRANSFER, from, to], word(amount), block, tx);
   }
 
+  /** Who sent a transaction, when a test cares. Otherwise the agent-side wallet that received a Transfer in it. */
+  txFrom: Record<string, string> = {};
+
   handle(method: string, params: any[]): unknown {
+    if (method === "eth_getTransactionByHash") {
+      const hash = String(params[0]).toLowerCase();
+      const wallet = this.logs.find((l) => l.transactionHash.toLowerCase() === hash && l.topics[0] === TRANSFER && [OLD, NEW].includes("0x" + l.topics[2].slice(-40)));
+      return { hash, from: this.txFrom[hash] ?? (wallet ? "0x" + wallet.topics[2].slice(-40) : OLD) };
+    }
+    if (method === "eth_getTransactionReceipt") {
+      const hash = String(params[0]).toLowerCase();
+      return { transactionHash: hash, logs: this.logs.filter((l) => l.transactionHash.toLowerCase() === hash) };
+    }
     if (method === "eth_blockNumber") return "0x" + this.tip.toString(16);
     if (method === "eth_getBlockByNumber") return { timestamp: "0x" + (1000 + parseInt(params[0], 16)).toString(16) };
     if (method === "eth_call") {
@@ -265,4 +277,38 @@ describe("verify.ts reconcile() (unit, mock RPC, crafted logs)", function () {
     for (const b of [50, 51, 100, 101, 256]) chain.transfer(NVDA, DEX, OLD, 1n, b, h(b));
     expect(kinds(await run(1, 50))).to.deep.equal(Array(5).fill("UNMATCHED_TRADE"));
   });
+
+  it("a stranger dusting a configured stock into the wallet is a notice, not a violation", async function () {
+    honestBuy();
+    chain.transfer(NVDA, THIRD, OLD, 1n, 30, h(3000));
+    chain.txFrom[h(3000)] = THIRD;
+    const r = await run();
+    expect(r.violations).to.deep.equal([]);
+    expect(r.clean).to.equal(true);
+    expect(r.notices.map((n) => n.kind)).to.deep.equal(["INBOUND_TRANSFER"]);
+    expect(r.trades).to.equal(1);
+  });
+
+  it("stock arriving in a transaction the wallet itself sent, with no payment in the quote token, is still a trade", async function () {
+    // e.g. a buy paid for in native BNB: no USDT moves, but the wallet sent the transaction.
+    chain.transfer(NVDA, DEX, OLD, 5n * 10n ** 15n, 10, h(4100));
+    chain.txFrom[h(4100)] = OLD;
+    const r = await run();
+    expect(kinds(r)).to.deep.equal(["UNMATCHED_TRADE"]);
+  });
+
+  it("spending the quote token on a stock the owner never configured is flagged", async function () {
+    chain.transfer(USDT, OLD, DEX, 1000n * E18, 10, h(4000));
+    chain.transfer(AAPL, DEX, OLD, 5n * E18, 10, h(4000));
+    const r = await run();
+    expect(kinds(r)).to.deep.equal(["UNTRACKED_SWAP"]);
+    expect(r.clean).to.equal(false);
+  });
+
+  it("paying the quote token to a non-token recipient (no token comes back) is not a swap", async function () {
+    chain.transfer(USDT, OLD, DEX, E18, 10, h(4200));
+    const r = await run();
+    expect(r.violations).to.deep.equal([]);
+  });
+
 });

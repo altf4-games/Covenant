@@ -1,5 +1,5 @@
 import { expect } from "chai";
-import { describeDecision, resolveFromBlock, guardedVsUnguarded } from "../status-page/lib.mjs";
+import { describeDecision, resolveFromBlock, guardedVsUnguarded, DEFAULT_LOOKBACK_BLOCKS } from "../status-page/lib.mjs";
 
 // Pure-function coverage for status-page/lib.mjs, no network, no fork: the
 // live suite (test/status-page.live.ts) already exercises these against
@@ -103,5 +103,13 @@ describe("status-page/lib.mjs resolveFromBlock - input validation", function () 
     expect(() => resolveFromBlock(true, 10_000)).to.throw(/not a number or a decimal string/);
     expect(() => resolveFromBlock([], 10_000)).to.throw(/not a number or a decimal string/);
     expect(() => resolveFromBlock([100], 10_000)).to.throw(/not a number or a decimal string/);
+  });
+});
+
+describe("status-page/lib.mjs default window", function () {
+  it("reaches back further than a few minutes of BSC blocks, and never below block 0", function () {
+    expect(DEFAULT_LOOKBACK_BLOCKS).to.be.greaterThan(10_000);
+    expect(resolveFromBlock(undefined, 1_000_000)).to.equal(1_000_000 - DEFAULT_LOOKBACK_BLOCKS);
+    expect(resolveFromBlock(undefined, 10)).to.equal(0);
   });
 });

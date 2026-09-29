@@ -61,6 +61,7 @@ export async function web3ApiGet(
       "X-OC-TIMESTAMP": timestamp,
       "X-OC-SIGN": signature,
     },
+    signal: AbortSignal.timeout(15_000),
   });
   const body = await res.json();
   if (!res.ok || body.code !== 0) {

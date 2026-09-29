@@ -139,7 +139,7 @@ export async function deployCovenant(opts: DeployOptions) {
   if (failed.length > 0) throw new Error(`post-deploy read-back failed: ${failed.join(", ")}`);
   log(`read back from chain: ${checks.length}/${checks.length} values match`);
 
-  return { address, deployTxHash: sent.hash, expiry };
+  return { address, deployTxHash: sent.hash, deployBlock: deployReceipt.blockNumber, expiry };
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
@@ -177,7 +177,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       decisionTtl: process.env.DECISION_TTL_SECONDS ? Number(process.env.DECISION_TTL_SECONDS) : undefined,
       log: (line) => console.log(line),
     });
-    console.log(`\nSet this in .env:\nCOVENANT_ADDRESS=${result.address}`);
+    console.log(`\nSet this in .env (verify.ts and the status page both need the deployment block):\nCOVENANT_ADDRESS=${result.address}\nVERIFY_FROM_BLOCK=${result.deployBlock}`);
   })().catch((error) => {
     console.error(error);
     process.exitCode = 1;

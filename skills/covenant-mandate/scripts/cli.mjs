@@ -28,27 +28,40 @@
 
 // ---- inline HTTP helper (self-contained, zero dependency) ----
 const TIMEOUT_MS = 10_000;
+// RPC failover only advances when a call throws, so a hanging endpoint has to
+// be made to throw: without a timeout one dead free RPC stalls verify/judge
+// for undici's default five minutes instead of failing over.
+const RPC_TIMEOUT_MS = 15_000;
 const UA = { "Accept-Encoding": "identity", "User-Agent": "binance-web3/1.1 (Skill)" };
 
 async function call({ url, method = "GET", body, headers = {} }) {
   const ctrl = new AbortController();
+  // The timer covers reading the body too: a server that sends headers and
+  // then stalls would otherwise hang here forever.
   const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
   const opts = { method, headers: { ...UA, ...headers }, signal: ctrl.signal };
   if (method === "POST") {
     opts.headers["content-type"] = "application/json";
     opts.body = JSON.stringify(body || {});
   }
-  let res;
   try {
-    res = await fetch(url, opts);
-  } catch {
+    let res;
+    try {
+      res = await fetch(url, opts);
+    } catch {
+      throw Object.assign(new Error("Network request failed"), { exitCode: 3 });
+    }
+    let data;
+    try {
+      data = await res.json();
+    } catch {
+      throw Object.assign(new Error(`HTTP ${res.status}: response was not JSON (or timed out)`), { exitCode: res.status >= 400 ? 1 : 3 });
+    }
+    if (res.status >= 400) throw Object.assign(new Error(`HTTP ${res.status}`), { exitCode: 1, body: data });
+    return data;
+  } finally {
     clearTimeout(timer);
-    throw Object.assign(new Error("Network request failed"), { exitCode: 3 });
   }
-  clearTimeout(timer);
-  const data = await res.json();
-  if (res.status >= 400) throw Object.assign(new Error(`HTTP ${res.status}`), { exitCode: 1, body: data });
-  return data;
 }
 
 // ---- minimal ABI encode/decode for exactly the calls this skill makes ----
@@ -126,7 +139,8 @@ const KNOWN_ROUTERS = {
 /** { to } -> "aggregator" | "pool" | "unknown". Never returns "rfq" - see comment above. */
 function classifyExecutionMode({ to }) {
   if (!to) return "unknown";
-  return KNOWN_ROUTERS[String(to).toLowerCase()] ?? "unknown";
+  const key = String(to).toLowerCase();
+  return Object.hasOwn(KNOWN_ROUTERS, key) ? KNOWN_ROUTERS[key] : "unknown";
 }
 
 /** A 0x-prefixed 32-byte hex value, or 32 zero bytes when omitted. */
@@ -139,7 +153,8 @@ function bytes32(value, name) {
 }
 
 function sideIndex(side) {
-  const index = SIDES[String(side).toLowerCase()];
+  const key = String(side).toLowerCase();
+  const index = Object.hasOwn(SIDES, key) ? SIDES[key] : undefined;
   if (index === undefined) throw Object.assign(new Error(`side must be "buy" or "sell", got "${side}"`), { exitCode: 1 });
   return index;
 }
@@ -217,7 +232,7 @@ const encodeUintArray = (arr) => hex32(arr.length) + arr.map(hex32).join("");
 
 async function ethCall(rpcUrl, to, calldata) {
   const body = { jsonrpc: "2.0", method: "eth_call", params: [{ to, data: calldata }, "latest"], id: 1 };
-  const res = await fetch(rpcUrl, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  const res = await fetch(rpcUrl, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body), signal: AbortSignal.timeout(RPC_TIMEOUT_MS) });
   const json = await res.json();
   if (json.error) throw Object.assign(new Error(`eth_call failed: ${json.error.message}`), { exitCode: 1 });
   return json.result;
@@ -256,6 +271,7 @@ async function jsonRpc(rpcUrl, method, params) {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ jsonrpc: "2.0", method, params, id: 1 }),
+    signal: AbortSignal.timeout(RPC_TIMEOUT_MS),
   });
   const json = await res.json();
   if (json.error) throw new Error(json.error.message);
@@ -291,7 +307,7 @@ async function jsonRpcWithFailover(method, params, { rpcUrls = DEFAULT_BSC_RPCS 
  * see friction-log.md. `survey` reports both numbers, labeled, rather than
  * trusting Binance's reported figure alone for a tradability call.
  */
-async function countRecentTransfers(tokenAddress, { blocksBack = 3000, rpcUrls = DEFAULT_BSC_RPCS } = {}) {
+async function countRecentTransfers(tokenAddress, { blocksBack = 15_000, chunk = 5_000, rpcUrls = DEFAULT_BSC_RPCS } = {}) {
   for (const rpcUrl of rpcUrls) {
     try {
       const tip = BigInt(await jsonRpc(rpcUrl, "eth_blockNumber", []));
@@ -301,9 +317,27 @@ async function countRecentTransfers(tokenAddress, { blocksBack = 3000, rpcUrls =
       // attempt was failing silently inside this function's own try/catch,
       // making every RPC look "rate-limited" when the real cause was here.
       const fromBigInt = tip > window ? tip - window : 0n;
-      const fromBlock = "0x" + fromBigInt.toString(16);
-      const logs = await jsonRpc(rpcUrl, "eth_getLogs", [{ fromBlock, toBlock: "latest", address: tokenAddress, topics: [TRANSFER_TOPIC] }]);
-      return { transferCount: logs.length, blocksBack, rpcUrl };
+      // Newest chunk first, in ranges public RPCs accept. Free endpoints
+      // refuse older ranges (publicnode: "archive requests require a token";
+      // the dataseeds cap the range), so this reaches back as far as the RPC
+      // will serve, stops at the first refusal once it has scanned something,
+      // and reports how many blocks it really covered. A quiet token can look
+      // dead over a short window - `blocksScanned` says how short.
+      let transferCount = 0;
+      let blocksScanned = 0;
+      for (let end = tip; end >= fromBigInt; end -= BigInt(chunk)) {
+        const start = end - BigInt(chunk) + 1n > fromBigInt ? end - BigInt(chunk) + 1n : fromBigInt;
+        let logs;
+        try {
+          logs = await jsonRpc(rpcUrl, "eth_getLogs", [{ fromBlock: "0x" + start.toString(16), toBlock: "0x" + end.toString(16), address: tokenAddress, topics: [TRANSFER_TOPIC] }]);
+        } catch (err) {
+          if (blocksScanned === 0) throw err;
+          break;
+        }
+        transferCount += logs.length;
+        blocksScanned += Number(end - start + 1n);
+      }
+      return { transferCount, blocksBack, blocksScanned, rpcUrl };
     } catch {
       // try the next RPC
     }
@@ -344,7 +378,7 @@ const COMMANDS = {
   async resolve({ ticker, provider, chainId }) {
     if (!ticker) throw Object.assign(new Error("resolve requires { ticker }"), { exitCode: 1 });
     const PROVIDER_TYPE = { ondo: 1, xstock: 2, bstock: 3 };
-    if (provider !== undefined && !(provider in PROVIDER_TYPE)) {
+    if (provider !== undefined && !Object.hasOwn(PROVIDER_TYPE, provider)) {
       throw Object.assign(new Error(`resolve: unknown provider "${provider}". Expected one of: ondo, xstock, bstock`), { exitCode: 1 });
     }
 
@@ -604,7 +638,8 @@ const COMMANDS = {
         { exitCode: 1 },
       );
     }
-    const mode = EXECUTION_MODES[String(executionMode).toLowerCase()];
+    const modeKey = String(executionMode).toLowerCase();
+    const mode = Object.hasOwn(EXECUTION_MODES, modeKey) ? EXECUTION_MODES[modeKey] : undefined;
     if (mode === undefined) {
       throw Object.assign(new Error(`executionMode must be one of ${Object.keys(EXECUTION_MODES).join(", ")}`), { exitCode: 1 });
     }
@@ -715,13 +750,16 @@ const COMMANDS = {
     // requiring the exact punctuation or plural form.
     const normalize = (s) => s.toLowerCase().replace(/[^a-z0-9]/g, "").replace(/s$/, "");
     const textNorm = normalize(text);
-    let matchedKey;
-    for (const [key, theme] of Object.entries(themeMap.themes)) {
-      if (textNorm.includes(normalize(key)) || textNorm.includes(normalize(theme.label))) {
-        matchedKey = key;
-        break;
-      }
+    const matchedKeys = Object.entries(themeMap.themes)
+      .filter(([key, theme]) => textNorm.includes(normalize(key)) || textNorm.includes(normalize(theme.label)))
+      .map(([key]) => key);
+    if (matchedKeys.length > 1) {
+      throw Object.assign(
+        new Error(`compile-mandate: "${text}" names more than one theme (${matchedKeys.join(", ")}) - refusing to pick one. Compile them separately.`),
+        { exitCode: 2 },
+      );
     }
+    const matchedKey = matchedKeys[0];
     if (!matchedKey) {
       const known = Object.values(themeMap.themes).map((t) => t.label).join(", ");
       throw Object.assign(
@@ -751,8 +789,16 @@ const COMMANDS = {
     }
     const driftBps = Math.round(Number(driftMatch[1]) * 100);
 
+    if (driftBps > 10_000) {
+      throw Object.assign(new Error(`compile-mandate: a drift bound of ${driftMatch[1]}% is over 100% - the contract would revert it`), { exitCode: 1 });
+    }
+
     const slippageMatch = lower.match(/slippage\s*(?:of|up to)?\s*(\d+(?:\.\d+)?)%/);
     const slippageBps = slippageMatch ? Math.round(Number(slippageMatch[1]) * 100) : 100;
+
+    if (slippageBps > 10_000) {
+      throw Object.assign(new Error(`compile-mandate: a slippage bound of ${slippageMatch[1]}% is over 100% - the contract would revert it`), { exitCode: 1 });
+    }
 
     const positionMatch = lower.match(/position cap\s*\$(\d+(?:\.\d+)?)/);
     const maxPositionUsd = positionMatch ? positionMatch[1] : String(Number(maxNotionalUsd) * 10);

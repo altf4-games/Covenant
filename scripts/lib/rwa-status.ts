@@ -17,6 +17,9 @@
 const ASSET_MARKET_STATUS_URL =
   "https://www.binance.com/bapi/defi/v1/public/wallet-direct/buw/wallet/market/token/rwa/asset/market/status/ai";
 
+/** Every upstream read is bounded: a hung request must fail the run (and so leave the oracle to go stale), not stall it. */
+const FETCH_TIMEOUT_MS = 15_000;
+
 const REQUEST_HEADERS = {
   "Accept-Encoding": "identity",
   "User-Agent": "binance-web3/1.1 (Skill)",
@@ -53,7 +56,7 @@ export async function fetchAssetMarketStatus(chainId: number, contractAddress: s
   url.searchParams.set("chainId", String(chainId));
   url.searchParams.set("contractAddress", contractAddress);
 
-  const response = await fetch(url, { headers: REQUEST_HEADERS });
+  const response = await fetch(url, { headers: REQUEST_HEADERS, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
   if (!response.ok) {
     throw new Error(`RWA asset-market-status request failed: HTTP ${response.status} ${response.statusText}`);
   }
@@ -92,7 +95,7 @@ export async function fetchHourlyKlines(chainId: number, contractAddress: string
   url.searchParams.set("chainId", String(chainId));
   url.searchParams.set("contractAddress", contractAddress);
   url.searchParams.set("interval", "1h");
-  const response = await fetch(url, { headers: REQUEST_HEADERS });
+  const response = await fetch(url, { headers: REQUEST_HEADERS, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
   if (!response.ok) throw new Error(`K-line request failed: HTTP ${response.status}`);
   const body = (await response.json()) as { success: boolean; code: string; data?: { klineInfos?: Kline[] } };
   const klines = body.data?.klineInfos;
@@ -118,4 +121,24 @@ export function priceToUsdE18(price: string): bigint {
   if (!/^\d+(\.\d+)?$/.test(trimmed)) throw new Error(`not a plain decimal price: "${price}"`);
   const [whole, fraction = ""] = trimmed.split(".");
   return BigInt(whole) * 10n ** 18n + BigInt((fraction + "0".repeat(18)).slice(0, 18));
+}
+
+/**
+ * The live price and the most recent hourly candle come from different
+ * endpoints. If they disagree wildly, one of them is stale or wrong, and the
+ * updater would otherwise stamp it with a fresh on-chain `updatedAt` and make
+ * it look current. 10% is far wider than any real hour of movement in a
+ * large-cap stock and far tighter than a stale or garbage value.
+ */
+export const MAX_PRICE_DEVIATION_BPS = 1_000n;
+
+export function assertPriceConsistent(livePriceUsdE18: bigint, klines: Kline[], maxBps: bigint = MAX_PRICE_DEVIATION_BPS): void {
+  const latest = [...klines].sort((a, b) => a[6] - b[6]).at(-1);
+  if (!latest) throw new Error("no hourly candles to cross-check the live price against - refusing to post it");
+  const ref = priceToUsdE18(latest[4]);
+  if (ref === 0n) throw new Error("latest hourly candle has a zero close - refusing to post the live price");
+  const diff = livePriceUsdE18 > ref ? livePriceUsdE18 - ref : ref - livePriceUsdE18;
+  if (diff * 10_000n > ref * maxBps) {
+    throw new Error(`live price ${livePriceUsdE18} is more than ${maxBps / 100n}% away from the latest hourly close ${ref} - one of them is stale or wrong; refusing to post`);
+  }
 }

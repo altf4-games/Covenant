@@ -1,10 +1,11 @@
 /**
  * Writes frontend/public/decisions-snapshot.json - a committed, re-verified
- * list of every real Covenant decision (commit/settle/cancel txHashes), so
- * the frontend can show real judging evidence even if the live RPC it's
- * pointed at is slow, rate-limited, or refuses the block range (public BSC
- * RPCs cap eth_getLogs and prune old receipts - docs/partner-feedback/
- * friction-log.md B16, and the "archive RPC" row in README.md's table).
+ * list of every real Covenant decision (commit/settle/cancel txHashes), kept
+ * as a static evidence record that survives public BSC RPCs capping
+ * eth_getLogs and pruning old receipts (docs/partner-feedback/friction-log.md
+ * B16, and the "archive RPC" row in README.md's table). Nothing in the
+ * frontend or status page reads it at runtime; the live pages always read the
+ * chain. It is a file a judge can open and check each hash against.
  *
  * This is a re-verification pass, not a second data source: every decision
  * still comes from the real, already-deployed Covenant via the same

@@ -322,6 +322,25 @@ describe("Covenant v2 (unit, mocked tokens)", function () {
       expect((await commit(f, Side.Buy, { ...a, minOut: (a.quotedOut * 98n) / 100n })).reason).to.equal(Reason.SlippageTooLoose);
     });
 
+    it("SlippageTooLoose: an inflated quote can't be used to stretch the per-trade cap (red-team round 5)", async function () {
+      const f = await deployFixture();
+      await makeTradeable(f, { maxNotional: 1n * E18, maxPositionUsd: 50n * E18 });
+      // amountIn is $1, but the declared quote is worth $50 and the minimum sits just under it.
+      const quotedOut = (50n * E18 * E18) / (200n * E18);
+      const inflated = { amountIn: 1n * E18, quotedOut, minOut: (quotedOut * 995n) / 1000n };
+      expect((await commit(f, Side.Buy, inflated)).reason).to.equal(Reason.SlippageTooLoose);
+      // A quote a hair better than the oracle (inside the 1% bound) is still fine.
+      const honest = buyArgs(1n * E18);
+      const better = { ...honest, quotedOut: (honest.quotedOut * 1005n) / 1000n, minOut: honest.minOut };
+      expect((await commit(f, Side.Buy, better)).reason).to.equal(Reason.None);
+      // Same ceiling on a sell: claiming far more proceeds than the oracle implies is refused.
+      const sell = sellArgs(E18 / 250n);
+      const inflatedSell = { amountIn: sell.amountIn, quotedOut: sell.quotedOut * 50n, minOut: (sell.quotedOut * 50n * 995n) / 1000n };
+      await networkHelpers.time.increase(DECISION_TTL + 1);
+      await f.covenant.connect(f.updater).updateOracle(f.stockAddress, false, 200n * E18, true, 200n * E18);
+      expect((await commit(f, Side.Sell, inflatedSell)).reason).to.equal(Reason.SlippageTooLoose);
+    });
+
     it("SlippageTooLoose: an understated quote can't smuggle in a loose minimum (red-team H5)", async function () {
       // The attack: report a quote 10x too low, so a minimum "within 1% of
       // the quote" is really 90% below the market. The oracle leg of the

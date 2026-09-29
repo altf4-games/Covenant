@@ -67,16 +67,19 @@ describe("covenant-mandate skill CLI (live, against a real spawned JSON-RPC node
   });
 
   describe("survey (real ticker data, real on-chain verification against Binance's own reported figures)", function () {
-    it("reports a real dead xStock as dead, cross-checked against real on-chain Transfer events", async function () {
-      // Real, reproducible finding, not staged: Binance's own API reports a
-      // large tokenInfo.volume24h for TSLAx even though real eth_getLogs
-      // against real BSC state finds zero Transfer events in the same
-      // window - see docs/partner-feedback/friction-log.md B17. survey
-      // trusts the on-chain count, not the reported figure, for `status`.
+    it("shows a real, nearly-idle xStock as a sliver of its bStock's on-chain activity, however large Binance's reported volume", async function () {
+      // Binance's own API reports a large tokenInfo.volume24h for TSLAx even
+      // though real eth_getLogs against real BSC state finds almost no
+      // Transfer events for it (friction-log.md B17). survey trusts the
+      // on-chain count, not the reported figure. Over the original 3000-block
+      // window that count was 0 ("dead"); the wider window survey now scans
+      // (red-team round 5: 3000 blocks is only minutes on BSC) finds a handful,
+      // so the stable, honest assertion is the ratio, not a label.
       const result = await COMMANDS.survey({ ticker: "TSLA" });
       const xstock = result.providers.find((p: any) => p.provider === "xstock");
-      expect(xstock.status).to.equal("dead");
-      expect(xstock.onChainVerified.transferCount).to.equal(0);
+      const bstock = result.providers.find((p: any) => p.provider === "bstock");
+      expect(xstock.onChainVerified.transferCount).to.be.lessThan(bstock.onChainVerified.transferCount / 10);
+      expect(xstock.onChainVerified.blocksScanned).to.be.greaterThan(3000);
       expect(xstock.contractAddress.toLowerCase()).to.equal("0x8ad3c73f833d3f9a523ab01476625f269aeb7cf0");
     });
 

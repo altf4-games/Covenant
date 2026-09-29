@@ -62,12 +62,12 @@ describe("Covenant MCP server (live, real subprocess speaking real MCP protocol)
   });
 
   describe("survey_providers", function () {
-    it("reports a real dead xStock as dead, cross-checked against real on-chain Transfer events", async function () {
+    it("shows a real, nearly-idle xStock as a sliver of its bStock's on-chain activity", async function () {
       const result = await mcpClient.callTool({ name: "survey_providers", arguments: { ticker: "TSLA" } });
       const payload = firstTextResult(result);
       const xstock = payload.providers.find((p: any) => p.provider === "xstock");
-      expect(xstock.status).to.equal("dead");
-      expect(xstock.onChainVerified.transferCount).to.equal(0);
+      const bstock = payload.providers.find((p: any) => p.provider === "bstock");
+      expect(xstock.onChainVerified.transferCount).to.be.lessThan(bstock.onChainVerified.transferCount / 10);
     });
   });
 

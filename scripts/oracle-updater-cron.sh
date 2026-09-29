@@ -20,7 +20,9 @@
 
 set -euo pipefail
 
-EXPIRY_DATE="2026-10-11"
+# Judging runs 12-23 Oct; stopping on the 11th would leave the deployed contract
+# fail-closed (every commit denied OracleStale) for the whole window judges try it.
+EXPIRY_DATE="2026-10-24"
 REPO_DIR="/Users/pradyum/Projects/Covenant"
 NODE_BIN_DIR="/Users/pradyum/.local/share/fnm/node-versions/v22.23.2/installation/bin"
 

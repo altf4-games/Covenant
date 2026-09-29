@@ -627,6 +627,17 @@ contract Covenant {
         if (quotedOut == 0 || minOut * 10_000 < quotedOut * floorBps || minOut * 10_000 < oracleOut * floorBps) {
             return (DenialReason.SlippageTooLoose, 0);
         }
+        // Red-team (round 5): the quote may not sit above the oracle by more
+        // than the slippage bound either. Without this ceiling an agent could
+        // declare amountIn = $1 with a quotedOut worth $50 (and a minOut just
+        // under it), pass every check above, and pay for the fill in some
+        // other asset - the per-trade cap is only meaningful if the quote it
+        // was checked against is tied to the price. Reported as
+        // SlippageTooLoose: the quote and the oracle disagree by more than the
+        // owner allows.
+        if (quotedOut * 10_000 > oracleOut * (10_000 + uint256(cfg.maxSlippageBps))) {
+            return (DenialReason.SlippageTooLoose, 0);
+        }
 
         // Feature 1: the closed-market drift rule, measured at the worst
         // fill the agent will accept (minOut), not at the quote. Red-team

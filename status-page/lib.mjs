@@ -29,7 +29,10 @@ export const DENIAL_REASONS = [
 export const SIDES = ["buy", "sell"];
 export const EXECUTION_MODES = ["unknown", "pool", "rfq", "aggregator"];
 
-export const DEFAULT_LOOKBACK_BLOCKS = 500;
+// 500 blocks is only a few minutes on BSC, so a page opened without a
+// fromBlock showed an empty ledger. 50,000 (ten getLogs chunks) reaches back
+// several hours; for the full history pass the deployment block.
+export const DEFAULT_LOOKBACK_BLOCKS = 50_000;
 export const DEFAULT_LOGS_TIMEOUT_MS = 8_000;
 // Public BSC RPCs cap eth_getLogs range (bsc-dataseed refuses "limit
 // exceeded" past a few thousand blocks - docs/partner-feedback/friction-log.md).
