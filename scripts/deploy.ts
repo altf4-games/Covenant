@@ -34,6 +34,7 @@
  *   TOKEN_MAX_CLOSED_MARKET_DRIFT_BPS  default 100 (1%; 0 turns the rule off)
  *   ORACLE_STALENESS_SECONDS       default 900
  *   DECISION_TTL_SECONDS           default 600
+ *   RESUME_ADDRESS + RESUME_TX     finish configuring an already-deployed contract (skips the deploy transaction)
  */
 import { ethers } from "ethers";
 import { bscProvider } from "./lib/bsc-provider.js";
@@ -61,13 +62,19 @@ export interface DeployOptions {
   maxClosedMarketDriftBps?: number;
   stalenessBound?: number;
   decisionTtl?: number;
+  /** Finish configuring a Covenant already deployed at this address (e.g. after a crash between deploy and config) instead of deploying a new one. */
+  resume?: { address: string; deployTxHash: string };
   log?: (line: string) => void;
 }
 
 /** Polls for a real receipt instead of trusting the wrapper's promise chain. */
 async function waitForReceipt(provider: ethers.Provider, hash: string) {
   for (let i = 0; i < 60; i++) {
-    const receipt = await provider.getTransactionReceipt(hash);
+    // A free RPC can answer a lookup for a just-sent transaction with an
+    // error (publicnode: 403 "archive requests require a token") instead of
+    // null. That crashed the first mainnet deploy right after its deploy
+    // transaction mined, so an error here is just "not yet": poll again.
+    const receipt = await provider.getTransactionReceipt(hash).catch(() => null);
     if (receipt) {
       if (receipt.status !== 1) throw new Error(`tx ${hash} reverted`);
       return receipt;
@@ -97,13 +104,27 @@ export async function deployCovenant(opts: DeployOptions) {
   log(`oracle updater:    ${opts.oracleUpdater}`);
   log(`agent:             ${opts.agent}`);
 
-  const factory = new ethers.ContractFactory(covenantArtifact.abi, covenantArtifact.bytecode, opts.deployer);
-  const deployTx = await factory.getDeployTransaction(quoteToken, opts.oracleUpdater, opts.agent, stalenessBound, decisionTtl);
-  const sent = await opts.deployer.sendTransaction(deployTx);
-  const deployReceipt = await waitForReceipt(provider, sent.hash);
-  const address = deployReceipt.contractAddress;
-  if (!address) throw new Error("deploy receipt has no contractAddress");
-  log(`deployed at ${address} (tx ${sent.hash})`);
+  let sentHash: string;
+  let address: string;
+  let deployBlock: number;
+  if (opts.resume) {
+    const receipt = await waitForReceipt(provider, opts.resume.deployTxHash);
+    if (receipt.contractAddress?.toLowerCase() !== opts.resume.address.toLowerCase()) throw new Error("resume: that transaction didn't create that address");
+    sentHash = opts.resume.deployTxHash;
+    address = receipt.contractAddress;
+    deployBlock = receipt.blockNumber;
+    log(`resuming at ${address} (tx ${sentHash})`);
+  } else {
+    const factory = new ethers.ContractFactory(covenantArtifact.abi, covenantArtifact.bytecode, opts.deployer);
+    const deployTx = await factory.getDeployTransaction(quoteToken, opts.oracleUpdater, opts.agent, stalenessBound, decisionTtl);
+    const sent = await opts.deployer.sendTransaction(deployTx);
+    const deployReceipt = await waitForReceipt(provider, sent.hash);
+    if (!deployReceipt.contractAddress) throw new Error("deploy receipt has no contractAddress");
+    sentHash = sent.hash;
+    address = deployReceipt.contractAddress;
+    deployBlock = deployReceipt.blockNumber;
+    log(`deployed at ${address} (tx ${sentHash})`);
+  }
 
   const covenant = new ethers.Contract(address, covenantArtifact.abi, opts.deployer);
   const configTx = await covenant.configureToken(token, true, slippageBps, maxPosition);
@@ -150,7 +171,7 @@ export async function deployCovenant(opts: DeployOptions) {
   if (failed.length > 0) throw new Error(`post-deploy read-back failed: ${failed.join(", ")}`);
   log(`read back from chain: ${checks.length}/${checks.length} values match`);
 
-  return { address, deployTxHash: sent.hash, deployBlock: deployReceipt.blockNumber, expiry };
+  return { address, deployTxHash: sentHash, deployBlock, expiry };
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
@@ -194,6 +215,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       maxClosedMarketDriftBps: process.env.TOKEN_MAX_CLOSED_MARKET_DRIFT_BPS ? Number(process.env.TOKEN_MAX_CLOSED_MARKET_DRIFT_BPS) : undefined,
       stalenessBound: process.env.ORACLE_STALENESS_SECONDS ? Number(process.env.ORACLE_STALENESS_SECONDS) : undefined,
       decisionTtl: process.env.DECISION_TTL_SECONDS ? Number(process.env.DECISION_TTL_SECONDS) : undefined,
+      resume: process.env.RESUME_ADDRESS && process.env.RESUME_TX ? { address: process.env.RESUME_ADDRESS, deployTxHash: process.env.RESUME_TX } : undefined,
       log: (line) => console.log(line),
     });
     console.log(`\nSet this in .env (verify.ts and the status page both need the deployment block):\nCOVENANT_ADDRESS=${result.address}\nVERIFY_FROM_BLOCK=${result.deployBlock}`);

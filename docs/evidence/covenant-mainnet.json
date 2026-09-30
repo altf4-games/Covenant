@@ -1,0 +1,17 @@
+{
+  "chainId": 56,
+  "covenant": "0x90F642be72b5aD815B924AB3CFFd5f241Dc656aa",
+  "deployTxHash": "0x7c4e1337973dfa0b4b1547eafb94c102d852455a2603527d3b7e0cb84daa0b56",
+  "deployBlock": 124928073,
+  "deployGasUsed": 1763918,
+  "gasPriceGwei": 0.05,
+  "owner": "0x4FF4A2F215f3DeDD2cEe1c6D2B66035B0200D418",
+  "oracleUpdater": "0x7dC972104e93B170fc2417E9007E8970a496627A",
+  "agent": "0xaa963e1b4f913975ee81139f4ba2953951e45844",
+  "mandate": { "maxNotionalPerTradeUsd": "0.25", "maxTradesPerDay": 5, "maxDailyNotionalUsd": "0.75", "durationDays": 30 },
+  "token": { "address": "0x02fca66c1d1afb4e2a7884261eb00f63598a7436", "maxSlippageBps": 100, "maxPositionUsd": "0.60", "maxClosedMarketDriftBps": 100 },
+  "readBack": "12/12 values match (scripts/deploy.ts)",
+  "verified": ["https://bscscan.com/address/0x90F642be72b5aD815B924AB3CFFd5f241Dc656aa#code", "https://sourcify.dev/server/repo-ui/56/0x90F642be72b5aD815B924AB3CFFd5f241Dc656aa"],
+  "erc8004UpdateTxHash": "0x8cc455b9d02d66a4fb4e2f631e3ce79b19aaf5622f6b373e180ee934069134dc",
+  "note": "The first deploy run crashed at the receipt poll (a free RPC answered a lookup of the just-sent tx with a 403), after the deploy tx had mined and before the config transactions; the config was finished with scripts/deploy.ts RESUME_ADDRESS/RESUME_TX."
+}

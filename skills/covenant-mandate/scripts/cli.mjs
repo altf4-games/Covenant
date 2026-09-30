@@ -277,8 +277,8 @@ const TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a
 // exceeded" even for 100 blocks). verify.ts needs logs, so without the first two
 // it can scan nothing older than about an hour.
 const DEFAULT_BSC_RPCS = [
-  "https://rpc-bsc.48.club",
   "https://bsc.rpc.blxrbdn.com",
+  "https://rpc-bsc.48.club",
   "https://bsc.publicnode.com",
   "https://bsc-dataseed1.defibit.io",
   "https://bsc-dataseed.binance.org",

@@ -17,11 +17,15 @@
       {
         "name": "agentWallet",
         "endpoint": "eip155:56:0xaa963e1b4f913975Ee81139F4BA2953951E45844"
+      },
+      {
+        "name": "covenant",
+        "endpoint": "eip155:56:0x90F642be72b5aD815B924AB3CFFd5f241Dc656aa"
       }
     ],
     "registrations": [
       {
-        "agentId": null,
+        "agentId": 358509,
         "agentRegistry": "eip155:56:0x8004A169FB4a3325136EB29fA0ceB6D2e539a432"
       }
     ],
@@ -34,5 +38,8 @@
   "verifiedOnChain": {
     "ownerOf": "0x4FF4A2F215f3DeDD2cEe1c6D2B66035B0200D418",
     "tokenURIDecodesBackCorrectly": true
-  }
+  },
+  "covenantAddress": "0x90F642be72b5aD815B924AB3CFFd5f241Dc656aa",
+  "updateTxHash": "0x8cc455b9d02d66a4fb4e2f631e3ce79b19aaf5622f6b373e180ee934069134dc",
+  "updateBlockNumber": 124928616
 }
