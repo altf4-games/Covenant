@@ -1,0 +1,13 @@
+{
+  "note": "Real BSC mainnet interactions with the deployed Covenant, 2026-09-30. Reconciled with scripts/verify.ts: 2 trades matched, 1 UNMATCHED_TRADE (decision #1, an operator bug, not hidden).",
+  "covenant": "0x90F642be72b5aD815B924AB3CFFd5f241Dc656aa",
+  "decisions": [
+    { "id": 1, "kind": "sell 0.001 NVDAB", "outcome": "allowed, then CANCELLED by a driver bug after the swap had already filled: permanently UNMATCHED_TRADE", "commitTx": "0x68174495db15996bf71384667523662434aac7ce81dd2ecc3f40413aa8b9074c", "swapTx": "0x1df46d493d38d250890e61d8be9a0453bce84a4aadcbfb2715fb23665377e1be", "cancelTx": "0x7d90493aac4c5c3495c8ca1659f280323d25ec79875f4cced172c2598c8dc66f" },
+    { "id": 2, "kind": "buy $0.20 USDT of NVDAB", "outcome": "allowed, swapped, settled", "commitTx": "0x837d57c15969e70ce78256c89266d660cdce297f0db74afad926b3063441e251", "swapTx": "0x43d624bc28138d0b23197a9b864d4858d8d1dd5e4a6e002c07d442c947e6be38", "settleTx": "0x169b9686f65d748a6518cbb3a2b94cc9a34c1863071407aed9bf87df39721ff0" },
+    { "id": 3, "kind": "buy $0.40 (cap $0.25)", "outcome": "denied: NotionalExceeded", "commitTx": "0x0983964962d8e6dd9969142670bcedde1821d86e0b89be9b4b76db287fdd0539" },
+    { "id": 4, "kind": "buy $0.10 with minOut at 95% of quote", "outcome": "denied: SlippageTooLoose", "commitTx": "0x315a6f98d3cd244a8def24f1603beb8847268b803cc418c70a12b435f2ed0c76" },
+    { "id": 5, "kind": "sell 0.001 NVDAB", "outcome": "allowed, swapped, settled", "commitTx": "0x971e8ebced37d55d3a635dda001284a53fea242c5134ba22fd34b9dec0292d69", "swapTx": "0x166d33a1a6d7a3d3977a104e75e4f84d1c19e6437bf2999755b5dcf4dbb45bed", "settleTx": "0xff037774737b159e696645972b0fc8376302efcca5852bf0893553a9fbe4db99" }
+  ],
+  "keepAlivePingTx": "0xb2bedcd73007d334a0aec61f9efb8ef605bbfacbcf420a6665f9230cc8e0673d",
+  "measuredCost": "One buy cycle cost the agent 0.00029 BNB, a sell cycle 0.00046 BNB, a denied commit about 0.00006 BNB, well above the 0.0001 estimated from measured contract gas at 0.05 gwei."
+}
