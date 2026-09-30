@@ -122,6 +122,8 @@ That is five decisions, not the thirty I planned. A buy cycle cost the Agentic W
 
 `verify.ts` on this history reports two trades matched to settled decisions and one violation. The violation is real and I left it in. My first driver looked up the swap by the `orderId` that `market-order swap` returns, but `market-order list` never found that id (the listed order's id is one higher), so the driver assumed the swap had not happened and cancelled decision #1. The swap had filled. A cancelled decision can't be settled, so that sell is an `UNMATCHED_TRADE` for good. The ledger did what it is for: it caught a trade with no approved decision, and the trade was mine. The driver (`scripts/live-trade.ts`) now finds the order by token pair and start time and never cancels on its own.
 
+`frontend/public/decisions-snapshot.json` is a static copy of the same five decisions, made by `scripts/generate-decisions-snapshot.ts`, which re-reads every commit and settle transaction from its receipt and records the block that confirmed it. It exists for judges when public RPCs have pruned old receipts, and nothing in the app reads it at runtime.
+
 The deploy also failed once. `scripts/deploy.ts` crashed right after the deploy transaction mined because a free RPC answered a receipt lookup for the new transaction with a 403 "archive request", not with null. The four configuration transactions never ran. I found the transaction, added a `RESUME_ADDRESS`/`RESUME_TX` option to finish the configuration, and made receipt polling skip an endpoint that errors. The same 403 hit the oracle updater's first run, and the default fallback provider also let 48Club's 1 gwei gas quote set the price (the other endpoints say 0.05), which would have drained the oracle updater's wallet. `bscProvider` now takes the lowest quote. Both fixes have unit tests (`test/bsc-provider.unit.ts`).
 
 ---
@@ -298,7 +300,7 @@ A real ERC-8004 identity, registered on BSC mainnet (`docs/evidence/erc8004-regi
 
 ### Play-by-play narration (needs your own key)
 
-`scripts/generate-narration.ts` batch-generates one sportscaster-style sentence per real decision via Gemini, grounded only in real on-chain fields, and writes `frontend/src/data/narration.json` for the app to read statically (no live API call from the browser, no key exposed client-side). Needs a free `GEMINI_API_KEY` from `aistudio.google.com` - a real account sign-in, so not something this session can do for you; the app renders nothing extra until that file has real entries.
+`scripts/generate-narration.ts` batch-generates one sportscaster-style sentence per real decision via Gemini, grounded only in real on-chain fields, and writes `frontend/src/data/narration.json` for the app to read statically (no live API call from the browser, no key exposed client-side). Needs a free `GEMINI_API_KEY` from `aistudio.google.com`. The file in the repo was generated on 2026-09-30 from the five real mainnet decisions listed under "Live on BSC mainnet", keyed by each commit's transaction hash, so what the app shows is Gemini's wording of real events, nothing else. For the decision that was cancelled after its swap had filled, the prompt says the bot cancelled it and forbids saying it filled, so the line doesn't claim more than the chain shows.
 
 ```bash
 GEMINI_API_KEY=... npx tsx scripts/generate-narration.ts <rpcUrl> <covenantAddress> <fromBlock>
