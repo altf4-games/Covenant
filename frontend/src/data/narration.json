@@ -1,6 +1,7 @@
 {
-  "1": "OH, WHAT A BLOCK! The bot's $0.5 grab for 0x2F…4444 is REJECTED! \"Forbidden Territory\" shouts NO, Token Not Allowed! SAFETY first!",
-  "2": "OH, WHAT A BLOCK! The bot's $5 NVIDIA buy DENIED! The Spending Cap, with a clutch save, just called Notional Exceeded!",
-  "3": "**TOUCHDOWN! The bot's fifty-cent NVDA buy order just got approved and filled via the aggregator! Instant market magic!**",
-  "4": "**GOOOOAL!** The bot just SNATCHED that $0.5 NVIDIA buy – APPROVED and PENDING settlement! What a machine, what a move!"
+  "0x68174495db15996bf71384667523662434aac7ce81dd2ecc3f40413aa8b9074c": "Wait a minute! The mandate approved the bot's 0.001002 NVDAB sell, but before settling, the bot's own cancellation just hit the chain. What happened there?",
+  "0x837d57c15969e70ce78256c89266d660cdce297f0db74afad926b3063441e251": "TOUCHDOWN! The bot's $0.2 NVDA buy order, approved and filled instantly via aggregator! WHAT A MOVE!",
+  "0x0983964962d8e6dd9969142670bcedde1821d86e0b89be9b4b76db287fdd0539": "HOLY MOLY! The bot goes for $0.40 NVDAB, but The Spending Cap, screaming NotionalExceeded, DENIES IT! Safety wins again!",
+  "0x315a6f98d3cd244a8def24f1603beb8847268b803cc418c70a12b435f2ed0c76": "WOW! That tiny $0.10 NVDAB bot buy just got SLAMMED by The Slippage Trap! SlippageTooLoose – safety wins big today!",
+  "0x971e8ebced37d55d3a635dda001284a53fea242c5134ba22fd34b9dec0292d69": "UNBELIEVABLE! The bot's lightning-fast 0.001002 NVDAB sell order, straight through the aggregator – APPROVED, FILLED! A masterful play!"
 }

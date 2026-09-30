@@ -55,6 +55,12 @@ export function buildPrompt(d: Decision): string | null {
       `The denial is the good outcome - a safety mandate held. Real enthusiasm, no hedging, no disclaimers, just the call.`
     );
   }
+  if (d.cancelled) {
+    return (
+      `Write one sportscaster sentence (under 30 words) narrating a trading bot's ${order} that the mandate approved but the bot then cancelled ` +
+      `on chain before settling. Do not say it was filled or settled, and do not cheer: the tone is a puzzled "wait, what happened there?". No disclaimers.`
+    );
+  }
   if (d.settle) {
     return (
       `Write one excited sportscaster sentence (under 30 words) narrating a trading bot's ${order} ` +
@@ -96,7 +102,7 @@ async function narrate(apiKey: string, prompt: string, attempts = 4): Promise<st
       lastError = new Error(`Gemini returned no text: ${JSON.stringify(body)}`);
       continue;
     }
-    return text.trim();
+    return text.trim().replace(/\*\*/g, ""); // the page shows this as plain text, so markdown bold would print as literal asterisks
   }
   throw lastError;
 }
