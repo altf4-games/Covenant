@@ -126,7 +126,7 @@ export default defineConfig({
     bsc: {
       type: "http",
       chainType: "l1",
-      url: process.env.BSC_RPC_URL || "https://bsc.rpc.blxrbdn.com",
+      url: process.env.BSC_RPC_URL || "https://rpc-bsc.48.club",
       chainId: 56,
       accounts: process.env.DEPLOYER_PRIVATE_KEY ? [process.env.DEPLOYER_PRIVATE_KEY] : [],
     },
