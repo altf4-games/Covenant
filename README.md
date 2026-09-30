@@ -2,7 +2,7 @@
 
 An on-chain mandate for an AI agent trading tokenized stocks from a Binance Agentic Wallet. The owner sets the rules: which stocks by exact address, dollars per trade, trades per day, a slippage bound, a position cap, and how far from its last NYSE close a stock may trade while the NYSE is shut. Before every trade the agent commits it to Covenant, and the contract decides on chain whether the mandate allows it. The wallet then trades natively with `baw market-order swap`, and the agent settles the real fill back on chain. `scripts/verify.ts` reconciles every real transfer in and out of the wallet against settled decisions, so a trade made without an approved decision shows up for anyone with an RPC.
 
-Built for the BNB Hack: Tokenized Stocks Edition. Every claim on this page is backed by a real transaction, re-read from chain: on a fork of BSC mainnet against the real deployed tokens and live Binance data, and for the Agentic Wallet leg, on BSC mainnet itself (`docs/evidence/`). Covenant's own mainnet deployment is the last step of the build, done once.
+Built for the BNB Hack: Tokenized Stocks Edition. Every claim on this page is backed by a real transaction, re-read from chain: on a fork of BSC mainnet against the real deployed tokens and live Binance data, and for the Agentic Wallet leg, on BSC mainnet itself (`docs/evidence/`). Covenant itself is deployed on BSC mainnet at [`0x90F642be72b5aD815B924AB3CFFd5f241Dc656aa`](https://bscscan.com/address/0x90F642be72b5aD815B924AB3CFFd5f241Dc656aa#code) (verified source); the section "Live on BSC mainnet" below lists what has actually happened on it.
 
 **What it claims.** Binance's own wallet guardrails (daily limit, token scope, session expiry) are the hard, private limit on the wallet itself. Covenant adds a second layer that's market-aware and public: halt status, a closed-market drift rule, exact-address provider pinning, slippage checked against both the agent's quote and an oracle price, a position cap read from the wallet's real balance, and a public record of every decision, allow or deny. Covenant's decision comes before the trade, not after: **no trade can happen unseen.**
 
@@ -104,6 +104,28 @@ Phase 2.5 added a slashable bond for the oracle updater. As built it provided no
 
 ---
 
+## Live on BSC mainnet
+
+Covenant is at [`0x90F642be72b5aD815B924AB3CFFd5f241Dc656aa`](https://bscscan.com/address/0x90F642be72b5aD815B924AB3CFFd5f241Dc656aa#code), deployed on 2026-09-30 in block 124,928,073 (tx `0x7c4e1337973dfa0b4b1547eafb94c102d852455a2603527d3b7e0cb84daa0b56`, 1.76M gas at 0.05 gwei). The source is verified on BscScan and on Sourcify with an exact match. Owner, oracle updater and Agentic Wallet are three different addresses, as the constructor requires.
+
+The mandate is sized to the money I had: NVDAB only, $0.25 per trade, 5 trades a day, $0.75 a day, a $0.60 position cap, 1% slippage, 1% closed-market drift. The ERC-8004 identity (agent #358509) now points at the contract (tx `0x8cc455b9d02d66a4fb4e2f631e3ce79b19aaf5622f6b373e180ee934069134dc`). Everything below is in `docs/evidence/mainnet-decisions.json` and can be re-checked with `npm run verify`.
+
+| # | What the agent tried | What happened | tx |
+|---|---|---|---|
+| 1 | Sell 0.001 NVDAB | Allowed and swapped, then wrongly cancelled by my own driver (see below) | commit `0x68174495…074c`, swap `0x1df46d49…e1be` |
+| 2 | Buy $0.20 of NVDAB | Allowed, swapped, settled | swap `0x43d624bc…be38` |
+| 3 | Buy $0.40 | Denied on chain, `NotionalExceeded` | `0x09839649…0539` |
+| 4 | Buy $0.10 with a minimum output 5% under the quote | Denied on chain, `SlippageTooLoose` | `0x315a6f98…0c76` |
+| 5 | Sell 0.001 NVDAB | Allowed, swapped, settled | swap `0x166d33a1…5bed` |
+
+That is five decisions, not the thirty I planned. A buy cycle cost the Agentic Wallet 0.00029 BNB in gas, a sell cycle 0.00046 BNB and a denial about 0.00006 BNB, three to four times what I had costed from measured contract gas, and the whole budget was $2. I stopped when the wallet could no longer pay for another cycle.
+
+`verify.ts` on this history reports two trades matched to settled decisions and one violation. The violation is real and I left it in. My first driver looked up the swap by the `orderId` that `market-order swap` returns, but `market-order list` never found that id (the listed order's id is one higher), so the driver assumed the swap had not happened and cancelled decision #1. The swap had filled. A cancelled decision can't be settled, so that sell is an `UNMATCHED_TRADE` for good. The ledger did what it is for: it caught a trade with no approved decision, and the trade was mine. The driver (`scripts/live-trade.ts`) now finds the order by token pair and start time and never cancels on its own.
+
+The deploy also failed once. `scripts/deploy.ts` crashed right after the deploy transaction mined because a free RPC answered a receipt lookup for the new transaction with a 403 "archive request", not with null. The four configuration transactions never ran. I found the transaction, added a `RESUME_ADDRESS`/`RESUME_TX` option to finish the configuration, and made receipt polling skip an endpoint that errors. The same 403 hit the oracle updater's first run, and the default fallback provider also let 48Club's 1 gwei gas quote set the price (the other endpoints say 0.05), which would have drained the oracle updater's wallet. `bscProvider` now takes the lowest quote. Both fixes have unit tests (`test/bsc-provider.unit.ts`).
+
+---
+
 ## Judge-runnable verification
 
 A judge doesn't have this project's Agentic Wallet, developer mode or bStock jurisdiction clearance, so they can't reproduce a trade. They don't need to. Two scripts check this project's claims against chain state and trust nothing else.
@@ -138,7 +160,7 @@ It flags a trade with no settled decision (`UNMATCHED_TRADE`), a settle pointing
 npm run chaos-fork
 ```
 
-A real run from 2026-09-25, with a mandate of NVDAB only, $2 per trade, a $3 position cap and 1% slippage, at a live price of $225.58. The NYSE was closed and NVDAB was 0.84% above Thursday's close, so the drift bound was set to 0.42%. These hashes exist on that local fork, not on BscScan; Covenant's mainnet deployment is the last build step.
+A real run from 2026-09-25, with a mandate of NVDAB only, $2 per trade, a $3 position cap and 1% slippage, at a live price of $225.58. The NYSE was closed and NVDAB was 0.84% above Thursday's close, so the drift bound was set to 0.42%. These hashes exist on that local fork, not on BscScan. The real mainnet decisions are in "Live on BSC mainnet".
 
 | Attempt | tx hash | block | Result |
 |---|---|---|---|
@@ -195,7 +217,7 @@ npm install
 npx hardhat test
 ```
 
-Twenty-three suites in `test/` (269 tests, one full `npm test` run, all passing), plus two in `frontend/` (39 tests, `cd frontend && npm test`). Several suites run live against a fork or Binance's real endpoints; a hosted CI runner can be geo-blocked from Binance's API, in which case those tests skip rather than fail. Also checked in CI: `npm run typecheck` (types for the scripts, tests and MCP server) and the frontend's lint and build.
+Twenty-four suites in `test/` (274 tests, one full `npm test` run, all passing), plus two in `frontend/` (39 tests, `cd frontend && npm test`). Several suites run live against a fork or Binance's real endpoints; a hosted CI runner can be geo-blocked from Binance's API, in which case those tests skip rather than fail. Also checked in CI: `npm run typecheck` (types for the scripts, tests and MCP server) and the frontend's lint and build.
 
 The suites that deploy the contract, use a fork, or call live endpoints:
 
@@ -215,11 +237,12 @@ The suites that deploy the contract, use a fork, or call live endpoints:
 
 The live suites share `scripts/lib/local-fork.ts`, which deploys with the real `scripts/deploy.ts` and posts the oracle with the real `scripts/oracle-updater.ts`, so every one of them also exercises the path the mainnet deployment will run. They're slower than a typical Hardhat suite; see below for why.
 
-Ten more suites are pure-function or mock-RPC coverage, with no fork, no network and no contract deployment: fast checks of logic the suites above only exercise on the happy path, or don't touch:
+Eleven more suites are pure-function or mock-RPC coverage, with no fork, no network and no contract deployment: fast checks of logic the suites above only exercise on the happy path, or don't touch:
 
 - `test/verify.unit.ts` (51): `reconcile()` against a mock JSON-RPC server with crafted logs - H13's overspend repro (a $1-approved buy that really moved $10,000), H14's agent-rotation scoping, a multi-token trade, a revoke, a token disallowed mid-approval, a missed deployment block, `getLogs` chunk boundaries, a stock dusted into the wallet by a stranger (with and without USDT bundled in), a quote-token spend on an unconfigured stock, USDT leaving the wallet with nothing coming back, and one scan per direction however many tokens are configured. Every violation kind has its own crafted case, a log listed twice counts once, a second RPC that disagrees is reported, one that is down is noted, 200 random honest histories must reconcile clean, and one corrupted trade among honest ones must be flagged as exactly the expected kind on exactly that trade. Every boundary (a fill exactly at the minimum, a swap in the decision's last second, a wallet's last second in scope) is tested on both sides. The live suite only ever reconciles one honest trade at a time; this is where the actual violation-detection logic gets tested against something trying to slip past it.
 - `test/skill-cli.unit.ts` (17): the Wallet Skill CLI's own input validation. `resolve` refuses ambiguous chains, the calldata builders refuse a negative amount, a `2^256` amount, a JS number that already lost precision, and a ticker where an address belongs, `compile-mandate` refuses two themes or a bound over 100%, and a stalled response body times out.
 - `test/erc8004-update.unit.ts` (3): the identity-update script's document builder, which adds the deployed contract and the agent's own id without duplicating on a re-run.
+- `test/bsc-provider.unit.ts` (5): the default RPC provider takes the lowest gas quote (48Club says 1 gwei, the rest 0.05) and skips an endpoint that errors on a receipt lookup instead of crashing, both found on the first mainnet deploy.
 - `test/oracle-guards.unit.ts` (13): the price-versus-candle sanity check and the multi-token oracle spec (`theme:<key>` or a comma list), no network.
 - `test/drift.unit.ts` (6): every copy of a contract fact matches the compiled contract: the CLI's selectors, the event topics in `judge.ts` and `verify.ts`, and the `DenialReason` list in the contract, the CLI, the status page and the game's monster, attack and explanation tables.
 - `test/skill-cli-logic.unit.ts` (15): the skill CLI's plain-English mandate compiler (defaults, regexes, rounding, the 100% bounds), `resolve`'s chain and provider disambiguation and `survey`'s dead, live and unknown verdicts against a stubbed network, the bytes32 and address refusals, the router table and the execution-mode enum.

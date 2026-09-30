@@ -442,6 +442,30 @@ The only real signal is the swap transaction's own `to` address, and even that u
 
 ---
 
+### C20. `[AI-STACK][PITFALL]` `market-order swap` returns an `orderId` that `market-order list --orderId` can't find - confirmed live, 2026-09-30
+`baw market-order swap` printed `orderId: 26093000001928495199`. `baw market-order list --orderId 26093000001928495199` returned `total: 0, list: []` for the next three minutes, while the wallet's balance had already moved. Listing without an id showed the fill under `26093000001928495421`, 222 higher. A second swap: `swap` said `...513746`, the list held `...513747`. A third: `swap` said `...527521`, the list held `...527503`. So the id in the swap response isn't reliably the id of the listed order, and it isn't off by a constant either.
+
+This cost a real mistake. My driver polled by the returned id, saw nothing, decided the swap hadn't happened and cancelled the on-chain decision that covered it. The swap had filled, and a cancelled decision can't be settled, so that trade is permanently unmatched in the ledger. The skill docs tell you to poll `list --orderId`, and the Day 1 run worked with it, so nothing warned me.
+**What works:** filter instead: `baw market-order list --binanceChainId 56 --fromToken <a> --toToken <b> --startTime <ms>` and take the newest.
+**Redesign suggestion:** have `swap` return the id that `list` accepts, or make `list --orderId` accept the swap's id.
+
+### C21. `[AI-STACK][PITFALL]` The `baw` login session is tied to the Node version that ran `baw auth signin`
+After signing in under Node 20, the same `baw wallet balance` under Node 22 (which the rest of the repo needs; Hardhat refuses Node 20) answers `NOT_LOGGED_IN`. Same binary, same machine, same user. The session isn't stored somewhere the Node version doesn't matter. I found out mid-deploy-day when a script run under Node 22 shelled out to `baw`. Nothing in the error mentions Node. Fix on my side: run `baw` with Node 20 first on `PATH` from scripts that run under 22.
+
+### C22. `[AI-STACK][PITFALL]` `wallet send` refuses a brand new recipient, and the error tells you what to do only if you know where the address book is
+Sending BNB to a newly generated oracle-updater address failed with `SERVICE_ERROR 351703: recipient address is not in your address book. Add this address in your binance wallet app, then retry`. The message is fine, but nothing in `baw` lists or adds address-book entries, so the whole step needs the phone. Same behaviour as C15; this time I planned for it and it still cost a round trip. It's a good default for a wallet an agent controls, and it should be in the quick start.
+
+### B20. `[TOOLING][PITFALL]` Etherscan V2's free tier doesn't cover BSC
+`hardhat-verify` is configured for Etherscan API V2 ("one key covers 60+ chains"), but a `txlist` call for chain 56 with a valid free key answers `NOTOK: Free API access is not supported for this chain`. Verification still worked, because `hardhat verify` also submits to Sourcify and BscScan showed the contract as verified from it, but I only learned that by running the command. If you rely on the V2 key for anything on BSC beyond `verify` (fetching a deployer's transaction list, say), it fails.
+
+### B21. `[RPC][PITFALL]` Free BSC endpoints disagree on gas price by a factor of 20, and one returns an error where a node should return null
+On 2026-09-30 `eth_gasPrice` was 0.05 gwei on publicnode and bloXroute and 1 gwei on 48Club, on the same block. Median transactions in the latest block paid 0.05 gwei, and blocks were a third full. With ethers' FallbackProvider whichever endpoint answers first sets the price, so a script's wallet could be asked to hold 20 times the gas it needed, or a transaction could spend it.
+
+Separately, `bsc.publicnode.com` answers `eth_getTransactionReceipt` for a transaction it hasn't seen yet with a `403 Archive requests require a personal token`, not with `null`. That crashed the first mainnet deploy right after the contract creation had mined, before any of its four configuration transactions, and the oracle updater's first run the same way. Both are fixed in `scripts/lib/bsc-provider.ts` (lowest quote wins; an erroring endpoint is skipped), with unit tests. Neither is in any provider's docs.
+
+### B22. `[STOCK][PITFALL]` Real gas per Agentic Wallet swap cycle is 3 to 4 times what the contract's own gas suggests
+Measured on the deployed contract (unoptimized build, an upper bound): `commit` 320k gas, `settle` about 90k, a denied `commit` 209k. Costed at the network's 0.05 gwei that's about 0.0001 BNB for a full cycle with a 300k-gas swap. The Agentic Wallet actually spent 0.00029 BNB on a buy cycle and 0.00046 BNB on a sell cycle, and about 0.00006 BNB on a denied commit. Its own transactions paid 0.10 to 0.14 gwei (`effectiveGasPrice` of the ping and the transfers), not 0.05, and the Binance router swap costs more than I assumed. On a $2 budget that turned a planned 30 interactions into 5. Plan the wallet's gas at the wallet's price, not the chain's.
+
 ## D. BNB Agent Studio
 
 ### D1. `[ONBOARD][DOCS]` Contradictory install commands across official BNB sources
