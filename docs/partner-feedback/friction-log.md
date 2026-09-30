@@ -88,9 +88,9 @@ With no documented shape to go on, tried to reverse-engineer it from the live er
 ### A12. `[API][PITFALL]` The signed Web3 API rejects a request from a clock only 19 seconds off, and the fix is in the error text - 2026-09-29
 Every signed call started failing with `HTTP 401 code=40103 msg=Timestamp outside recv_window. serverTime=2026-09-29T09:37:13.075202901Z`. Nothing in my code had changed. My laptop's clock was 19 seconds behind Binance's (I checked against the `Date` header of a plain request to web3.binance.com), and the signature covers the timestamp, so a slow clock fails the signature check too.
 
-I didn't find two things on the authentication page I read: how wide the receive window is, and that a rejected request tells you the server's time (worth re-checking the page before this goes in the report). The second one is the useful part. The client now reads `serverTime` out of the 40103 message, works out its own offset, and retries once. That turned a hard failure into a working call.
+Correction, 2026-09-30: my first note here said the authentication page doesn't give the receive-window size. That was wrong; I hadn't read the page closely. It does: the default is 5,000 ms and the maximum is 60,000 ms, set with the `X-OC-RECV-WINDOW` header. What it doesn't cover is the part that mattered while I was debugging: the page's one error-response example shows a generic `timestamp` field in the JSON envelope, not the `serverTime=...` string that a 40103 rejection carries inside its `msg` text. That string is the useful part. The client now reads `serverTime` out of the 40103 message, works out its own offset, and retries once, which turned a hard failure into a working call.
 
-**Redesign suggestion:** document the window size on the authentication page, and return the server time in a header or a dedicated `/time` endpoint instead of only inside an error string. Most exchange APIs have one.
+**Redesign suggestion:** next to the window size that is already documented, say that a 40103 rejection's `msg` includes `serverTime=...`, and return the server time in a header or a dedicated `/time` endpoint instead of only inside an error string. Most exchange APIs have one.
 
 ---
 
@@ -133,6 +133,14 @@ stockInfo.price (reference): null
 For Ondo, `stockInfo.price` is real and genuinely independent - it differs from the on-chain price by about 0.2% at the same instant, which is exactly what an actual reference quote should do. The original self-referential worry doesn't hold for Ondo.
 
 For bStocks, the same field comes back `null`. Not a smaller number, not a stale number - absent. The RWA Data API's headline dual-price feature simply doesn't cover bStocks' reference side, even though bStocks is supported everywhere else in the same response (`statusInfo`, `tokenInfo`, `type: 3` all populate normally). **This is a coverage gap specific to bStocks, not a self-referential-price problem, and it's a materially different, more precise finding than the pre-build guess.**
+
+Follow-up, 2026-09-30: is this my parsing, or their data? Neither the client nor my code is involved: a plain `curl` of the same public endpoint returns the same thing. I then checked all 46 bStocks the signed Market API lists (`platformId=bstock`), not just NVDAB. All 46 answered, all are `type: 3`, all have a normal `tokenInfo.price`, and none has a `stockInfo.price`. The Ondo control (NVDAon, `type: 1`) returns `"price": "230.393333"` from the same call, so the difference is in what the server sends, not in the request.
+
+What makes it sharper: `stockInfo` is not empty for a bStock. For NVDAB it carries `priceHigh52w` 236.54, `priceLow52w` 164.27, `marketCap`, `priceToEarnings` 28.44, `eps` 7.99 and `dividendYield`. Only `price` is null, plus a few others (`sharesOutstanding`, `turnoverRate`, `amplitude`). So the endpoint fills in fundamentals for bStocks and leaves out the one number a dual-price feature needs. I can't tell from outside whether that is a bug or a deliberate gap (no reference feed for bStocks); either way nothing in the docs says it.
+To reproduce on one token:
+```
+curl -s 'https://www.binance.com/bapi/defi/v2/public/wallet-direct/buw/wallet/market/token/rwa/dynamic/ai?chainId=56&contractAddress=0x02fca66c1d1afb4e2a7884261eb00f63598a7436' | python3 -c "import sys,json;d=json.load(sys.stdin)['data'];print(d['tokenInfo']['price'],d['stockInfo']['price'])"
+```
 
 Product consequence: any "on-chain vs reference price gap" feature is simply unbuildable for bStocks via this endpoint, not just untrustworthy. Covenant was already scoped away from that idea (strategy-report.md §2.5), so this doesn't change the build - but it's exactly the kind of tokenized-stock-specifics finding the Dev Experience Report asks for, and it's a stronger, more concrete version of B6 than what pre-build research alone could establish.
 
