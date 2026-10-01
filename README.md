@@ -59,6 +59,12 @@ Covenant v1 swapped for the agent. A red-team review found that was opt-in: the 
 
 The honest gap: Covenant can't physically stop a trade. Binance's own wallet guardrails (daily limit, token scope, session expiry) are the hard, private limit. Covenant adds a second layer that is market-aware and public, and it makes every bypass detectable.
 
+The wallet's own limits, read with `baw wallet settings` on 2026-10-01 ([`docs/evidence/wallet-settings.json`](docs/evidence/wallet-settings.json)): a daily limit of 50,000 (USD), `tradeAllTokens` off, a 48 hour session and `AutoReject` for abnormal transactions. Binance sets and enforces those, and they are far looser than the $2 this wallet holds, so they work as a coarse ceiling. Nothing in them covers the market session, closed-market drift or the agent's committed quote, which is what Covenant adds.
+
+<p align="center">
+  <img src="docs/screenshots/wallet-settings.png" width="49%" alt="Output of baw wallet settings: daily limit 50000, tradeAllTokens false, 48h session" />
+</p>
+
 ---
 
 ## Binance stack used

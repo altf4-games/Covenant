@@ -1,0 +1,16 @@
+{
+  "command": "baw wallet settings --json",
+  "capturedAt": "2026-10-01T07:47:41Z",
+  "note": "The Agentic Wallet's own limits, read from Binance by the CLI. Only these fields are kept. Binance sets and enforces them; Covenant does not.",
+  "settings": {
+    "dailyLimit": 50000,
+    "tradeAllTokens": false,
+    "maxSigninDuration": "48h",
+    "inactiveSignoutDuration": "48h",
+    "abnormalTxnHandling": "AutoReject",
+    "devMode": {
+      "enabled": true,
+      "dailyLimit": 1000
+    }
+  }
+}
