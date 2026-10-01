@@ -138,8 +138,25 @@ export interface VerifiedTx {
  * decision event in it. Trusts nothing but the receipt the RPC returns.
  */
 export async function verifyTx(rpcTarget: RpcTarget, covenantAddress: string, txHash: string): Promise<VerifiedTx> {
-  const { result: receipt } = await jsonRpcWithFailover("eth_getTransactionReceipt", [txHash], { rpcUrls: asRpcList(rpcTarget) });
-  if (!receipt) return { txHash, ok: false, detail: "no receipt found - transaction does not exist on this chain" };
+  // One endpoint answering `null` doesn't mean the transaction doesn't exist:
+  // free BSC endpoints prune old receipts and answer null for them (bloXroute
+  // did, a day after the deploy, while 48Club still had every one). So an
+  // error or a null moves on to the next endpoint, and a receipt is only
+  // "not found" once every endpoint has come up empty.
+  const urls = asRpcList(rpcTarget);
+  let receipt: { status: string; blockNumber: string; logs: unknown[] } | null = null;
+  for (const url of urls) {
+    try {
+      const { result } = await jsonRpcWithFailover("eth_getTransactionReceipt", [txHash], { rpcUrls: [url] });
+      if (result) {
+        receipt = result;
+        break;
+      }
+    } catch {
+      // this endpoint is down or refusing; try the next
+    }
+  }
+  if (!receipt) return { txHash, ok: false, detail: `no receipt found on any of ${urls.length} endpoint${urls.length === 1 ? "" : "s"} (an endpoint that has pruned it answers null, so a transaction may exist and still be missing here)` };
   if (receipt.status !== "0x1") return { txHash, ok: false, detail: `transaction reverted (status=${receipt.status})` };
 
   const events = (receipt.logs as Log[])

@@ -137,7 +137,7 @@ Node 22 or later is required. Deploying is `npm run deploy`, which builds the op
 
 ## Tests, and what they caught
 
-**274 tests in 24 suites, plus 43 in the frontend.** The live suites run against a fork of BSC mainnet with the real Agentic Wallet impersonated and real PancakeSwap liquidity. A seeded fuzz of 12,000 cases checked `previewDecision` against an independent model with no mismatch, and mutation testing (33 breaks in the contract, 33 in `verify.ts`, 114 elsewhere) leaves one equivalent mutant standing. A few things only a live test could find:
+**277 tests in 25 suites, plus 43 in the frontend.** The live suites run against a fork of BSC mainnet with the real Agentic Wallet impersonated and real PancakeSwap liquidity. A seeded fuzz of 12,000 cases checked `previewDecision` against an independent model with no mismatch, and mutation testing (33 breaks in the contract, 33 in `verify.ts`, 114 elsewhere) leaves one equivalent mutant standing. A few things only a live test could find:
 
 - A PancakeSwap router struct missing its `deadline` field compiled fine, because the mock router shared the mistake. The first real fork swap reverted with no reason string.
 - `resolve` returned the Ethereum address for `NVDA` on Ondo, silently, because a provider can list one ticker on several chains.
@@ -145,6 +145,7 @@ Node 22 or later is required. Deploying is `npm run deploy`, which builds the op
 - A zero-size sell during closed-market hours panicked on a division instead of denying. Zero and near-`uint256` amounts now return `InvalidAmount`.
 - Binance reports a bStock fill in share units and the chain moves token units, 0.078% apart for NVDAB, so settling with Binance's number flags every honest trade. Settles use the real `Transfer` amount.
 - The first mainnet run found two more. A free RPC answered a receipt lookup for a just-sent transaction with a 403, which crashed the deploy right after the contract mined, and 48Club quotes 1 gwei where the rest quote 0.05. Both are fixed with unit tests.
+- A day later, bloXroute began answering `null` for old receipts while 48Club still had every one, and `judge` took the first `null` as final and reported 0 of 8 transactions verified. I found it rehearsing the demo. It now tries every endpoint and says not found only when all of them come up empty.
 
 `npm run chaos-fork` runs eight attempts on a mainnet fork, with the real overnight NVDAB premium as one of them: an impersonator token, $50 against a $2 cap, a quote understated to hide a loose minimum, a halted oracle, the premium while the NYSE was shut, a position over the cap, a stranger committing, and one honest $1 trade. Each denial has its own reason, the stranger reverts with `NotAgent`, and the honest trade goes through. The hashes are in [`docs/evidence/chaos-fork-run.json`](docs/evidence/chaos-fork-run.json); they exist only on the local fork, not on BscScan.
 
