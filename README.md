@@ -103,11 +103,11 @@ COVENANT_ADDRESS=0x90F642be72b5aD815B924AB3CFFd5f241Dc656aa VERIFY_FROM_BLOCK=12
 
 ## Around the contract
 
-- **Oracle updater** ([`scripts/oracle-updater.ts`](scripts/oracle-updater.ts)): posts status, price, whether the NYSE session is open and the last close. No cron is installed; I run it before a session.
-- **Plain-English mandate**: `compile-mandate` turns "Only AI-chip stocks, at most $1 per trade, no weekend premium over 1%" into one `setMandateForTokens` transaction. It uses a small ticker-to-theme map, because the API's sector filters don't exist server-side.
-- **Status page and game** (`frontend/`, React and Phaser, Kenney's CC0 art): replays real decisions as a town, with a battle for every trade. A denial ends with "TRADE BLOCKED, your money is safe." Each denial also shows what the wallet would have spent with no mandate at all (the "unguarded twin"), computed from the `amountIn` Covenant already evaluated. `npm run build` makes a static site with relative paths, and it names the RPC host and chain it read from. The sportscaster lines come from Gemini over the five real decisions.
-- **Off-hours log** ([`data/off-hours-log.jsonl`](data/off-hours-log.jsonl)): a cron job polls NVDA across all three providers every 15 minutes (market status, on-chain price, and a reference price where one exists). Gaps are real: cron can't fire while the laptop sleeps.
-- **Trading card**: a rarity tier computed from the agent's real track record and its ERC-8004 identity.
+- The oracle updater ([`scripts/oracle-updater.ts`](scripts/oracle-updater.ts)): posts status, price, whether the NYSE session is open and the last close. No cron is installed, so I run it before a session.
+- A plain-English mandate: `compile-mandate` turns "Only AI-chip stocks, at most $1 per trade, no weekend premium over 1%" into one `setMandateForTokens` transaction. It uses a small ticker-to-theme map, because the API's sector filters don't exist server-side.
+- A status page and game (`frontend/`, React and Phaser, Kenney's CC0 art) that replays real decisions as a town, with a battle for every trade. A denial ends with "TRADE BLOCKED, your money is safe." Each denial also shows what the wallet would have spent with no mandate at all (the "unguarded twin"), computed from the `amountIn` Covenant already evaluated. `npm run build` makes a static site with relative paths, and it names the RPC host and chain it read from. The sportscaster lines come from Gemini over the five real decisions.
+- An off-hours log ([`data/off-hours-log.jsonl`](data/off-hours-log.jsonl)): a cron job polls NVDA across all three providers every 15 minutes (market status, on-chain price, and a reference price where one exists). Gaps are real: cron can't fire while the laptop sleeps.
+- A trading card with a rarity tier computed from the agent's real track record and its ERC-8004 identity.
 
 ```bash
 npm test                                            # contract and script suites
@@ -123,7 +123,9 @@ To register the MCP server with a client (Claude Code, Cursor and so on):
 { "mcpServers": { "covenant-mandate": { "command": "npx", "args": ["tsx", "mcp-server/index.ts"], "cwd": "/path/to/covenant" } } }
 ```
 
-Its tools are `resolve_ticker`, `survey_providers`, `get_mandate_status`, `check_halt` and `preview_trade`. Node 22 or later is required. Deploying is `npm run deploy`, which builds the optimized profile first; `deploy.ts` refuses the unoptimized build (17 KB against 7 KB). The oracle updater and the live suites need `WEB3_API_KEY` and `WEB3_API_SECRET`, narration needs `GEMINI_API_KEY`, and the fork suites need a forked node.
+Its tools are `resolve_ticker`, `survey_providers`, `get_mandate_status`, `check_halt` and `preview_trade`.
+
+Node 22 or later is required. Deploying is `npm run deploy`, which builds the optimized profile first, and `deploy.ts` refuses the unoptimized build (17 KB against 7 KB). The oracle updater and the live suites need `WEB3_API_KEY` and `WEB3_API_SECRET`, narration needs `GEMINI_API_KEY`, and the fork suites need a forked node.
 
 ---
 
@@ -163,7 +165,7 @@ Eleven more review passes each used a different lens (type checks, coverage, mut
 
 ## Known limitations
 
-Listed here rather than found by a judge:
+Stated here so nobody has to find them:
 
 - Only five decisions exist on mainnet, and one is a permanent `UNMATCHED_TRADE`. The budget was $2.
 - Covenant records and makes bypasses visible. It can't stop a trade or take custody.
