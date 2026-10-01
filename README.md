@@ -8,10 +8,12 @@ Covenant never touches the money. What it guarantees is that no trade happens un
 
 **Live on BSC mainnet:** [`0x90F642be72b5aD815B924AB3CFFd5f241Dc656aa`](https://bscscan.com/address/0x90F642be72b5aD815B924AB3CFFd5f241Dc656aa#code), source verified. Built for the BNB Hack: Tokenized Stocks Edition (16 Sep to 11 Oct 2026).
 
-<p float="left">
-  <img src="docs/screenshots/how-it-works.png" width="32%" alt="How it works: the agent, shops, and rule battles explained" />
-  <img src="docs/screenshots/trade-blocked.png" width="32%" alt="A denied trade: TRADE BLOCKED, your money is safe" />
-  <img src="docs/screenshots/day-complete.png" width="32%" alt="Day complete summary over the town map" />
+<p align="center">
+  <img src="docs/screenshots/how-it-works.png" width="49%" alt="How it works: the agent, shops, and rule battles explained" />
+  <img src="docs/screenshots/trade-blocked.png" width="49%" alt="A denied trade: TRADE BLOCKED, your money is safe" />
+</p>
+<p align="center">
+  <img src="docs/screenshots/day-complete.png" width="49%" alt="Day complete summary over the town map" />
 </p>
 
 Screenshots from a seeded run against a local fork of BSC mainnet, not mockups.
