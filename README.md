@@ -6,7 +6,9 @@ An owner sets a mandate on BNB Smart Chain: which stocks by exact address, dolla
 
 Covenant never touches the money. What it guarantees is that no trade happens unseen: `scripts/verify.ts` reconciles every real transfer in and out of the wallet against settled decisions, and a trade without an approved decision shows up for anyone with an RPC.
 
-**Live on BSC mainnet:** [`0x90F642be72b5aD815B924AB3CFFd5f241Dc656aa`](https://bscscan.com/address/0x90F642be72b5aD815B924AB3CFFd5f241Dc656aa#code), source verified. Built for the BNB Hack: Tokenized Stocks Edition (16 Sep to 11 Oct 2026).
+**Live on BSC mainnet:** [`0x90F642be72b5aD815B924AB3CFFd5f241Dc656aa`](https://bscscan.com/address/0x90F642be72b5aD815B924AB3CFFd5f241Dc656aa#code), source verified.
+
+Built for the BNB Hack: Tokenized Stocks Edition (16 Sep to 11 Oct 2026).
 
 <p align="center">
   <img src="docs/screenshots/how-it-works.png" width="49%" alt="How it works: the agent, shops, and rule battles explained" />
