@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { fetchSnapshot, BSC_CHAIN_ID, fmtAmount, describeDecision, guardedVsUnguarded, bossFor, tokenName, type CovenantSnapshot, type Decision } from "./lib/covenant";
+import { fetchSnapshot, loadStaticSnapshot, BSC_CHAIN_ID, fmtAmount, describeDecision, guardedVsUnguarded, bossFor, tokenName, type CovenantSnapshot, type Decision } from "./lib/covenant";
 import { TradingCard } from "./components/TradingCard";
 import { GameCanvas } from "./components/GameCanvas";
 import { monsterFor } from "./game/logic";
@@ -8,6 +8,8 @@ import narration from "./data/narration.json";
 const WIDE_MIN_PX = 900;
 /** The menu's width (360) plus its 12px margin and a 12px gap before the town. */
 const PANEL_STRIP_PX = 384;
+/** Prefilled for a visitor who wants to re-read the chain themselves instead of trusting the snapshot. */
+const DEFAULT_RPC = "https://rpc-bsc.48.club";
 
 function readUrlParams() {
   const params = new URLSearchParams(location.search);
@@ -143,14 +145,34 @@ export default function App() {
       if (window.innerWidth < WIDE_MIN_PX) setPanelOpen(false);
     } catch (err) {
       console.error(err);
-      setError(err instanceof Error ? err.message : String(err));
+      const message = err instanceof Error ? err.message : String(err);
+      // A free public RPC dropping one log range reads, on this page, as a
+      // forked-node problem (the library's own hint). Say what a visitor can do.
+      setError(
+        /timed out/i.test(message)
+          ? "The RPC didn't answer in time. Free public BSC RPCs rate-limit log scans; press LOAD again or try another RPC URL. Whatever is already on screen is unchanged."
+          : message,
+      );
     } finally {
       setLoading(false);
     }
   }
 
   useEffect(() => {
-    if (initial.rpc && initial.contract) void load();
+    if (initial.rpc && initial.contract) {
+      void load();
+      return;
+    }
+    // No link parameters: show the committed snapshot of the real mainnet
+    // ledger, and prefill the form so LOAD re-reads the chain live.
+    void loadStaticSnapshot().then((snap) => {
+      if (!snap) return;
+      setSnapshot(snap);
+      setContract(snap.contractAddress);
+      setRpc((r) => r || DEFAULT_RPC);
+      setFromBlock((b) => b || String((snap as { fromBlock?: number }).fromBlock ?? ""));
+      if (window.innerWidth < WIDE_MIN_PX) setPanelOpen(false);
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -235,10 +257,17 @@ export default function App() {
                   <StatTile label="Spent today" value={`$${fmtAmount(snapshot.notionalUsedToday)}`} />
                   <StatTile label="Agent" value={snapshot.agent.slice(0, 6) + "…" + snapshot.agent.slice(-4)} />
                 </div>
-                <p className={`mt-2 text-[10px] ${snapshot.chainId === BSC_CHAIN_ID ? "text-slate-500" : "font-semibold text-red-700"}`}>
-                  Read from {snapshot.rpcHost}, chain {snapshot.chainId}
-                  {snapshot.chainId === BSC_CHAIN_ID ? "." : " - not BSC mainnet."} This page shows only what that RPC returned; to check it independently, run verify.ts.
-                </p>
+                {snapshot.source === "static" ? (
+                  <p className="mt-2 text-[10px] text-slate-500">
+                    Snapshot of BSC mainnet (chain {snapshot.chainId}), read from {snapshot.rpcHost} at block {snapshot.latestBlock}
+                    {snapshot.generatedAt ? ` on ${snapshot.generatedAt.slice(0, 10)}` : ""}. Free RPCs only keep a few days of logs, so this page ships the read instead of scanning at load time. Press LOAD above to re-read the chain live, or run verify.ts to check it independently.
+                  </p>
+                ) : (
+                  <p className={`mt-2 text-[10px] ${snapshot.chainId === BSC_CHAIN_ID ? "text-slate-500" : "font-semibold text-red-700"}`}>
+                    Read from {snapshot.rpcHost}, chain {snapshot.chainId}
+                    {snapshot.chainId === BSC_CHAIN_ID ? "." : " - not BSC mainnet."} This page shows only what that RPC returned; to check it independently, run verify.ts.
+                  </p>
+                )}
               </PokeBox>
 
               <PokeBox title={snapshot.totalDecisions > snapshot.decisions.length ? `TRADE LOG (NEWEST ${snapshot.decisions.length} OF ${snapshot.totalDecisions})` : "TRADE LOG (NEWEST FIRST)"}>

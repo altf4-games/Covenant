@@ -8,6 +8,8 @@ Covenant never touches the money. What it guarantees is that no trade happens un
 
 **Live on BSC mainnet:** [`0x90F642be72b5aD815B924AB3CFFd5f241Dc656aa`](https://bscscan.com/address/0x90F642be72b5aD815B924AB3CFFd5f241Dc656aa#code), source verified.
 
+**Live app:** [covenant-eight-self.vercel.app](https://covenant-eight-self.vercel.app). It opens on a shipped snapshot of the mainnet ledger (free RPCs only keep a few days of logs), and the LOAD button re-reads the chain live.
+
 Built for the BNB Hack: Tokenized Stocks Edition (16 Sep to 11 Oct 2026).
 
 <p align="center">
@@ -109,7 +111,7 @@ COVENANT_ADDRESS=0x90F642be72b5aD815B924AB3CFFd5f241Dc656aa VERIFY_FROM_BLOCK=12
 
 - The oracle updater ([`scripts/oracle-updater.ts`](scripts/oracle-updater.ts)): posts status, price, whether the NYSE session is open and the last close. No cron is installed, so I run it before a session.
 - A plain-English mandate: `compile-mandate` turns "Only AI-chip stocks, at most $1 per trade, no weekend premium over 1%" into one `setMandateForTokens` transaction. It uses a small ticker-to-theme map, because the API's sector filters don't exist server-side.
-- A status page and game (`frontend/`, React and Phaser, Kenney's CC0 art) that replays real decisions as a town, with a battle for every trade. A denial ends with "TRADE BLOCKED, your money is safe." Each denial also shows what the wallet would have spent with no mandate at all (the "unguarded twin"), computed from the `amountIn` Covenant already evaluated. `npm run build` makes a static site with relative paths, and it names the RPC host and chain it read from. The sportscaster lines come from Gemini over the five real decisions.
+- A status page and game (`frontend/`, React and Phaser, Kenney's CC0 art) that replays real decisions as a town, with a battle for every trade. A denial ends with "TRADE BLOCKED, your money is safe." Each denial also shows what the wallet would have spent with no mandate at all (the "unguarded twin"), computed from the `amountIn` Covenant already evaluated. `npm run build` makes a static site with relative paths. The hosted page opens on `frontend/public/covenant-snapshot.json`, one real read of the chain made with `scripts/generate-frontend-snapshot.ts`, and says so on screen; with `?rpc=...&contract=...` or the LOAD button it reads live and names the RPC host and chain. The sportscaster lines come from Gemini over the five real decisions.
 - An off-hours log ([`data/off-hours-log.jsonl`](data/off-hours-log.jsonl)): a cron job polls NVDA across all three providers every 15 minutes (market status, on-chain price, and a reference price where one exists). Gaps are real: cron can't fire while the laptop sleeps.
 - A trading card with a rarity tier computed from the agent's real track record and its ERC-8004 identity.
 
@@ -135,7 +137,7 @@ Node 22 or later is required. Deploying is `npm run deploy`, which builds the op
 
 ## Tests, and what they caught
 
-**274 tests in 24 suites, plus 39 in the frontend.** The live suites run against a fork of BSC mainnet with the real Agentic Wallet impersonated and real PancakeSwap liquidity. A seeded fuzz of 12,000 cases checked `previewDecision` against an independent model with no mismatch, and mutation testing (33 breaks in the contract, 33 in `verify.ts`, 114 elsewhere) leaves one equivalent mutant standing. A few things only a live test could find:
+**274 tests in 24 suites, plus 43 in the frontend.** The live suites run against a fork of BSC mainnet with the real Agentic Wallet impersonated and real PancakeSwap liquidity. A seeded fuzz of 12,000 cases checked `previewDecision` against an independent model with no mismatch, and mutation testing (33 breaks in the contract, 33 in `verify.ts`, 114 elsewhere) leaves one equivalent mutant standing. A few things only a live test could find:
 
 - A PancakeSwap router struct missing its `deadline` field compiled fine, because the mock router shared the mistake. The first real fork swap reverted with no reason string.
 - `resolve` returned the Ethereum address for `NVDA` on Ondo, silently, because a provider can list one ticker on several chains.

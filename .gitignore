@@ -24,3 +24,5 @@
 # stdout log or a test run's throwaway file.
 /data/off-hours-cron.log
 /data/off-hours-log.test.jsonl
+.vercel
+.env.local

@@ -41,6 +41,10 @@ export interface CovenantSnapshot {
   /** How many decisions the scanned range held in total. */
   totalDecisions: number;
   latestBlock: number;
+  /** "static" when read from the committed covenant-snapshot.json, "live" when read from an RPC just now. */
+  source?: "live" | "static";
+  /** When a static snapshot was taken from chain (ISO time). */
+  generatedAt?: string;
 }
 
 /** The host of an RPC URL, without credentials or a path (an API key often sits in the path). */
@@ -114,4 +118,34 @@ export async function fetchSnapshot(
     totalDecisions: all.length,
     latestBlock,
   };
+}
+
+// ---- Static snapshot ------------------------------------------------------
+// Free BSC RPCs only serve logs a few days back, so a hosted page that scans
+// live would show an empty ledger by judging time. `covenant-snapshot.json`
+// holds one real read of everything the page shows, taken from chain with
+// scripts/generate-frontend-snapshot.ts. It is chain data, not a mock, and the
+// page says so and offers a live re-read.
+
+/** JSON can't carry a bigint, so each one is written as {"$bigint": "123"}. */
+export function serializeSnapshot(snapshot: CovenantSnapshot): string {
+  return JSON.stringify(snapshot, (_key, value) => (typeof value === "bigint" ? { $bigint: value.toString() } : value), 2);
+}
+
+export function reviveSnapshot(text: string): CovenantSnapshot {
+  return JSON.parse(text, (_key, value) =>
+    value !== null && typeof value === "object" && "$bigint" in value && typeof value.$bigint === "string" ? BigInt(value.$bigint) : value,
+  ) as CovenantSnapshot;
+}
+
+/** The committed snapshot, or null when there isn't one (a fork-only checkout, say). */
+export async function loadStaticSnapshot(url = "./covenant-snapshot.json"): Promise<CovenantSnapshot | null> {
+  try {
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    const snap = reviveSnapshot(await res.text());
+    return { ...snap, source: "static" };
+  } catch {
+    return null;
+  }
 }

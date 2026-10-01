@@ -1,0 +1,218 @@
+{
+  "contractAddress": "0x90F642be72b5aD815B924AB3CFFd5f241Dc656aa",
+  "rpcHost": "rpc-bsc.48.club",
+  "chainId": 56,
+  "mandate": {
+    "active": true,
+    "maxNotionalPerTradeUsd": {
+      "$bigint": "250000000000000000"
+    },
+    "maxTradesPerDay": {
+      "$bigint": "5"
+    },
+    "expiry": {
+      "$bigint": "1793372197"
+    }
+  },
+  "tradesUsedToday": {
+    "$bigint": "0"
+  },
+  "stalenessBound": {
+    "$bigint": "900"
+  },
+  "decisionTtl": {
+    "$bigint": "600"
+  },
+  "agent": "0xaa963e1b4f913975Ee81139F4BA2953951E45844",
+  "maxDailyNotionalUsd": {
+    "$bigint": "750000000000000000"
+  },
+  "notionalUsedToday": {
+    "$bigint": "0"
+  },
+  "decisions": [
+    {
+      "id": "5",
+      "commit": {
+        "token": "0x02Fca66C1D1aFB4E2A7884261eB00F63598a7436",
+        "side": "sell",
+        "allowed": true,
+        "reason": "None",
+        "amountIn": {
+          "$bigint": "1002000000000000"
+        },
+        "quotedOut": {
+          "$bigint": "230987643625564306"
+        },
+        "minOut": {
+          "$bigint": "229832705407436484"
+        },
+        "expiresAt": 1790781833,
+        "mandateMaxNotionalPerTradeUsd": {
+          "$bigint": "250000000000000000"
+        },
+        "mandateMaxTradesPerDay": {
+          "$bigint": "5"
+        },
+        "mandateExpiry": 1793372197,
+        "oracleUpdatedAt": 1790780931,
+        "blockNumber": 124930628,
+        "txHash": "0x971e8ebced37d55d3a635dda001284a53fea242c5134ba22fd34b9dec0292d69"
+      },
+      "settle": {
+        "swapTxHash": "0x166d33a1a6d7a3d3977a104e75e4f84d1c19e6437bf2999755b5dcf4dbb45bed",
+        "amountOut": {
+          "$bigint": "230987779048023213"
+        },
+        "executionMode": "aggregator",
+        "belowMin": false,
+        "txHash": "0xff037774737b159e696645972b0fc8376302efcca5852bf0893553a9fbe4db99"
+      },
+      "cancelled": false
+    },
+    {
+      "id": "4",
+      "commit": {
+        "token": "0x02Fca66C1D1aFB4E2A7884261eB00F63598a7436",
+        "side": "buy",
+        "allowed": false,
+        "reason": "SlippageTooLoose",
+        "amountIn": {
+          "$bigint": "100000000000000000"
+        },
+        "quotedOut": {
+          "$bigint": "433446866125679"
+        },
+        "minOut": {
+          "$bigint": "411774522819395"
+        },
+        "expiresAt": 1790781215,
+        "mandateMaxNotionalPerTradeUsd": {
+          "$bigint": "250000000000000000"
+        },
+        "mandateMaxTradesPerDay": {
+          "$bigint": "5"
+        },
+        "mandateExpiry": 1793372197,
+        "oracleUpdatedAt": 1790780931,
+        "blockNumber": 124930587,
+        "txHash": "0x315a6f98d3cd244a8def24f1603beb8847268b803cc418c70a12b435f2ed0c76"
+      },
+      "settle": null,
+      "cancelled": false
+    },
+    {
+      "id": "3",
+      "commit": {
+        "token": "0x02Fca66C1D1aFB4E2A7884261eB00F63598a7436",
+        "side": "buy",
+        "allowed": false,
+        "reason": "NotionalExceeded",
+        "amountIn": {
+          "$bigint": "400000000000000000"
+        },
+        "quotedOut": {
+          "$bigint": "1733838115332392"
+        },
+        "minOut": {
+          "$bigint": "1725168924755730"
+        },
+        "expiresAt": 1790781206,
+        "mandateMaxNotionalPerTradeUsd": {
+          "$bigint": "250000000000000000"
+        },
+        "mandateMaxTradesPerDay": {
+          "$bigint": "5"
+        },
+        "mandateExpiry": 1793372197,
+        "oracleUpdatedAt": 1790780931,
+        "blockNumber": 124930567,
+        "txHash": "0x0983964962d8e6dd9969142670bcedde1821d86e0b89be9b4b76db287fdd0539"
+      },
+      "settle": null,
+      "cancelled": false
+    },
+    {
+      "id": "2",
+      "commit": {
+        "token": "0x02Fca66C1D1aFB4E2A7884261eB00F63598a7436",
+        "side": "buy",
+        "allowed": true,
+        "reason": "None",
+        "amountIn": {
+          "$bigint": "200000000000000000"
+        },
+        "quotedOut": {
+          "$bigint": "867232392938195"
+        },
+        "minOut": {
+          "$bigint": "862896230973504"
+        },
+        "expiresAt": 1790781534,
+        "mandateMaxNotionalPerTradeUsd": {
+          "$bigint": "250000000000000000"
+        },
+        "mandateMaxTradesPerDay": {
+          "$bigint": "5"
+        },
+        "mandateExpiry": 1793372197,
+        "oracleUpdatedAt": 1790780931,
+        "blockNumber": 124929963,
+        "txHash": "0x837d57c15969e70ce78256c89266d660cdce297f0db74afad926b3063441e251"
+      },
+      "settle": {
+        "swapTxHash": "0x43d624bc28138d0b23197a9b864d4858d8d1dd5e4a6e002c07d442c947e6be38",
+        "amountOut": {
+          "$bigint": "866444512831247"
+        },
+        "executionMode": "aggregator",
+        "belowMin": false,
+        "txHash": "0x169b9686f65d748a6518cbb3a2b94cc9a34c1863071407aed9bf87df39721ff0"
+      },
+      "cancelled": false
+    },
+    {
+      "id": "1",
+      "commit": {
+        "token": "0x02Fca66C1D1aFB4E2A7884261eB00F63598a7436",
+        "side": "sell",
+        "allowed": true,
+        "reason": "None",
+        "amountIn": {
+          "$bigint": "1002000000000000"
+        },
+        "quotedOut": {
+          "$bigint": "230814922186698762"
+        },
+        "minOut": {
+          "$bigint": "229660847575765268"
+        },
+        "expiresAt": 1790781200,
+        "mandateMaxNotionalPerTradeUsd": {
+          "$bigint": "250000000000000000"
+        },
+        "mandateMaxTradesPerDay": {
+          "$bigint": "5"
+        },
+        "mandateExpiry": 1793372197,
+        "oracleUpdatedAt": 1790780501,
+        "blockNumber": 124929221,
+        "txHash": "0x68174495db15996bf71384667523662434aac7ce81dd2ecc3f40413aa8b9074c"
+      },
+      "settle": null,
+      "cancelled": true
+    }
+  ],
+  "trackRecord": {
+    "total": 5,
+    "denied": 2,
+    "settled": 2,
+    "longestDenialStreak": 2,
+    "sawFlagshipDenial": false
+  },
+  "totalDecisions": 5,
+  "latestBlock": 125059687,
+  "source": "static",
+  "generatedAt": "2026-10-01T07:23:05.531Z",
+  "fromBlock": 124928073
+}
