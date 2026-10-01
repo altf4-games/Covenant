@@ -12,5 +12,8 @@
     "mcp-server/**/*.ts",
     "hardhat.config.ts",
     "types/**/*.ts"
+  ],
+  "exclude": [
+    "scripts/generate-frontend-snapshot.ts"
   ]
 }
