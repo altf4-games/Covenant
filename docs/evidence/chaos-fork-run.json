@@ -1,0 +1,13 @@
+{
+  "note": "A real run of `npm run chaos-fork` on 2026-09-25. These transactions exist on a local fork of BSC mainnet, not on BscScan. Mandate: NVDAB only, $2 per trade, $3 position cap, 1% slippage, drift bound 0.42%, live price $225.58, NYSE closed and NVDAB 0.84% above Thursday's close.",
+  "attempts": [
+    { "attempt": "Impersonator token", "tx": "0xbf7f850f8bb02c0d6db0f35152350f6aa310a5c341d6bb8abe213a9d3fbc566f", "block": 123909274, "result": "denied, TokenNotAllowed" },
+    { "attempt": "$50, over the $2 cap", "tx": "0xc431d7e97b926c5a5f73b4d10a30b2ca4ab3b6386e7c0e92605046badf53f87a", "block": 123909275, "result": "denied, NotionalExceeded" },
+    { "attempt": "Quote understated 10x to hide a loose minimum", "tx": "0x5b08a06aad533cde92e4a6a13644cbaad814fbd5db1da17036d539a39fb7a106", "block": 123909276, "result": "denied, SlippageTooLoose" },
+    { "attempt": "Trade while the oracle reports a halt", "tx": "0x6f35371e4db1f362160ff083f908b0c59a17e42fa359601a98608e39bab6a8e5", "block": 123909278, "result": "denied, OracleHalted" },
+    { "attempt": "Buy at the real overnight premium, NYSE closed", "tx": "0xf78a3a30914b4f031f22c9cd83ac140729acd54c479b8b3ea4602388bbf57ae0", "block": 123909282, "result": "denied, ClosedMarketDrift" },
+    { "attempt": "$2 more with about $1.69 already held, over the $3 cap", "tx": "0x02180dd72a751084d9b63684d9ed7ee45bbb607d5cfd8a9078ced019c6a6b63c", "block": 123909286, "result": "denied, PositionLimit" },
+    { "attempt": "A stranger commits under the owner's mandate", "tx": null, "block": null, "result": "reverted, NotAgent" },
+    { "attempt": "$1, within every limit", "tx": "0x704c9875cee397b7e3b26334500b90be75b26428eaa5137241d7a285d69d125f", "block": 123909287, "result": "allowed" }
+  ]
+}
