@@ -65,6 +65,7 @@
  */
 import { DEFAULT_BSC_RPCS, ethCallWithFailover, jsonRpcWithFailover } from "../skills/covenant-mandate/scripts/cli.mjs";
 import { decodeCovenantLog, type CommittedDecision, type SettledDecision } from "./judge.js";
+import { recordedDeployment } from "./lib/deployment.js";
 
 const TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
 const TOKEN_CONFIGURED_TOPIC = "0xb110cbefb429de4c581a73938523a8acbe216e53f923683a5686589669b57b16";
@@ -127,6 +128,10 @@ export interface ReconcileOptions {
   fromBlock: number;
   toBlock?: number;
   chunkSize?: number;
+  /** How many times a request is tried across all the endpoints before the scan gives up (default 4). */
+  rpcRounds?: number;
+  /** First wait between rounds, doubled each time (default 1000 ms). */
+  retryDelayMs?: number;
 }
 
 const topicAddr = (a: string) => "0x" + a.toLowerCase().replace(/^0x/, "").padStart(64, "0");
@@ -136,7 +141,7 @@ const addrFromTopic = (t: string) => "0x" + t.slice(-40).toLowerCase();
  * The RPC calls of one reconciliation, through failover, remembering which
  * endpoints actually answered (so a second opinion can ask a different one).
  */
-function makeClient(rpcUrls: string[]) {
+function makeClient(rpcUrls: string[], rounds = 4, delayMs = 1000) {
   const used = new Set<string>();
   // Endpoints in the order to try them. One that answers moves to the front, so
   // a scan of hundreds of ranges asks a free endpoint that refuses old blocks
@@ -147,17 +152,37 @@ function makeClient(rpcUrls: string[]) {
     if (i > 0) order.unshift(...order.splice(i, 1));
     used.add(url);
   };
+  // One slow or rate-limited answer from every endpoint at once is common on free
+  // RPCs (a day after deploy, 48Club timed out on one 5,000-block range of eighty
+  // and the whole run died). So a failed request is retried a few times, with a
+  // growing wait, before the scan gives up.
+  const retrying = async <T>(attempt: () => Promise<T>): Promise<T> => {
+    let last: unknown;
+    for (let round = 0; round < rounds; round++) {
+      try {
+        return await attempt();
+      } catch (error) {
+        last = error;
+        if (round < rounds - 1) await new Promise((r) => setTimeout(r, delayMs * 2 ** round));
+      }
+    }
+    throw last;
+  };
   return {
     used,
     async call(method: string, params: unknown[]) {
-      const r = await jsonRpcWithFailover(method, params, { rpcUrls: [...order] });
-      promote(r.rpcUrl);
-      return r.result;
+      return retrying(async () => {
+        const r = await jsonRpcWithFailover(method, params, { rpcUrls: [...order] });
+        promote(r.rpcUrl);
+        return r.result;
+      });
     },
     async ethCall(to: string, data: string) {
-      const r = await ethCallWithFailover(to, data, { rpcUrls: [...order] });
-      promote(r.rpcUrl);
-      return r.result;
+      return retrying(async () => {
+        const r = await ethCallWithFailover(to, data, { rpcUrls: [...order] });
+        promote(r.rpcUrl);
+        return r.result;
+      });
     },
   };
 }
@@ -206,7 +231,7 @@ const before = (a: { blockNumber: number; txIndex: number }, b: { blockNumber: n
 
 export async function reconcile(opts: ReconcileOptions) {
   const { rpcUrls, covenantAddress, fromBlock } = opts;
-  const client = makeClient(rpcUrls);
+  const client = makeClient(rpcUrls, opts.rpcRounds, opts.retryDelayMs);
   const chunk = opts.chunkSize ?? DEFAULT_CHUNK;
   const toBlock = opts.toBlock ?? Number(BigInt(await client.call("eth_blockNumber", [])));
 
@@ -550,8 +575,12 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     } catch {
       // no .env
     }
-    const covenantAddress = process.env.COVENANT_ADDRESS;
-    const fromBlock = process.env.VERIFY_FROM_BLOCK;
+    // With nothing set, check the mainnet deployment this repo documents. A different
+    // address needs its own deployment block: a block taken from another contract would be wrong.
+    const recorded = recordedDeployment();
+    const covenantAddress = process.env.COVENANT_ADDRESS || recorded?.covenant;
+    const sameAsRecorded = !!recorded && covenantAddress?.toLowerCase() === recorded.covenant.toLowerCase();
+    const fromBlock = process.env.VERIFY_FROM_BLOCK || (sameAsRecorded ? String(recorded!.deployBlock) : undefined);
     if (!covenantAddress || !fromBlock) throw new Error("Set COVENANT_ADDRESS and VERIFY_FROM_BLOCK (Covenant's deployment block).");
     const rpcUrls = [process.env.BSC_RPC_URL, ...DEFAULT_BSC_RPCS].filter((u): u is string => Boolean(u));
 

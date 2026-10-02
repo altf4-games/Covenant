@@ -105,9 +105,11 @@ That is five decisions, not the thirty I planned. A buy cycle cost the wallet 0.
 You can't reproduce a trade without my wallet, and you don't need to. Two scripts trust nothing but chain state.
 
 ```bash
-COVENANT_ADDRESS=0x90F642be72b5aD815B924AB3CFFd5f241Dc656aa npm run judge
-COVENANT_ADDRESS=0x90F642be72b5aD815B924AB3CFFd5f241Dc656aa VERIFY_FROM_BLOCK=124928073 npm run verify
+npm run judge
+npm run verify
 ```
+
+Both default to the mainnet deployment recorded in [`docs/evidence/covenant-mainnet.json`](docs/evidence/covenant-mainnet.json). To check another deployment, set `COVENANT_ADDRESS` (and `VERIFY_FROM_BLOCK` for `verify`). `verify` scans every block since deployment on free RPCs, so it takes a few minutes and gets slower each day.
 
 `judge` re-fetches each transaction in [`data/judge-tx-hashes.json`](data/judge-tx-hashes.json) and decodes Covenant's own event: decision, side, token, allowed or denied and why, and for a settle the swap hash and amount. `verify` reads every stock and USDT transfer in and out of the agent wallet since deployment and flags a trade with no settled decision, a settle that moved nothing, an amount that isn't what arrived, a fill under the minimum, and a trade before its commit or after its expiry. It repeats the scan on a second RPC and reports `RPC_DISAGREEMENT` if they differ. Amounts are compared with the ERC-20 transfers, not Binance's reported fill, which is in share units for bStocks.
 

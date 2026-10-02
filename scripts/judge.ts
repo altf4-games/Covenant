@@ -12,7 +12,8 @@
  * the decoders here.
  *
  * Usage:
- *   COVENANT_ADDRESS=0x... npm run judge
+ *   npm run judge                        (the mainnet deployment recorded in docs/evidence/)
+ *   COVENANT_ADDRESS=0x... npm run judge (any other deployment)
  *   (tx hashes from JUDGE_TX_HASHES, comma-separated, or data/judge-tx-hashes.json)
  *
  * RPC failover: BSC_RPC_URL, if set, is tried first, then cli.mjs's
@@ -20,6 +21,7 @@
  * up (friction-log.md B12-B14).
  */
 import { readFile } from "node:fs/promises";
+import { recordedDeployment } from "./lib/deployment.js";
 import { SELECTORS, DENIAL_REASONS, jsonRpcWithFailover, ethCallWithFailover, DEFAULT_BSC_RPCS } from "../skills/covenant-mandate/scripts/cli.mjs";
 
 const slot = (data: string, i: number) => "0x" + data.replace(/^0x/, "").slice(i * 64, i * 64 + 64);
@@ -212,7 +214,8 @@ function describeEvent(e: DecodedEvent): string {
 if (import.meta.url === `file://${process.argv[1]}`) {
   (async () => {
     const rpcUrls = [process.env.BSC_RPC_URL, ...DEFAULT_BSC_RPCS].filter((u): u is string => Boolean(u));
-    const covenantAddress = process.env.COVENANT_ADDRESS;
+    const recorded = recordedDeployment();
+    const covenantAddress = process.env.COVENANT_ADDRESS || recorded?.covenant;
     if (!covenantAddress) {
       console.error("Set COVENANT_ADDRESS to the deployed Covenant contract to judge.");
       process.exitCode = 1;
@@ -220,7 +223,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     }
 
     console.log(`Covenant judge report`);
-    console.log(`  contract: ${covenantAddress}`);
+    console.log(`  contract: ${covenantAddress}${process.env.COVENANT_ADDRESS ? "" : " (the mainnet deployment recorded in docs/evidence/covenant-mainnet.json)"}`);
     console.log(`  rpc candidates: ${rpcUrls.join(", ")}\n`);
 
     const txHashes = await readTxHashList();

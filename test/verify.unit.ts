@@ -707,9 +707,48 @@ describe("verify.ts reconcile() (unit, mock RPC, crafted logs)", function () {
       }
     });
 
+    it("a request that fails a few times is retried instead of ending the whole scan", async function () {
+      honestBuy();
+      let failed = 0;
+      const flaky = http.createServer((req, res) => {
+        let body = "";
+        req.on("data", (c) => (body += c));
+        req.on("end", async () => {
+          if (JSON.parse(body).method === "eth_getLogs" && failed < 3) {
+            failed++;
+            res.statusCode = 500;
+            res.end("boom");
+            return;
+          }
+          const up = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body });
+          res.end(await up.text());
+        });
+      });
+      await new Promise<void>((r) => flaky.listen(0, "127.0.0.1", r));
+      try {
+        const flakyUrl = `http://127.0.0.1:${(flaky.address() as AddressInfo).port}`;
+        const r = await reconcile({ rpcUrls: [flakyUrl], covenantAddress: COV, fromBlock: 1, chunkSize: 50, rpcRounds: 5, retryDelayMs: 5 });
+        expect(failed, "log requests that were failed on purpose").to.equal(3);
+        expect(r.violations).to.deep.equal([]);
+      } finally {
+        flaky.close();
+      }
+    });
+
+    it("still gives up, with the endpoint's own error, when every try fails", async function () {
+      honestBuy();
+      let error: unknown;
+      try {
+        await reconcile({ rpcUrls: ["http://127.0.0.1:1"], covenantAddress: COV, fromBlock: 1, chunkSize: 50, rpcRounds: 2, retryDelayMs: 5 });
+      } catch (e) {
+        error = e;
+      }
+      expect(String(error)).to.match(/all RPCs failed/);
+    });
+
     it("says so when no second endpoint can complete the scan, rather than passing quietly", async function () {
       honestBuy();
-      const noSecond = await reconcileCrossChecked({ rpcUrls: [url, "http://127.0.0.1:1"], covenantAddress: COV, fromBlock: 1, chunkSize: 50 });
+      const noSecond = await reconcileCrossChecked({ rpcUrls: [url, "http://127.0.0.1:1"], covenantAddress: COV, fromBlock: 1, chunkSize: 50, rpcRounds: 1 });
       expect(noSecond.violations).to.deep.equal([]);
       expect(noSecond.notices.map((n) => n.kind)).to.deep.equal(["CROSS_CHECK_UNAVAILABLE"]);
       const single = await reconcileCrossChecked({ rpcUrls: [url], covenantAddress: COV, fromBlock: 1, chunkSize: 50 });
