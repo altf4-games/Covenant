@@ -94,7 +94,7 @@ Deployed on 2026-09-30 in block 124,928,073 ([tx `0x7c4e…0b56`](https://bscsca
 | 4 | Buy $0.10 with a minimum output 5% under the quote | Denied, `SlippageTooLoose` |
 | 5 | Sell 0.001 NVDAB | Allowed, swapped, settled |
 
-That is five decisions, not the thirty I planned. A buy cycle cost the wallet 0.00029 BNB in gas and a sell cycle 0.00046, three to four times my estimate, and I stopped when it couldn't pay for another.
+That is five decisions, and they cover every kind of outcome: an allowed buy and sell, two different denials, and one real violation. A buy cycle cost the wallet 0.00029 BNB in gas and a sell cycle 0.00046, three to four times my estimate, and with a $2 budget I stopped when it couldn't pay for another.
 
 `verify.ts` on this history reports two trades matched and one violation, and I left it in. My first driver looked up the swap by the `orderId` that `market-order swap` returns, but `market-order list` never found it, so the driver assumed the swap hadn't happened and cancelled decision #1. The swap had filled. A cancelled decision can't be settled, so that sell is an `UNMATCHED_TRADE` for good. The ledger did its job; the trade was mine.
 
