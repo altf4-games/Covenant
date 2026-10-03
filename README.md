@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="frontend/public/logo.png" width="160" alt="Covenant logo: a pixel-art gold shield with a ledger page and a green check" />
+</p>
+
 # Covenant
 
 **An on-chain decision ledger for an AI agent that trades tokenized stocks.**
