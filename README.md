@@ -16,8 +16,6 @@ Covenant never touches the money. What it guarantees is that no trade happens un
 
 Built for the BNB Hack: Tokenized Stocks Edition (16 Sep to 11 Oct 2026).
 
-**Demo video:** [youtu.be/pzDcK0a-rHA](https://youtu.be/pzDcK0a-rHA). **Slide deck:** [`docs/covenant-deck.pptx`](docs/covenant-deck.pptx).
-
 <p align="center">
   <img src="docs/screenshots/how-it-works.png" width="49%" alt="How it works: the agent, shops, and rule battles explained" />
   <img src="docs/screenshots/trade-blocked.png" width="49%" alt="A denied trade: TRADE BLOCKED, your money is safe" />
