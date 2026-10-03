@@ -26,3 +26,5 @@
 /data/off-hours-log.test.jsonl
 .vercel
 .env.local
+
+.DS_Store
